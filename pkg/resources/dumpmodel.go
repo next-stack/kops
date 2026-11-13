@@ -18,10 +18,16 @@ package resources
 
 // Instance is the type for an instance in a dump
 type Instance struct {
-	Name            string   `json:"name,omitempty"`
-	PublicAddresses []string `json:"publicAddresses,omitempty"`
-	Roles           []string `json:"roles,omitempty"`
-	SSHUser         string   `json:"sshUser,omitempty"`
+	Name             string   `json:"name,omitempty"`
+	PublicAddresses  []string `json:"publicAddresses,omitempty"`
+	PrivateAddresses []string `json:"privateAddresses,omitempty"`
+	Roles            []string `json:"roles,omitempty"`
+	SSHUser          string   `json:"sshUser,omitempty"`
+}
+
+type LoadBalancer struct {
+	Name    string `json:"name,omitempty"`
+	DNSName string `json:"dnsName,omitempty"`
 }
 
 // Subnet is the type for an subnetwork in a dump
@@ -37,8 +43,9 @@ type VPC struct {
 
 // Dump is the type for a dump result
 type Dump struct {
-	Resources []interface{} `json:"resources,omitempty"`
-	Instances []*Instance   `json:"instances,omitempty"`
-	Subnets   []*Subnet     `json:"subnets,omitempty"`
-	VPC       *VPC          `json:"vpc,omitempty"`
+	Resources     []interface{}   `json:"resources,omitempty"`
+	Instances     []*Instance     `json:"instances,omitempty"`
+	LoadBalancers []*LoadBalancer `json:"loadBalancers,omitempty"`
+	Subnets       []*Subnet       `json:"subnets,omitempty"`
+	VPC           *VPC            `json:"vpc,omitempty"`
 }

@@ -19,7 +19,7 @@ package openstacktasks
 import (
 	"fmt"
 
-	"github.com/gophercloud/gophercloud/openstack/networking/v2/networks"
+	"github.com/gophercloud/gophercloud/v2/openstack/networking/v2/networks"
 	"k8s.io/klog/v2"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/openstack"
@@ -34,7 +34,7 @@ type Network struct {
 	AvailabilityZoneHints []*string
 }
 
-var _ fi.CompareWithID = &Network{}
+var _ fi.CompareWithID = (*Network)(nil)
 
 func (n *Network) CompareWithID() *string {
 	return n.ID
@@ -42,29 +42,29 @@ func (n *Network) CompareWithID() *string {
 
 func NewNetworkTaskFromCloud(cloud openstack.OpenstackCloud, lifecycle fi.Lifecycle, network *networks.Network, networkName *string) (*Network, error) {
 	tag := ""
-	if networkName != nil && fi.ArrayContains(network.Tags, fi.StringValue(networkName)) {
-		tag = fi.StringValue(networkName)
+	if networkName != nil && fi.ArrayContains(network.Tags, fi.ValueOf(networkName)) {
+		tag = fi.ValueOf(networkName)
 	}
 
 	task := &Network{
-		ID:                    fi.String(network.ID),
-		Name:                  fi.String(network.Name),
+		ID:                    new(network.ID),
+		Name:                  new(network.Name),
 		Lifecycle:             lifecycle,
-		Tag:                   fi.String(tag),
+		Tag:                   new(tag),
 		AvailabilityZoneHints: fi.StringSlice(network.AvailabilityZoneHints),
 	}
 	return task, nil
 }
 
-func (n *Network) Find(context *fi.Context) (*Network, error) {
+func (n *Network) Find(context *fi.CloudupContext) (*Network, error) {
 	if n.Name == nil && n.ID == nil {
 		return nil, nil
 	}
 
-	cloud := context.Cloud.(openstack.OpenstackCloud)
+	cloud := context.T.Cloud.(openstack.OpenstackCloud)
 	opt := networks.ListOpts{
-		ID:   fi.StringValue(n.ID),
-		Name: fi.StringValue(n.Name),
+		ID:   fi.ValueOf(n.ID),
+		Name: fi.ValueOf(n.Name),
 	}
 	ns, err := cloud.ListNetworks(opt)
 	if err != nil {
@@ -73,7 +73,7 @@ func (n *Network) Find(context *fi.Context) (*Network, error) {
 	if ns == nil {
 		return nil, nil
 	} else if len(ns) != 1 {
-		return nil, fmt.Errorf("found multiple networks with name: %s", fi.StringValue(n.Name))
+		return nil, fmt.Errorf("found multiple networks with name: %s", fi.ValueOf(n.Name))
 	}
 	v := ns[0]
 	actual, err := NewNetworkTaskFromCloud(cloud, n.Lifecycle, &v, n.Tag)
@@ -84,8 +84,8 @@ func (n *Network) Find(context *fi.Context) (*Network, error) {
 	return actual, nil
 }
 
-func (c *Network) Run(context *fi.Context) error {
-	return fi.DefaultDeltaRunMethod(c, context)
+func (c *Network) Run(context *fi.CloudupContext) error {
+	return fi.CloudupDefaultDeltaRunMethod(c, context)
 }
 
 func (_ *Network) CheckChanges(a, e, changes *Network) error {
@@ -116,11 +116,11 @@ func (_ *Network) ShouldCreate(a, e, changes *Network) (bool, error) {
 
 func (_ *Network) RenderOpenstack(t *openstack.OpenstackAPITarget, a, e, changes *Network) error {
 	if a == nil {
-		klog.V(2).Infof("Creating Network with name:%q", fi.StringValue(e.Name))
+		klog.V(2).Infof("Creating Network with name:%q", fi.ValueOf(e.Name))
 
 		opt := networks.CreateOpts{
-			Name:                  fi.StringValue(e.Name),
-			AdminStateUp:          fi.Bool(true),
+			Name:                  fi.ValueOf(e.Name),
+			AdminStateUp:          new(true),
 			AvailabilityZoneHints: fi.StringSliceValue(e.AvailabilityZoneHints),
 		}
 
@@ -129,21 +129,21 @@ func (_ *Network) RenderOpenstack(t *openstack.OpenstackAPITarget, a, e, changes
 			return fmt.Errorf("Error creating network: %v", err)
 		}
 
-		err = t.Cloud.AppendTag(openstack.ResourceTypeNetwork, v.ID, fi.StringValue(e.Tag))
+		err = t.Cloud.AppendTag(openstack.ResourceTypeNetwork, v.ID, fi.ValueOf(e.Tag))
 		if err != nil {
 			return fmt.Errorf("Error appending tag to network: %v", err)
 		}
 
-		e.ID = fi.String(v.ID)
+		e.ID = new(v.ID)
 		klog.V(2).Infof("Creating a new Openstack network, id=%s", v.ID)
 		return nil
 	} else {
-		err := t.Cloud.AppendTag(openstack.ResourceTypeNetwork, fi.StringValue(a.ID), fi.StringValue(changes.Tag))
+		err := t.Cloud.AppendTag(openstack.ResourceTypeNetwork, fi.ValueOf(a.ID), fi.ValueOf(changes.Tag))
 		if err != nil {
 			return fmt.Errorf("Error appending tag to network: %v", err)
 		}
 	}
 	e.ID = a.ID
-	klog.V(2).Infof("Using an existing Openstack network, id=%s", fi.StringValue(e.ID))
+	klog.V(2).Infof("Using an existing Openstack network, id=%s", fi.ValueOf(e.ID))
 	return nil
 }

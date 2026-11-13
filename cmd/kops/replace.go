@@ -30,7 +30,6 @@ import (
 	"k8s.io/kops/pkg/kopscodecs"
 	"k8s.io/kops/upup/pkg/fi/cloudup"
 	"k8s.io/kops/util/pkg/text"
-	"k8s.io/kops/util/pkg/vfs"
 	"k8s.io/kubectl/pkg/util/i18n"
 	"k8s.io/kubectl/pkg/util/templates"
 )
@@ -73,7 +72,7 @@ func NewCmdReplace(f *util.Factory, out io.Writer) *cobra.Command {
 		Args:              cobra.NoArgs,
 		ValidArgsFunction: cobra.NoFileCompletions,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return RunReplace(context.TODO(), f, out, options)
+			return RunReplace(cmd.Context(), f, out, options)
 		},
 	}
 	cmd.Flags().StringSliceVarP(&options.Filenames, "filename", "f", options.Filenames, "A list of one or more files separated by a comma.")
@@ -85,10 +84,12 @@ func NewCmdReplace(f *util.Factory, out io.Writer) *cobra.Command {
 
 // RunReplace processes the replace command
 func RunReplace(ctx context.Context, f *util.Factory, out io.Writer, c *ReplaceOptions) error {
-	clientset, err := f.Clientset()
+	clientset, err := f.KopsClient()
 	if err != nil {
 		return err
 	}
+
+	vfsContext := f.VFSContext()
 
 	for _, f := range c.Filenames {
 		var contents []byte
@@ -98,7 +99,7 @@ func RunReplace(ctx context.Context, f *util.Factory, out io.Writer, c *ReplaceO
 				return err
 			}
 		} else {
-			contents, err = vfs.Context.ReadFile(f)
+			contents, err = vfsContext.ReadFile(f)
 			if err != nil {
 				return fmt.Errorf("error reading file %q: %v", f, err)
 			}
@@ -138,6 +139,12 @@ func RunReplace(ctx context.Context, f *util.Factory, out io.Writer, c *ReplaceO
 						if !c.Force {
 							return fmt.Errorf("cluster %v does not exist (try adding --force flag)", clusterName)
 						}
+
+						err = cloudup.PerformAssignments(v, vfsContext, cloud)
+						if err != nil {
+							return fmt.Errorf("error populating configuration: %w", err)
+						}
+
 						_, err = clientset.CreateCluster(ctx, v)
 						if err != nil {
 							return fmt.Errorf("error creating cluster: %v", err)
@@ -207,7 +214,7 @@ func RunReplace(ctx context.Context, f *util.Factory, out io.Writer, c *ReplaceO
 				}
 
 				sshKeyArr := []byte(v.Spec.PublicKey)
-				err = sshCredentialStore.AddSSHPublicKey(sshKeyArr)
+				err = sshCredentialStore.AddSSHPublicKey(ctx, sshKeyArr)
 				if err != nil {
 					return fmt.Errorf("error replacing SSHCredential: %v", err)
 				}

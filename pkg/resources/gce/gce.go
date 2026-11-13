@@ -23,10 +23,10 @@ import (
 
 	compute "google.golang.org/api/compute/v1"
 	clouddns "google.golang.org/api/dns/v1"
-	"k8s.io/apimachinery/pkg/util/sets"
+	"google.golang.org/api/iam/v1"
 	"k8s.io/klog/v2"
-	"k8s.io/kops/pkg/dns"
 	"k8s.io/kops/pkg/resources"
+	"k8s.io/kops/pkg/truncate"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/gce"
 )
@@ -41,23 +41,31 @@ const (
 	typeTargetPool           = "TargetPool"
 	typeFirewallRule         = "FirewallRule"
 	typeForwardingRule       = "ForwardingRule"
+	typeHTTPHealthcheck      = "HTTP HealthCheck"
+	typeHealthcheck          = "HealthCheck"
 	typeAddress              = "Address"
 	typeRoute                = "Route"
+	typeNetwork              = "Network"
 	typeSubnet               = "Subnet"
 	typeRouter               = "Router"
 	typeDNSRecord            = "DNSRecord"
+	typeServiceAccount       = "ServiceAccount"
+	typeBackendService       = "BackendService"
 )
 
 // Maximum number of `-` separated tokens in a name
 // Example: nodeport-external-to-node-ipv6
 const maxPrefixTokens = 5
 
-func ListResourcesGCE(gceCloud gce.GCECloud, clusterName string, region string) (map[string]*resources.Resource, error) {
-	if region == "" {
-		region = gceCloud.Region()
-	}
+// Maximum length of a GCE route name
+const maxGCERouteNameLength = 63
 
-	resources := make(map[string]*resources.Resource)
+func ListResourcesGCE(gceCloud gce.GCECloud, clusterInfo resources.ClusterInfo) (map[string]*resources.Resource, error) {
+	clusterName := clusterInfo.Name
+
+	ctx := context.TODO()
+	region := gceCloud.Region()
+	allResources := make(map[string]*resources.Resource)
 
 	d := &clusterDiscoveryGCE{
 		cloud:       gceCloud,
@@ -67,7 +75,7 @@ func ListResourcesGCE(gceCloud gce.GCECloud, clusterName string, region string) 
 
 	{
 		// TODO: Only zones in api.Cluster object, if we have one?
-		gceZones, err := d.gceCloud.Compute().Zones().List(context.Background(), d.gceCloud.Project())
+		gceZones, err := d.gceCloud.Compute().Zones().List(ctx, d.gceCloud.Project())
 		if err != nil {
 			return nil, fmt.Errorf("error listing zones: %v", err)
 		}
@@ -94,41 +102,38 @@ func ListResourcesGCE(gceCloud gce.GCECloud, clusterName string, region string) 
 		d.listForwardingRules,
 		d.listFirewallRules,
 		d.listGCEDisks,
-		d.listGCEDNSZone,
-		// TODO: Find routes via instances (via instance groups)
 		d.listAddresses,
 		d.listSubnets,
 		d.listRouters,
+		d.listNetworks,
+		d.listServiceAccounts,
+		d.listBackendServices,
+		d.listHealthchecks,
+		// Note: Order matters here..this is last because it depends on other resources to be listed.
+		func() ([]*resources.Resource, error) {
+			return d.listRoutes(ctx, allResources)
+		},
 	}
+	if clusterInfo.PublishesDNSRecords() {
+		listFunctions = append(listFunctions, d.listGCEDNSZone)
+	}
+
 	for _, fn := range listFunctions {
 		resourceTrackers, err := fn()
 		if err != nil {
 			return nil, err
 		}
 		for _, t := range resourceTrackers {
-			resources[t.Type+":"+t.ID] = t
+			allResources[t.Type+":"+t.ID] = t
 		}
 	}
 
-	// We try to clean up orphaned routes.
-	// Technically we still have a race condition here - until the master(s) are terminated, they will keep
-	// creating routes.  Another option might be to have a post-destroy cleanup, and only remove routes with no target.
-	{
-		resourceTrackers, err := d.listRoutes(resources)
-		if err != nil {
-			return nil, err
-		}
-		for _, t := range resourceTrackers {
-			resources[t.Type+":"+t.ID] = t
-		}
-	}
-
-	for k, t := range resources {
+	for k, t := range allResources {
 		if t.Done {
-			delete(resources, k)
+			delete(allResources, k)
 		}
 	}
-	return resources, nil
+	return allResources, nil
 }
 
 type clusterDiscoveryGCE struct {
@@ -282,7 +287,7 @@ func (d *clusterDiscoveryGCE) listManagedInstances(igm *compute.InstanceGroupMan
 func (d *clusterDiscoveryGCE) findGCEDisks() ([]*compute.Disk, error) {
 	c := d.gceCloud
 
-	clusterTag := gce.SafeClusterName(d.clusterName)
+	clusterLabel := gce.LabelForCluster(d.clusterName)
 
 	var matches []*compute.Disk
 
@@ -299,8 +304,8 @@ func (d *clusterDiscoveryGCE) findGCEDisks() ([]*compute.Disk, error) {
 		for _, d := range list.Disks {
 			match := false
 			for k, v := range d.Labels {
-				if k == gce.GceLabelNameKubernetesCluster {
-					if v == clusterTag {
+				if k == clusterLabel.Key {
+					if v == clusterLabel.Value {
 						match = true
 					} else {
 						match = false
@@ -360,10 +365,10 @@ func deleteGCEDisk(cloud fi.Cloud, r *resources.Resource) error {
 	op, err := c.Compute().Disks().Delete(u.Project, u.Zone, u.Name)
 	if err != nil {
 		if gce.IsNotFound(err) {
-			klog.Infof("disk not found, assuming deleted: %q", t.SelfLink)
+			klog.Infof("Disk not found, assuming deleted: %q", t.SelfLink)
 			return nil
 		}
-		return fmt.Errorf("error deleting disk %s: %v", t.SelfLink, err)
+		return fmt.Errorf("error deleting Disk %s: %v", t.SelfLink, err)
 	}
 
 	return c.WaitForOp(op)
@@ -396,6 +401,25 @@ func (d *clusterDiscoveryGCE) listTargetPools() ([]*resources.Resource, error) {
 
 		klog.V(4).Infof("Found resource: %s", tp.SelfLink)
 		resourceTrackers = append(resourceTrackers, resourceTracker)
+
+		for _, healthCheckLink := range tp.HealthChecks {
+			healthCheckName := gce.LastComponent(healthCheckLink)
+			hc, err := c.Compute().HTTPHealthChecks().Get(c.Project(), healthCheckName)
+			if err != nil {
+				return nil, fmt.Errorf("error getting HTTPHealthCheck %q: %w", healthCheckName, err)
+			}
+
+			healthCheckResource := &resources.Resource{
+				Name:    hc.Name,
+				ID:      hc.Name,
+				Type:    typeHTTPHealthcheck,
+				Deleter: deleteHTTPHealthCheck,
+				Obj:     hc,
+			}
+			healthCheckResource.Blocked = append(healthCheckResource.Blocked, resourceTracker.Type+":"+resourceTracker.ID)
+			resourceTrackers = append(resourceTrackers, healthCheckResource)
+		}
+
 	}
 
 	return resourceTrackers, nil
@@ -456,6 +480,10 @@ func (d *clusterDiscoveryGCE) listForwardingRules() ([]*resources.Resource, erro
 			resourceTracker.Blocks = append(resourceTracker.Blocks, typeAddress+":"+gce.LastComponent(fr.IPAddress))
 		}
 
+		if fr.BackendService != "" {
+			resourceTracker.Blocks = append(resourceTracker.Blocks, typeBackendService+":"+gce.LastComponent(fr.BackendService))
+		}
+
 		klog.V(4).Infof("Found resource: %s", fr.SelfLink)
 		resourceTrackers = append(resourceTrackers, resourceTracker)
 	}
@@ -464,6 +492,8 @@ func (d *clusterDiscoveryGCE) listForwardingRules() ([]*resources.Resource, erro
 }
 
 func deleteForwardingRule(cloud fi.Cloud, r *resources.Resource) error {
+	ctx := context.TODO()
+
 	c := cloud.(gce.GCECloud)
 	t := r.Obj.(*compute.ForwardingRule)
 
@@ -473,7 +503,7 @@ func deleteForwardingRule(cloud fi.Cloud, r *resources.Resource) error {
 		return err
 	}
 
-	op, err := c.Compute().ForwardingRules().Delete(u.Project, u.Region, u.Name)
+	op, err := c.Compute().ForwardingRules().Delete(ctx, u.Project, u.Region, u.Name)
 	if err != nil {
 		if gce.IsNotFound(err) {
 			klog.Infof("ForwardingRule not found, assuming deleted: %q", t.SelfLink)
@@ -493,40 +523,184 @@ func (d *clusterDiscoveryGCE) listFirewallRules() ([]*resources.Resource, error)
 
 	ctx := context.Background()
 
-	frs, err := c.Compute().Firewalls().List(ctx, c.Project())
+	firewallRules, err := c.Compute().Firewalls().List(ctx, c.Project())
 	if err != nil {
 		return nil, fmt.Errorf("error listing FirewallRules: %v", err)
 	}
 
-	for _, fr := range frs {
-		if !d.matchesClusterNameMultipart(fr.Name, maxPrefixTokens) {
+nextFirewallRule:
+	for _, firewallRule := range firewallRules {
+		if !d.matchesClusterNameMultipart(firewallRule.Name, maxPrefixTokens) && !strings.HasPrefix(firewallRule.Name, "k8s-") {
 			continue
 		}
 
-		foundMatchingTarget := false
+		// TODO: Check network?  (or other fields?)  No label support currently.
+
+		// We consider only firewall rules that target our cluster tags, which include the cluster name or hash
 		tagPrefix := gce.SafeClusterName(d.clusterName) + "-"
-		for _, target := range fr.TargetTags {
-			if strings.HasPrefix(target, tagPrefix) {
-				foundMatchingTarget = true
+		clusterNameHash := truncate.HashString(gce.SafeClusterName(d.clusterName), 6)
+		if len(firewallRule.TargetTags) != 0 {
+			tagMatchCount := 0
+			for _, target := range firewallRule.TargetTags {
+				if strings.HasPrefix(target, tagPrefix) || strings.Contains(target, clusterNameHash) {
+					tagMatchCount++
+				}
+			}
+			if len(firewallRule.TargetTags) != tagMatchCount {
+				continue nextFirewallRule
 			}
 		}
-		if !foundMatchingTarget {
-			break
+		// We don't have any rules that match only on source tags, but if we did we could check them here
+		if len(firewallRule.TargetTags) == 0 {
+			continue nextFirewallRule
 		}
 
-		resourceTracker := &resources.Resource{
-			Name:    fr.Name,
-			ID:      fr.Name,
+		firewallRuleResource := &resources.Resource{
+			Name:    firewallRule.Name,
+			ID:      firewallRule.Name,
 			Type:    typeFirewallRule,
 			Deleter: deleteFirewallRule,
-			Obj:     fr,
+			Obj:     firewallRule,
+		}
+		firewallRuleResource.Blocks = append(firewallRuleResource.Blocks, typeNetwork+":"+gce.LastComponent(firewallRule.Network))
+
+		if d.matchesClusterNameMultipart(firewallRule.Name, maxPrefixTokens) {
+			klog.V(4).Infof("Found resource: %s", firewallRule.SelfLink)
+			resourceTrackers = append(resourceTrackers, firewallRuleResource)
 		}
 
-		klog.V(4).Infof("Found resource: %s", fr.SelfLink)
-		resourceTrackers = append(resourceTrackers, resourceTracker)
+		// find the objects if this is a Kubernetes LoadBalancer
+		if strings.HasPrefix(firewallRule.Name, "k8s-fw-") {
+			// We build a list of resources if this is a k8s firewall rule,
+			// but we only add them once all the checks are complete
+			var k8sResources []*resources.Resource
+
+			k8sResources = append(k8sResources, firewallRuleResource)
+
+			// We lookup the forwarding rule by name, but we then validate that it points to one of our resources
+			forwardingRuleName := strings.TrimPrefix(firewallRule.Name, "k8s-fw-")
+			forwardingRule, err := c.Compute().ForwardingRules().Get(ctx, c.Project(), c.Region(), forwardingRuleName)
+			if err != nil {
+				if gce.IsNotFound(err) {
+					// We looked it up by name, so an error isn't unlikely
+					klog.Warningf("could not find forwarding rule %q, assuming firewallRule %q is not a k8s rule", forwardingRuleName, firewallRule.Name)
+					continue nextFirewallRule
+				}
+				return nil, fmt.Errorf("error getting ForwardingRule %q: %w", forwardingRuleName, err)
+			}
+
+			forwardingRuleResource := &resources.Resource{
+				Name:    forwardingRule.Name,
+				ID:      forwardingRule.Name,
+				Type:    typeForwardingRule,
+				Deleter: deleteForwardingRule,
+				Obj:     forwardingRule,
+			}
+			if forwardingRule.Target != "" {
+				forwardingRuleResource.Blocks = append(forwardingRuleResource.Blocks, typeTargetPool+":"+gce.LastComponent(forwardingRule.Target))
+			}
+			k8sResources = append(k8sResources, forwardingRuleResource)
+
+			// TODO: Can we get k8s to set labels on the ForwardingRule?
+
+			// TODO: Check description?  It looks like e.g. description: '{"kubernetes.io/service-name":"kube-system/guestbook"}'
+
+			if forwardingRule.Target == "" {
+				klog.Warningf("forwarding rule %q did not have target, assuming firewallRule %q is not a k8s rule", forwardingRuleName, firewallRule.Name)
+				continue nextFirewallRule
+			}
+
+			targetPoolName := gce.LastComponent(forwardingRule.Target)
+			targetPool, err := c.Compute().TargetPools().Get(c.Project(), c.Region(), targetPoolName)
+			if err != nil {
+				return nil, fmt.Errorf("error getting TargetPool %q: %w", targetPoolName, err)
+			}
+
+			targetPoolResource := &resources.Resource{
+				Name:    targetPool.Name,
+				ID:      targetPool.Name,
+				Type:    typeTargetPool,
+				Deleter: deleteTargetPool,
+				Obj:     targetPool,
+			}
+			k8sResources = append(k8sResources, targetPoolResource)
+
+			// TODO: Check description? (looks like description: '{"kubernetes.io/service-name":"k8s-dbb09d49d9780e7e-node"}' )
+
+			// TODO: Check instances?
+
+			for _, healthCheckLink := range targetPool.HealthChecks {
+				// l4 level healthchecks
+
+				healthCheckName := gce.LastComponent(healthCheckLink)
+				// The health check is named k8s-<clusterid>-node when it is the health check shared
+				// by all services, but is named for the load balancer itself when the service sets
+				// externalTrafficPolicy: Local.
+				if (!strings.HasPrefix(healthCheckName, "k8s-") && healthCheckName != forwardingRuleName) || !strings.Contains(healthCheckLink, "/httpHealthChecks/") {
+					klog.Warningf("found non-k8s healthcheck %q in targetPool %q, assuming firewallRule %q is not a k8s rule", healthCheckLink, targetPoolName, firewallRule.Name)
+					continue nextFirewallRule
+				}
+
+				hc, err := c.Compute().HTTPHealthChecks().Get(c.Project(), healthCheckName)
+				if err != nil {
+					return nil, fmt.Errorf("error getting HTTPHealthCheck %q: %w", healthCheckName, err)
+				}
+
+				// TODO: Check description? (looks like description: '{"kubernetes.io/service-name":"k8s-dbb09d49d9780e7e-node"}' )
+
+				healthCheckResource := &resources.Resource{
+					Name:    hc.Name,
+					ID:      hc.Name,
+					Type:    typeHTTPHealthcheck,
+					Deleter: deleteHTTPHealthCheck,
+					Obj:     hc,
+				}
+				healthCheckResource.Blocked = append(healthCheckResource.Blocked, targetPoolResource.Type+":"+targetPoolResource.ID)
+
+				k8sResources = append(k8sResources, healthCheckResource)
+
+			}
+
+			// We now have confidence that this is a k8s LoadBalancer; add the resources
+			resourceTrackers = append(resourceTrackers, k8sResources...)
+		}
+
+		// find the objects if this is a Kubernetes health check.  The rule is named
+		// k8s-<clusterid>-node-http-hc for the health check shared by all services, and
+		// k8s-<loadbalancer>-http-hc for a service with externalTrafficPolicy: Local.
+		if strings.HasPrefix(firewallRule.Name, "k8s-") && strings.HasSuffix(firewallRule.Name, "-http-hc") {
+			// TODO: Check port matches http health check (always 10256?)
+			// TODO: Check description - looks like '{"kubernetes.io/cluster-id":"cb2e931dec561053"}'
+
+			// We already know the target tags match
+			resourceTrackers = append(resourceTrackers, firewallRuleResource)
+		}
 	}
 
 	return resourceTrackers, nil
+}
+
+// deleteHTTPHealthCheck is the helper function to delete a Resource for a HTTP health check object
+func deleteHTTPHealthCheck(cloud fi.Cloud, r *resources.Resource) error {
+	c := cloud.(gce.GCECloud)
+	t := r.Obj.(*compute.HttpHealthCheck)
+
+	klog.V(2).Infof("Deleting GCE HTTP HealthCheck %s", t.SelfLink)
+	u, err := gce.ParseGoogleCloudURL(t.SelfLink)
+	if err != nil {
+		return err
+	}
+
+	op, err := c.Compute().HTTPHealthChecks().Delete(u.Project, u.Name)
+	if err != nil {
+		if gce.IsNotFound(err) {
+			klog.Infof("HTTP HealthCheck not found, assuming deleted: %q", t.SelfLink)
+			return nil
+		}
+		return fmt.Errorf("error deleting HTTP HealthCheck %s: %v", t.SelfLink, err)
+	}
+
+	return c.WaitForOp(op)
 }
 
 // deleteFirewallRule is the helper function to delete a Resource for a Firewall object
@@ -552,29 +726,29 @@ func deleteFirewallRule(cloud fi.Cloud, r *resources.Resource) error {
 	return c.WaitForOp(op)
 }
 
-func (d *clusterDiscoveryGCE) listRoutes(resourceMap map[string]*resources.Resource) ([]*resources.Resource, error) {
+func (d *clusterDiscoveryGCE) listRoutes(ctx context.Context, resourceMap map[string]*resources.Resource) ([]*resources.Resource, error) {
 	c := d.gceCloud
 
 	var resourceTrackers []*resources.Resource
 
-	instances := sets.NewString()
+	instancesToDelete := make(map[string]*resources.Resource)
+	migsToDelete := make(map[string]*resources.Resource)
 	for _, resource := range resourceMap {
-		if resource.Type == typeInstance {
-			instances.Insert(resource.ID)
+		switch resource.Type {
+		case typeInstance:
+			instancesToDelete[resource.ID] = resource
+		case typeInstanceGroupManager:
+			migsToDelete[resource.ID] = resource
 		}
 	}
-
-	prefix := gce.SafeClusterName(d.clusterName) + "-"
-
-	ctx := context.Background()
 
 	// TODO: Push-down prefix?
 	routes, err := c.Compute().Routes().List(ctx, c.Project())
 	if err != nil {
-		return nil, fmt.Errorf("error listing Routes: %v", err)
+		return nil, fmt.Errorf("error listing Routes: %w", err)
 	}
 	for _, r := range routes {
-		if !strings.HasPrefix(r.Name, prefix) {
+		if !d.matchesClusterNameWithUUID(r.Name, maxGCERouteNameLength) {
 			continue
 		}
 		remove := false
@@ -582,6 +756,9 @@ func (d *clusterDiscoveryGCE) listRoutes(resourceMap map[string]*resources.Resou
 			switch w.Code {
 			case "NEXT_HOP_INSTANCE_NOT_FOUND":
 				remove = true
+			case "NEXT_HOP_NOT_RUNNING":
+				// It might not be running, but it probably exists.
+				remove = false
 			default:
 				klog.Infof("Unknown warning on route %q: %q", r.Name, w.Code)
 			}
@@ -593,7 +770,7 @@ func (d *clusterDiscoveryGCE) listRoutes(resourceMap map[string]*resources.Resou
 				klog.Warningf("error parsing URL for NextHopInstance=%q", r.NextHopInstance)
 			}
 
-			if instances.Has(u.Zone + "/" + u.Name) {
+			if instancesToDelete[u.Zone+"/"+u.Name] != nil {
 				remove = true
 			}
 		}
@@ -607,10 +784,15 @@ func (d *clusterDiscoveryGCE) listRoutes(resourceMap map[string]*resources.Resou
 				Obj:     r,
 			}
 
-			// We don't need to block
-			//if r.NextHopInstance != "" {
-			//	resourceTracker.Blocked = append(resourceTracker.Blocks, typeInstance+":"+gce.LastComponent(r.NextHopInstance))
-			//}
+			// To avoid race conditions where the control-plane re-adds the routes, we delete routes
+			// only after we have deleted all the instances, and the managed instance groups that
+			// would otherwise recreate a control-plane instance.
+			for _, instance := range instancesToDelete {
+				resourceTracker.Blocked = append(resourceTracker.Blocked, typeInstance+":"+instance.ID)
+			}
+			for _, mig := range migsToDelete {
+				resourceTracker.Blocked = append(resourceTracker.Blocked, typeInstanceGroupManager+":"+mig.ID)
+			}
 
 			klog.V(4).Infof("Found resource: %s", r.SelfLink)
 			resourceTrackers = append(resourceTrackers, resourceTracker)
@@ -739,7 +921,10 @@ func (d *clusterDiscoveryGCE) listSubnets() ([]*resources.Resource, error) {
 			Type:    typeSubnet,
 			Deleter: deleteSubnet,
 			Obj:     o,
+			Dumper:  DumpSubnetwork,
 		}
+
+		resourceTracker.Blocks = append(resourceTracker.Blocks, typeNetwork+":"+gce.LastComponent(o.Network))
 
 		klog.V(4).Infof("found resource: %s", o.SelfLink)
 		resourceTrackers = append(resourceTrackers, resourceTracker)
@@ -752,7 +937,7 @@ func deleteSubnet(cloud fi.Cloud, r *resources.Resource) error {
 	c := cloud.(gce.GCECloud)
 	o := r.Obj.(*compute.Subnetwork)
 
-	klog.V(2).Infof("deleting GCE subnetwork %s", o.SelfLink)
+	klog.V(2).Infof("deleting GCE Subnetwork %s", o.SelfLink)
 	u, err := gce.ParseGoogleCloudURL(o.SelfLink)
 	if err != nil {
 		return err
@@ -761,10 +946,10 @@ func deleteSubnet(cloud fi.Cloud, r *resources.Resource) error {
 	op, err := c.Compute().Subnetworks().Delete(u.Project, u.Region, u.Name)
 	if err != nil {
 		if gce.IsNotFound(err) {
-			klog.Infof("subnetwork not found, assuming deleted: %q", o.SelfLink)
+			klog.Infof("Subnetwork not found, assuming deleted: %q", o.SelfLink)
 			return nil
 		}
-		return fmt.Errorf("error deleting subnetwork %s: %v", o.SelfLink, err)
+		return fmt.Errorf("error deleting Subnetwork %s: %v", o.SelfLink, err)
 	}
 
 	return c.WaitForOp(op)
@@ -815,10 +1000,264 @@ func deleteRouter(cloud fi.Cloud, r *resources.Resource) error {
 	op, err := c.Compute().Routers().Delete(u.Project, u.Region, u.Name)
 	if err != nil {
 		if gce.IsNotFound(err) {
-			klog.Infof("router not found, assuming deleted: %q", o.SelfLink)
+			klog.Infof("Router not found, assuming deleted: %q", o.SelfLink)
 			return nil
 		}
 		return fmt.Errorf("error deleting router %s: %v", o.SelfLink, err)
+	}
+
+	return c.WaitForOp(op)
+}
+
+func (d *clusterDiscoveryGCE) listServiceAccounts() ([]*resources.Resource, error) {
+	c := d.gceCloud
+	ctx := context.Background()
+
+	sas, err := c.IAM().ServiceAccounts().List(ctx, fmt.Sprintf("projects/%s", c.Project()))
+	if err != nil {
+		return nil, fmt.Errorf("error listing ServiceAccounts %w", err)
+	}
+	var resourceTrackers []*resources.Resource
+	for _, sa := range sas {
+		tokens := strings.Split(gce.LastComponent(sa.Name), "@")
+		if len(tokens) != 2 {
+			return nil, fmt.Errorf("Invalid service account email '%s'", gce.LastComponent(sa.Name))
+		}
+		accountID := tokens[0]
+		names := []string{gce.ControlPlane, gce.Bastion, gce.Node}
+		for _, name := range names {
+			generatedName := gce.ServiceAccountName(name, d.clusterName)
+			if generatedName == accountID {
+				resourceTracker := &resources.Resource{
+					Name:    gce.LastComponent(sa.Name),
+					ID:      sa.Name,
+					Type:    typeServiceAccount,
+					Deleter: deleteServiceAccount,
+					Obj:     sa,
+				}
+
+				klog.V(4).Infof("found resource: %s", sa.Name)
+				resourceTrackers = append(resourceTrackers, resourceTracker)
+				break
+			}
+		}
+	}
+	return resourceTrackers, nil
+}
+
+func deleteServiceAccount(cloud fi.Cloud, r *resources.Resource) error {
+	c := cloud.(gce.GCECloud)
+	o := r.Obj.(*iam.ServiceAccount)
+
+	klog.V(2).Infof("deleting GCE ServiceAccount %s", o.Name)
+	_, err := c.IAM().ServiceAccounts().Delete(o.Name)
+	if err != nil {
+		if gce.IsNotFound(err) {
+			klog.Infof("ServiceAccount not found, assuming deleted: %q", o.Name)
+			return nil
+		}
+		return fmt.Errorf("error deleting ServiceAccount %s: %v", o.Name, err)
+	}
+	return nil
+}
+
+// containsOnlyListedIGMs returns true if all the given backend service's backends
+// are contained in the provided list of IGM resources.
+func containsOnlyListedIGMs(svc *compute.BackendService, igms []*resources.Resource) bool {
+	if len(svc.Backends) == 0 {
+		return false
+	}
+
+	for _, be := range svc.Backends {
+		listed := false
+		for _, igm := range igms {
+			// NOTE: this should be sufficient / strict enough since IGM names include the cluster
+			// that they are part of, but revisit if naming conventions change.
+			if strings.HasSuffix(be.Group, "/"+igm.Name) {
+				listed = true
+				break
+			}
+		}
+
+		if !listed {
+			return false
+		}
+	}
+	return true
+}
+
+func (d *clusterDiscoveryGCE) listBackendServices() ([]*resources.Resource, error) {
+	c := d.gceCloud
+
+	svcs, err := c.Compute().RegionBackendServices().List(context.Background(), c.Project(), c.Region())
+	if err != nil {
+		if gce.IsNotFound(err) {
+			klog.Infof("BackendService not found, assuming none exist in project: %q region: %q", c.Project(), c.Region())
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to list backend services: %w", err)
+	}
+	// TODO: cache, for efficiency, if needed.
+	// Find all relevant backend services by finding all the cluster's IGMs, and then
+	// listing all backend services in the project / region, then selecting
+	// the backend services which contain only the relevant IGMs.
+	igms, err := d.listInstanceGroupManagersAndInstances()
+	if err != nil {
+		return nil, err
+	}
+	var bs []*resources.Resource
+	for _, svc := range svcs {
+		if containsOnlyListedIGMs(svc, igms) {
+			resourceTracker := &resources.Resource{
+				Name: svc.Name,
+				ID:   svc.Name,
+				Type: typeBackendService,
+				Deleter: func(cloud fi.Cloud, r *resources.Resource) error {
+					op, err := c.Compute().RegionBackendServices().Delete(c.Project(), c.Region(), svc.Name)
+					if err != nil {
+						if gce.IsNotFound(err) {
+							klog.Infof("BackendService not found, assuming deleted: %q", r.Name)
+							return nil
+						}
+						return err
+					}
+					return c.WaitForOp(op)
+				},
+				Obj: svc,
+			}
+
+			for _, hc := range svc.HealthChecks {
+				resourceTracker.Blocks = append(resourceTracker.Blocks, typeHealthcheck+":"+gce.LastComponent(hc))
+			}
+
+			// GCE refuses to delete an InstanceGroupManager while a BackendService still refers to
+			// its instance group; deleting them in the other order costs a full retry interval.
+			for _, be := range svc.Backends {
+				for _, igm := range igms {
+					if igm.Type == typeInstanceGroupManager && strings.HasSuffix(be.Group, "/"+igm.Name) {
+						resourceTracker.Blocks = append(resourceTracker.Blocks, typeInstanceGroupManager+":"+igm.ID)
+					}
+				}
+			}
+
+			bs = append(bs, resourceTracker)
+		}
+	}
+
+	return bs, nil
+}
+
+func (d *clusterDiscoveryGCE) listHealthchecks() ([]*resources.Resource, error) {
+	c := d.gceCloud
+	// TODO: cache, for efficiency, if needed.
+	// Find relevant healthchecks by finding all the backend services relevant to this
+	// cluster, then selecting all the healthchecks they use.
+	backendServices, err := d.listBackendServices()
+	if err != nil {
+		return nil, err
+	}
+	hcs := make(map[string]struct{})
+	for _, bs := range backendServices {
+		bsObj, ok := bs.Obj.(*compute.BackendService)
+		if !ok {
+			return nil, fmt.Errorf("%T is not a *compute.BackendService", bs)
+		}
+		for _, hc := range bsObj.HealthChecks {
+			hcs[hc] = struct{}{}
+		}
+	}
+	var hcResources []*resources.Resource
+	for hc := range hcs {
+		hcResources = append(hcResources, &resources.Resource{
+			Name: gce.LastComponent(hc),
+			ID:   gce.LastComponent(hc),
+			Type: typeHealthcheck,
+			Deleter: func(cloud fi.Cloud, r *resources.Resource) error {
+				op, err := c.Compute().RegionHealthChecks().Delete(c.Project(), c.Region(), gce.LastComponent(hc))
+				if err != nil {
+					if gce.IsNotFound(err) {
+						klog.Infof("Healthcheck not found, assuming deleted: %q", r.Name)
+						return nil
+					}
+					return err
+				}
+				return c.WaitForOp(op)
+			},
+			Obj: hc,
+		})
+	}
+
+	return hcResources, nil
+}
+
+func (d *clusterDiscoveryGCE) listNetworks() ([]*resources.Resource, error) {
+	// Templates are very accurate because of the metadata, so use those as the sanity check
+	templates, err := d.findInstanceTemplates()
+	if err != nil {
+		return nil, err
+	}
+	networkUrls := make(map[string]bool)
+	for _, t := range templates {
+		for _, ni := range t.Properties.NetworkInterfaces {
+			if ni.Network != "" {
+				networkUrls[ni.Network] = true
+			}
+		}
+	}
+
+	c := d.gceCloud
+
+	var resourceTrackers []*resources.Resource
+
+	networks, err := c.Compute().Networks().List(c.Project())
+	if err != nil {
+		return nil, fmt.Errorf("error listing networks: %v", err)
+	}
+
+	for _, o := range networks.Items {
+		if o.Name != gce.SafeTruncatedClusterName(d.clusterName, 63) {
+			klog.V(8).Infof("skipping network with name %q", o.Name)
+			continue
+		}
+
+		if !networkUrls[o.SelfLink] {
+			klog.Warningf("skipping network %q because it didn't match any instance template", o.SelfLink)
+			continue
+		}
+
+		resourceTracker := &resources.Resource{
+			Name:    o.Name,
+			ID:      o.Name,
+			Type:    typeNetwork,
+			Deleter: deleteNetwork,
+			Obj:     o,
+			Dumper:  DumpNetwork,
+		}
+
+		klog.V(4).Infof("found resource: %s", o.SelfLink)
+		resourceTrackers = append(resourceTrackers, resourceTracker)
+	}
+
+	return resourceTrackers, nil
+}
+
+func deleteNetwork(cloud fi.Cloud, r *resources.Resource) error {
+	c := cloud.(gce.GCECloud)
+	o := r.Obj.(*compute.Network)
+
+	klog.V(2).Infof("deleting GCE network %s", o.SelfLink)
+	u, err := gce.ParseGoogleCloudURL(o.SelfLink)
+	if err != nil {
+		return err
+	}
+
+	op, err := c.Compute().Networks().Delete(u.Project, u.Name)
+	if err != nil {
+		if gce.IsNotFound(err) {
+			klog.Infof("Network not found, assuming deleted: %q", o.SelfLink)
+			return nil
+		}
+		return fmt.Errorf("error deleting network %s: %v", o.SelfLink, err)
 	}
 
 	return c.WaitForOp(op)
@@ -846,11 +1285,35 @@ func (d *clusterDiscoveryGCE) matchesClusterNameMultipart(name string, maxParts 
 		if id == "" {
 			continue
 		}
-		if name == gce.SafeObjectName(id, d.clusterName) {
+
+		safeName := gce.SafeObjectName(id, d.clusterName)
+		clusterNameHash := truncate.HashString(gce.SafeClusterName(d.clusterName), 6)
+
+		if name == safeName || strings.Contains(name, clusterNameHash) {
 			return true
 		}
 	}
 	return false
+}
+
+// matchesClusterNameWithUUID checks if the name is the clusterName with a UUID on the end.
+// This is used by GCE routes (in "classic" mode)
+func (d *clusterDiscoveryGCE) matchesClusterNameWithUUID(name string, maxLength int) bool {
+	const uuidLength = 36 // e.g. 51a343e2-c285-4e73-b933-18a6ea44c3e4
+
+	// Format is <cluster-name>-<uuid>
+	// <cluster-name> is truncated to ensure it fits into the GCE max length
+	if len(name) < uuidLength {
+		return false
+	}
+	withoutUUID := name[:len(name)-uuidLength]
+
+	clusterPrefix := gce.SafeClusterName(d.clusterName) + "-"
+	if len(clusterPrefix) > maxLength-uuidLength {
+		clusterPrefix = gce.SafeClusterName(d.clusterName)[:maxLength-uuidLength-1] + "-"
+	}
+
+	return clusterPrefix == withoutUUID
 }
 
 func (d *clusterDiscoveryGCE) clusterDNSName() string {
@@ -868,11 +1331,6 @@ func (d *clusterDiscoveryGCE) isKopsManagedDNSName(name string) bool {
 }
 
 func (d *clusterDiscoveryGCE) listGCEDNSZone() ([]*resources.Resource, error) {
-
-	if dns.IsGossipHostname(d.clusterName) {
-		return nil, nil
-	}
-
 	var resourceTrackers []*resources.Resource
 
 	managedZones, err := d.gceCloud.CloudDNS().ManagedZones().List(d.gceCloud.Project())

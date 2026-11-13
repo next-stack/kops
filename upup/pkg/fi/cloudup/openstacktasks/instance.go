@@ -17,18 +17,20 @@ limitations under the License.
 package openstacktasks
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
 
-	l3floatingip "github.com/gophercloud/gophercloud/openstack/networking/v2/extensions/layer3/floatingips"
-	"github.com/gophercloud/gophercloud/openstack/networking/v2/ports"
+	l3floatingip "github.com/gophercloud/gophercloud/v2/openstack/networking/v2/extensions/layer3/floatingips"
+	"github.com/gophercloud/gophercloud/v2/openstack/networking/v2/ports"
 
-	"github.com/gophercloud/gophercloud/openstack/compute/v2/extensions/bootfromvolume"
-	"github.com/gophercloud/gophercloud/openstack/compute/v2/extensions/keypairs"
-	"github.com/gophercloud/gophercloud/openstack/compute/v2/extensions/schedulerhints"
-	"github.com/gophercloud/gophercloud/openstack/compute/v2/servers"
+	"github.com/gophercloud/gophercloud/v2/openstack/compute/v2/attachinterfaces"
+	"github.com/gophercloud/gophercloud/v2/openstack/compute/v2/keypairs"
+	"github.com/gophercloud/gophercloud/v2/openstack/compute/v2/servers"
 	"k8s.io/klog/v2"
+	"k8s.io/kops/pkg/truncate"
+	"k8s.io/kops/pkg/wellknownservices"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/openstack"
 )
@@ -51,18 +53,33 @@ type Instance struct {
 	SecurityGroups   []string
 	FloatingIP       *FloatingIP
 	ConfigDrive      *bool
+	Status           *string
 
-	Lifecycle    fi.Lifecycle
-	ForAPIServer bool
+	Lifecycle fi.Lifecycle
+
+	// WellKnownServices indicates which services are supported by this resource.
+	// This field is internal and is not rendered to the cloud.
+	WellKnownServices []wellknownservices.WellKnownService
 }
 
-var _ fi.Task = &Instance{}
-var _ fi.HasAddress = &Instance{}
-var _ fi.HasDependencies = &Instance{}
+var (
+	_ fi.CloudupTask            = &Instance{}
+	_ fi.HasAddress             = &Instance{}
+	_ fi.CloudupHasDependencies = &Instance{}
+)
+
+// Constants for truncating Tags
+const MAX_TAG_LENGTH_OPENSTACK = 60
+
+var TRUNCATE_OPT = truncate.TruncateStringOptions{
+	MaxLength:     MAX_TAG_LENGTH_OPENSTACK,
+	AlwaysAddHash: false,
+	HashLength:    6,
+}
 
 // GetDependencies returns the dependencies of the Instance task
-func (e *Instance) GetDependencies(tasks map[string]fi.Task) []fi.Task {
-	var deps []fi.Task
+func (e *Instance) GetDependencies(tasks map[string]fi.CloudupTask) []fi.CloudupTask {
+	var deps []fi.CloudupTask
 	for _, task := range tasks {
 		if _, ok := task.(*ServerGroup); ok {
 			deps = append(deps, task)
@@ -82,59 +99,76 @@ func (e *Instance) GetDependencies(tasks map[string]fi.Task) []fi.Task {
 	return deps
 }
 
-var _ fi.CompareWithID = &Instance{}
-
-func (e *Instance) WaitForStatusActive(t *openstack.OpenstackAPITarget) error {
-	return servers.WaitForStatus(t.Cloud.ComputeClient(), *e.ID, "ACTIVE", 120)
-}
+var _ fi.CompareWithID = (*Instance)(nil)
 
 func (e *Instance) CompareWithID() *string {
 	return e.ID
 }
 
-func (e *Instance) IsForAPIServer() bool {
-	return e.ForAPIServer
+// GetWellKnownServices implements fi.HasAddress::GetWellKnownServices.
+// It indicates which services we support with this instance.
+func (e *Instance) GetWellKnownServices() []wellknownservices.WellKnownService {
+	return e.WellKnownServices
 }
 
-func (e *Instance) FindIPAddress(context *fi.Context) (*string, error) {
-	cloud := context.Cloud.(openstack.OpenstackCloud)
+func (e *Instance) FindAddresses(context *fi.CloudupContext) ([]string, error) {
+	cloud := context.T.Cloud.(openstack.OpenstackCloud)
 	if e.Port == nil {
 		return nil, nil
 	}
 
-	ports, err := cloud.GetPort(fi.StringValue(e.Port.ID))
+	ports, err := cloud.GetPort(fi.ValueOf(e.Port.ID))
 	if err != nil {
 		return nil, err
 	}
 
 	for _, port := range ports.FixedIPs {
-		return fi.String(port.IPAddress), nil
+		return []string{port.IPAddress}, nil
 	}
 
 	return nil, nil
 }
 
-func (e *Instance) Find(c *fi.Context) (*Instance, error) {
+// filterInstancePorts tries to get all ports of an instance tagged with the cluster name.
+// If no tagged ports are found it will return all ports of the instance, to not change the legacy behavior when there weren't tagged ports
+func filterInstancePorts(allPorts []ports.Port, clusterName string) []ports.Port {
+	clusterNameTag := truncate.TruncateString(fmt.Sprintf("%s=%s", openstack.TagClusterName, clusterName), TRUNCATE_OPT)
+
+	var taggedPorts []ports.Port
+
+	for _, port := range allPorts {
+		for _, tag := range port.Tags {
+			if tag == clusterNameTag {
+				taggedPorts = append(taggedPorts, port)
+				break
+			}
+		}
+	}
+
+	if len(taggedPorts) == 0 {
+		return allPorts
+	}
+
+	return taggedPorts
+}
+
+func (e *Instance) Find(c *fi.CloudupContext) (*Instance, error) {
 	if e == nil || e.Name == nil {
 		return nil, nil
 	}
-	cloud := c.Cloud.(openstack.OpenstackCloud)
-	computeClient := cloud.ComputeClient()
-	serverPage, err := servers.List(computeClient, servers.ListOpts{
-		Name: fmt.Sprintf("^%s", fi.StringValue(e.GroupName)),
-	}).AllPages()
+	cloud := c.T.Cloud.(openstack.OpenstackCloud)
+
+	serverList, err := cloud.ListInstances(servers.ListOpts{
+		Name: fmt.Sprintf("^%s", fi.ValueOf(e.GroupName)),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("error listing servers: %v", err)
-	}
-	serverList, err := servers.ExtractServers(serverPage)
-	if err != nil {
-		return nil, fmt.Errorf("error extracting server page: %v", err)
 	}
 
 	var filteredList []servers.Server
 	for _, server := range serverList {
 		val, ok := server.Metadata["k8s"]
-		if !ok || val != fi.StringValue(e.ServerGroup.ClusterName) {
+		if !ok || val != fi.ValueOf(e.ServerGroup.ClusterName) {
 			continue
 		}
 		metadataName := ""
@@ -144,7 +178,7 @@ func (e *Instance) Find(c *fi.Context) (*Instance, error) {
 		}
 		// name or metadata tag should match to instance name
 		// this is needed for backwards compatibility
-		if server.Name == fi.StringValue(e.Name) || metadataName == fi.StringValue(e.Name) {
+		if server.Name == fi.ValueOf(e.Name) || metadataName == fi.ValueOf(e.Name) {
 			filteredList = append(filteredList, server)
 		}
 	}
@@ -153,29 +187,31 @@ func (e *Instance) Find(c *fi.Context) (*Instance, error) {
 		return nil, nil
 	}
 	if len(filteredList) > 1 {
-		return nil, fmt.Errorf("Multiple servers found with name %s", fi.StringValue(e.Name))
+		return nil, fmt.Errorf("Multiple servers found with name %s", fi.ValueOf(e.Name))
 	}
 
 	server := filteredList[0]
 	actual := &Instance{
-		ID:               fi.String(server.ID),
+		ID:               new(server.ID),
 		Name:             e.Name,
-		SSHKey:           fi.String(server.KeyName),
+		SSHKey:           new(server.KeyName),
 		Lifecycle:        e.Lifecycle,
 		Metadata:         server.Metadata,
-		Role:             fi.String(server.Metadata["KopsRole"]),
+		Role:             new(server.Metadata["KopsRole"]),
 		AvailabilityZone: e.AvailabilityZone,
 		GroupName:        e.GroupName,
 		ConfigDrive:      e.ConfigDrive,
+		Status:           new(server.Status),
 	}
 
 	ports, err := cloud.ListPorts(ports.ListOpts{
 		DeviceID: server.ID,
 	})
-
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch port for instance %v: %v", server.ID, err)
 	}
+
+	ports = filterInstancePorts(ports, fi.ValueOf(e.ServerGroup.ClusterName))
 
 	if len(ports) == 1 {
 		port := ports[0]
@@ -191,7 +227,7 @@ func (e *Instance) Find(c *fi.Context) (*Instance, error) {
 
 	if e.FloatingIP != nil && e.Port != nil {
 		fips, err := cloud.ListL3FloatingIPs(l3floatingip.ListOpts{
-			PortID: fi.StringValue(e.Port.ID),
+			PortID: fi.ValueOf(e.Port.ID),
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to fetch floating ips for instance %v: %v", server.ID, err)
@@ -200,8 +236,8 @@ func (e *Instance) Find(c *fi.Context) (*Instance, error) {
 		if len(fips) == 1 {
 			fip := fips[0]
 			fipTask := &FloatingIP{
-				ID:   fi.String(fip.ID),
-				Name: fi.String(fip.Description),
+				ID:   new(fip.ID),
+				Name: new(fip.Description),
 			}
 
 			actual.FloatingIP = fipTask
@@ -212,7 +248,8 @@ func (e *Instance) Find(c *fi.Context) (*Instance, error) {
 
 	// Avoid flapping
 	e.ID = actual.ID
-	actual.ForAPIServer = e.ForAPIServer
+	e.Status = new(activeStatus)
+	actual.WellKnownServices = e.WellKnownServices
 
 	// Immutable fields
 	actual.Flavor = e.Flavor
@@ -225,8 +262,8 @@ func (e *Instance) Find(c *fi.Context) (*Instance, error) {
 	return actual, nil
 }
 
-func (e *Instance) Run(c *fi.Context) error {
-	return fi.DefaultDeltaRunMethod(e, c)
+func (e *Instance) Run(c *fi.CloudupContext) error {
+	return fi.CloudupDefaultDeltaRunMethod(e, c)
 }
 
 func (_ *Instance) CheckChanges(a, e, changes *Instance) error {
@@ -247,6 +284,9 @@ func (_ *Instance) CheckChanges(a, e, changes *Instance) error {
 
 func (_ *Instance) ShouldCreate(a, e, changes *Instance) (bool, error) {
 	if a == nil {
+		return true, nil
+	}
+	if fi.ValueOf(a.Status) == errorStatus {
 		return true, nil
 	}
 	if changes.Port != nil {
@@ -272,25 +312,31 @@ func generateInstanceName(e *Instance) (string, error) {
 		return "", err
 	}
 
-	return strings.ToLower(fmt.Sprintf("%s-%s", fi.StringValue(e.GroupName), hash[0:6])), nil
+	return strings.ToLower(fmt.Sprintf("%s-%s", fi.ValueOf(e.GroupName), hash[0:6])), nil
 }
 
 func (_ *Instance) RenderOpenstack(t *openstack.OpenstackAPITarget, a, e, changes *Instance) error {
 	cloud := t.Cloud
-	if a == nil {
+
+	if a != nil && fi.ValueOf(a.Status) == errorStatus {
+		klog.V(2).Infof("Delete previously failed server: %s\n", fi.ValueOf(a.ID))
+		cloud.DeleteInstanceWithID(fi.ValueOf(a.ID))
+	}
+
+	if a == nil || fi.ValueOf(a.Status) == errorStatus {
 		serverName, err := generateInstanceName(e)
 		if err != nil {
 			return err
 		}
 		klog.V(2).Infof("Creating Instance with name: %q", serverName)
 
-		imageName := fi.StringValue(e.Image)
+		imageName := fi.ValueOf(e.Image)
 		image, err := cloud.GetImage(imageName)
 		if err != nil {
 			return fmt.Errorf("failed to find image %v: %v", imageName, err)
 		}
 
-		flavorName := fi.StringValue(e.Flavor)
+		flavorName := fi.ValueOf(e.Flavor)
 		flavor, err := cloud.GetFlavor(flavorName)
 		if err != nil {
 			return fmt.Errorf("failed to find flavor %v: %v", flavorName, err)
@@ -302,7 +348,7 @@ func (_ *Instance) RenderOpenstack(t *openstack.OpenstackAPITarget, a, e, change
 			FlavorRef: flavor.ID,
 			Networks: []servers.Network{
 				{
-					Port: fi.StringValue(e.Port.ID),
+					Port: fi.ValueOf(e.Port.ID),
 				},
 			},
 			Metadata:       e.Metadata,
@@ -317,31 +363,24 @@ func (_ *Instance) RenderOpenstack(t *openstack.OpenstackAPITarget, a, e, change
 			opt.UserData = bytes
 		}
 		if e.AvailabilityZone != nil {
-			opt.AvailabilityZone = fi.StringValue(e.AvailabilityZone)
+			opt.AvailabilityZone = fi.ValueOf(e.AvailabilityZone)
 		}
-		keyext := keypairs.CreateOptsExt{
-			CreateOptsBuilder: opt,
-			KeyName:           openstackKeyPairName(fi.StringValue(e.SSHKey)),
-		}
-
-		sgext := schedulerhints.CreateOptsExt{
-			CreateOptsBuilder: keyext,
-			SchedulerHints: &schedulerhints.SchedulerHints{
-				Group: *e.ServerGroup.ID,
-			},
-		}
-
-		opts, err := includeBootVolumeOptions(t, e, sgext)
-		if err != nil {
+		if opt, err = includeBootVolumeOptions(t, e, opt); err != nil {
 			return err
 		}
 
-		v, err := t.Cloud.CreateInstance(opts, fi.StringValue(e.Port.ID))
+		keyext := keypairs.CreateOptsExt{
+			CreateOptsBuilder: opt,
+			KeyName:           openstackKeyPairName(fi.ValueOf(e.SSHKey)),
+		}
+
+		schedulerHints := servers.SchedulerHintOpts{Group: *e.ServerGroup.ID}
+
+		v, err := t.Cloud.CreateInstance(keyext, schedulerHints, fi.ValueOf(e.Port.ID))
 		if err != nil {
 			return fmt.Errorf("Error creating instance: %v", err)
 		}
-		e.ID = fi.String(v.ID)
-		e.ServerGroup.AddNewMember(fi.StringValue(e.ID))
+		e.ID = new(v.ID)
 
 		if e.FloatingIP != nil {
 			err = associateFloatingIP(t, e)
@@ -355,9 +394,12 @@ func (_ *Instance) RenderOpenstack(t *openstack.OpenstackAPITarget, a, e, change
 		return nil
 	}
 	if changes.Port != nil {
-		ports.Update(cloud.NetworkingClient(), fi.StringValue(changes.Port.ID), ports.UpdateOpts{
-			DeviceID: e.ID,
-		})
+		_, err := attachinterfaces.Create(context.TODO(), cloud.ComputeClient(), fi.ValueOf(e.ID), attachinterfaces.CreateOpts{
+			PortID: fi.ValueOf(changes.Port.ID),
+		}).Extract()
+		if err != nil {
+			return err
+		}
 	}
 	if changes.FloatingIP != nil {
 		err := associateFloatingIP(t, e)
@@ -371,48 +413,45 @@ func (_ *Instance) RenderOpenstack(t *openstack.OpenstackAPITarget, a, e, change
 func associateFloatingIP(t *openstack.OpenstackAPITarget, e *Instance) error {
 	client := t.Cloud.NetworkingClient()
 
-	_, err := l3floatingip.Update(client, fi.StringValue(e.FloatingIP.ID), l3floatingip.UpdateOpts{
+	_, err := l3floatingip.Update(context.TODO(), client, fi.ValueOf(e.FloatingIP.ID), l3floatingip.UpdateOpts{
 		PortID: e.Port.ID,
 	}).Extract()
-
 	if err != nil {
 		return fmt.Errorf("failed to associated floating IP to instance %s: %v", *e.Name, err)
 	}
 	return nil
 }
 
-func includeBootVolumeOptions(t *openstack.OpenstackAPITarget, e *Instance, opts servers.CreateOptsBuilder) (servers.CreateOptsBuilder, error) {
+func includeBootVolumeOptions(t *openstack.OpenstackAPITarget, e *Instance, opts servers.CreateOpts) (servers.CreateOpts, error) {
 	if !bootFromVolume(e.Metadata) {
 		return opts, nil
 	}
 
-	i, err := t.Cloud.GetImage(fi.StringValue(e.Image))
+	i, err := t.Cloud.GetImage(fi.ValueOf(e.Image))
 	if err != nil {
-		return nil, fmt.Errorf("Error getting image information: %v", err)
+		return servers.CreateOpts{}, fmt.Errorf("Error getting image information: %v", err)
 	}
 
-	bfv := bootfromvolume.CreateOptsExt{
-		CreateOptsBuilder: opts,
-		BlockDevice: []bootfromvolume.BlockDevice{{
-			BootIndex:           0,
-			DeleteOnTermination: true,
-			DestinationType:     "volume",
-			SourceType:          "image",
-			UUID:                i.ID,
-			VolumeSize:          i.MinDiskGigabytes,
-		}},
+	blockDevice := servers.BlockDevice{
+		BootIndex:           0,
+		DeleteOnTermination: true,
+		DestinationType:     "volume",
+		SourceType:          "image",
+		UUID:                i.ID,
+		VolumeSize:          i.MinDiskGigabytes,
 	}
 
 	if s, ok := e.Metadata[openstack.BOOT_VOLUME_SIZE]; ok {
 		i, err := strconv.ParseInt(s, 10, 64)
 		if err != nil {
-			return nil, fmt.Errorf("Invalid value for %v: %v", openstack.BOOT_VOLUME_SIZE, err)
+			return servers.CreateOpts{}, fmt.Errorf("Invalid value for %v: %v", openstack.BOOT_VOLUME_SIZE, err)
 		}
 
-		bfv.BlockDevice[0].VolumeSize = int(i)
+		blockDevice.VolumeSize = int(i)
 	}
 
-	return bfv, nil
+	opts.BlockDevice = []servers.BlockDevice{blockDevice}
+	return opts, nil
 }
 
 func bootFromVolume(m map[string]string) bool {

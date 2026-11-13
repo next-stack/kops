@@ -17,15 +17,23 @@ limitations under the License.
 package model
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
+	"reflect"
+	"sort"
+	"strings"
 	"testing"
+	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
+
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/apis/nodeup"
 	"k8s.io/kops/pkg/assets"
 	"k8s.io/kops/pkg/client/simple/vfsclientset"
+	"k8s.io/kops/pkg/flagbuilder"
 	"k8s.io/kops/pkg/pki"
 	"k8s.io/kops/pkg/testutils"
 	"k8s.io/kops/upup/pkg/fi"
@@ -34,67 +42,38 @@ import (
 	"k8s.io/kops/util/pkg/vfs"
 )
 
-func Test_InstanceGroupKubeletMerge(t *testing.T) {
-	var cluster = &kops.Cluster{}
-	cluster.Spec.Kubelet = &kops.KubeletConfigSpec{}
-	cluster.Spec.Kubelet.NvidiaGPUs = 0
-	cluster.Spec.KubernetesVersion = "1.6.0"
-
-	var instanceGroup = &kops.InstanceGroup{}
-	instanceGroup.Spec.Kubelet = &kops.KubeletConfigSpec{}
-	instanceGroup.Spec.Kubelet.NvidiaGPUs = 1
-	instanceGroup.Spec.Role = kops.InstanceGroupRoleNode
-
-	config, bootConfig := nodeup.NewConfig(cluster, instanceGroup)
-	b := &KubeletBuilder{
-		&NodeupModelContext{
-			Cluster:      cluster,
-			BootConfig:   bootConfig,
-			NodeupConfig: config,
-		},
-	}
-	if err := b.Init(); err != nil {
-		t.Error(err)
-	}
-
-	var mergedKubeletSpec, err = b.buildKubeletConfigSpec()
-	if err != nil {
-		t.Error(err)
-	}
-	if mergedKubeletSpec == nil {
-		t.Error("Returned nil kubelet spec")
-		t.FailNow()
-	}
-
-	if mergedKubeletSpec.NvidiaGPUs != instanceGroup.Spec.Kubelet.NvidiaGPUs {
-		t.Errorf("InstanceGroup kubelet value (%d) should be reflected in merged output", instanceGroup.Spec.Kubelet.NvidiaGPUs)
-	}
-}
-
 func TestTaintsApplied(t *testing.T) {
 	tests := []struct {
-		version           string
-		taints            []string
-		expectError       bool
-		expectSchedulable bool
-		expectTaints      []string
+		version      string
+		taints       []string
+		expectError  bool
+		expectTaints []string
 	}{
 		{
-			version:           "1.9.0",
-			taints:            []string{"foo", "bar", "baz"},
-			expectTaints:      []string{"foo", "bar", "baz"},
-			expectSchedulable: true,
+			version:      "1.32.0",
+			taints:       []string{"foo", "bar", "baz"},
+			expectTaints: []string{"foo", "bar", "baz", "node-role.kubernetes.io/control-plane=:NoSchedule"},
 		},
 	}
 
 	for _, g := range tests {
-		cluster := &kops.Cluster{Spec: kops.ClusterSpec{KubernetesVersion: g.version}}
-		ig := &kops.InstanceGroup{Spec: kops.InstanceGroupSpec{Role: kops.InstanceGroupRoleMaster, Taints: g.taints}}
+		cluster := &kops.Cluster{Spec: kops.ClusterSpec{
+			KubernetesVersion:     g.version,
+			KubeAPIServer:         &kops.KubeAPIServerConfig{},
+			KubeControllerManager: &kops.KubeControllerManagerConfig{},
+			KubeScheduler:         &kops.KubeSchedulerConfig{},
+		}}
+		input := testutils.BuildMinimalMasterInstanceGroup("eu-central-1a")
+		input.Spec.Taints = g.taints
+
+		ig, err := cloudup.PopulateInstanceGroupSpec(cluster, &input, nil, nil)
+		if err != nil {
+			t.Fatalf("failed to populate ig: %v", err)
+		}
 
 		config, bootConfig := nodeup.NewConfig(cluster, ig)
 		b := &KubeletBuilder{
 			&NodeupModelContext{
-				Cluster:      cluster,
 				BootConfig:   bootConfig,
 				NodeupConfig: config,
 			},
@@ -103,7 +82,7 @@ func TestTaintsApplied(t *testing.T) {
 			t.Error(err)
 		}
 
-		c, err := b.buildKubeletConfigSpec()
+		c, err := b.buildKubeletConfigSpec(context.TODO())
 
 		if g.expectError {
 			if err == nil {
@@ -117,10 +96,6 @@ func TestTaintsApplied(t *testing.T) {
 			}
 		}
 
-		if fi.BoolValue(c.RegisterSchedulable) != g.expectSchedulable {
-			t.Fatalf("Expected RegisterSchedulable == %v, got %v (for %v)", g.expectSchedulable, fi.BoolValue(c.RegisterSchedulable), g.version)
-		}
-
 		if !stringSlicesEqual(g.expectTaints, c.Taints) {
 			t.Fatalf("Expected taints %v, got %v", g.expectTaints, c.Taints)
 		}
@@ -128,6 +103,8 @@ func TestTaintsApplied(t *testing.T) {
 }
 
 func stringSlicesEqual(exp, other []string) bool {
+	sort.Strings(exp)
+	sort.Strings(other)
 	if exp == nil && other != nil {
 		return false
 	}
@@ -158,8 +135,8 @@ func Test_RunKubeletBuilder(t *testing.T) {
 
 	basedir := "tests/kubelet/featuregates"
 
-	context := &fi.ModelBuilderContext{
-		Tasks: make(map[string]fi.Task),
+	context := &fi.NodeupModelBuilderContext{
+		Tasks: make(map[string]fi.NodeupTask),
 	}
 
 	model, err := testutils.LoadModel(basedir)
@@ -175,7 +152,34 @@ func Test_RunKubeletBuilder(t *testing.T) {
 	runKubeletBuilder(t, context, nodeUpModelContext)
 
 	testutils.ValidateTasks(t, filepath.Join(basedir, "tasks.yaml"), context)
+}
 
+func Test_RunKubeletBuilderCgroupfs(t *testing.T) {
+	h := testutils.NewIntegrationTestHarness(t)
+	defer h.Close()
+
+	h.MockKopsVersion("1.18.0")
+	h.SetupMockAWS()
+
+	basedir := "tests/kubelet/cgroupfs"
+
+	context := &fi.NodeupModelBuilderContext{
+		Tasks: make(map[string]fi.NodeupTask),
+	}
+
+	model, err := testutils.LoadModel(basedir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	nodeUpModelContext, err := BuildNodeupModelContext(model)
+	if err != nil {
+		t.Fatalf("error loading model %q: %v", basedir, err)
+		return
+	}
+	runKubeletBuilder(t, context, nodeUpModelContext)
+
+	testutils.ValidateTasks(t, filepath.Join(basedir, "tasks.yaml"), context)
 }
 
 func Test_RunKubeletBuilderWarmPool(t *testing.T) {
@@ -187,8 +191,8 @@ func Test_RunKubeletBuilderWarmPool(t *testing.T) {
 
 	basedir := "tests/kubelet/warmpool"
 
-	context := &fi.ModelBuilderContext{
-		Tasks: make(map[string]fi.Task),
+	context := &fi.NodeupModelBuilderContext{
+		Tasks: make(map[string]fi.NodeupTask),
 	}
 
 	model, err := testutils.LoadModel(basedir)
@@ -207,29 +211,37 @@ func Test_RunKubeletBuilderWarmPool(t *testing.T) {
 	runKubeletBuilder(t, context, nodeUpModelContext)
 
 	testutils.ValidateTasks(t, filepath.Join(basedir, "tasks.yaml"), context)
-
 }
 
-func runKubeletBuilder(t *testing.T, context *fi.ModelBuilderContext, nodeupModelContext *NodeupModelContext) {
+func runKubeletBuilder(t *testing.T, context *fi.NodeupModelBuilderContext, nodeupModelContext *NodeupModelContext) {
 	if err := nodeupModelContext.Init(); err != nil {
 		t.Fatalf("error from nodeupModelContext.Init(): %v", err)
 	}
 
 	builder := KubeletBuilder{NodeupModelContext: nodeupModelContext}
 
-	kubeletConfig, err := builder.buildKubeletConfig()
+	kubeletConfig, err := builder.buildKubeletConfigSpec(context.Context())
 	if err != nil {
 		t.Fatalf("error from KubeletBuilder buildKubeletConfig: %v", err)
 		return
 	}
+	{
+		fileTask, err := builder.buildKubeletComponentConfig(kubeletConfig, "")
+		if err != nil {
+			t.Fatalf("error from KubeletBuilder buildKubeletComponentConfig: %v", err)
+			return
+		}
 
-	fileTask, err := builder.buildSystemdEnvironmentFile(kubeletConfig)
-	if err != nil {
-		t.Fatalf("error from KubeletBuilder buildSystemdEnvironmentFile: %v", err)
-		return
+		context.AddTask(fileTask)
 	}
-	context.AddTask(fileTask)
-
+	{
+		fileTask, err := builder.buildSystemdEnvironmentFile(context.Context(), kubeletConfig)
+		if err != nil {
+			t.Fatalf("error from KubeletBuilder buildSystemdEnvironmentFile: %v", err)
+			return
+		}
+		context.AddTask(fileTask)
+	}
 	{
 		task, err := builder.buildManifestDirectory(kubeletConfig)
 		if err != nil {
@@ -241,26 +253,21 @@ func runKubeletBuilder(t *testing.T, context *fi.ModelBuilderContext, nodeupMode
 
 	{
 		task := builder.buildSystemdService()
-		if err != nil {
-			t.Fatalf("error from KubeletBuilder buildSystemdService: %v", err)
-			return
-		}
 		context.AddTask(task)
 	}
-
 }
 
 func BuildNodeupModelContext(model *testutils.Model) (*NodeupModelContext, error) {
+	ctx := context.TODO()
+
 	if model.Cluster == nil {
 		return nil, fmt.Errorf("no cluster found in model")
 	}
 
 	nodeupModelContext := &NodeupModelContext{
 		Architecture: "amd64",
-		BootConfig:   &nodeup.BootConfig{},
-		NodeupConfig: &nodeup.Config{
-			CAs:        map[string]string{},
-			KeypairIDs: map[string]string{},
+		BootConfig: &nodeup.BootConfig{
+			CloudProvider: model.Cluster.GetCloudProvider(),
 		},
 	}
 
@@ -270,20 +277,26 @@ func BuildNodeupModelContext(model *testutils.Model) (*NodeupModelContext, error
 		return nil, fmt.Errorf("error from BuildCloud: %v", err)
 	}
 
-	err = cloudup.PerformAssignments(model.Cluster, cloud)
-	if err != nil {
+	if err := cloudup.PerformAssignments(model.Cluster, vfs.Context, cloud); err != nil {
 		return nil, fmt.Errorf("error from PerformAssignments: %v", err)
 	}
 
-	nodeupModelContext.Cluster, err = mockedPopulateClusterSpec(model.Cluster, cloud)
+	cluster, err := mockedPopulateClusterSpec(ctx, model.Cluster, model.InstanceGroups, cloud)
 	if err != nil {
 		return nil, fmt.Errorf("unexpected error from mockedPopulateClusterSpec: %v", err)
 	}
 
 	if len(model.InstanceGroups) == 0 {
 		// We tolerate this - not all tests need an instance group
+		// we then use the cluster kubelet config directly
+		nodeupModelContext.NodeupConfig, nodeupModelContext.BootConfig = nodeup.NewConfig(cluster, &kops.InstanceGroup{})
+		nodeupModelContext.NodeupConfig.KubeletConfig = *cluster.Spec.Kubelet
 	} else if len(model.InstanceGroups) == 1 {
-		nodeupModelContext.NodeupConfig, nodeupModelContext.BootConfig = nodeup.NewConfig(nodeupModelContext.Cluster, model.InstanceGroups[0])
+		ig := model.InstanceGroups[0]
+		nodeupModelContext.NodeupConfig, nodeupModelContext.BootConfig = nodeup.NewConfig(cluster, ig)
+		if ig.Spec.Kubelet == nil {
+			nodeupModelContext.NodeupConfig.KubeletConfig = *cluster.Spec.Kubelet
+		}
 	} else {
 		return nil, fmt.Errorf("unexpected number of instance groups: found %d", len(model.InstanceGroups))
 	}
@@ -298,42 +311,39 @@ func BuildNodeupModelContext(model *testutils.Model) (*NodeupModelContext, error
 		nodeupModelContext.NodeupConfig.APIServerConfig.ServiceAccountPublicKeys = saPublicKeys
 	}
 
-	nodeupModelContext.NodeupConfig.ContainerdConfig = nodeupModelContext.Cluster.Spec.Containerd
-	updatePolicy := nodeupModelContext.Cluster.Spec.UpdatePolicy
-	if updatePolicy == nil {
-		updatePolicy = fi.String(kops.UpdatePolicyAutomatic)
-	}
-	nodeupModelContext.NodeupConfig.UpdatePolicy = *updatePolicy
+	nodeupModelContext.NodeupConfig.KubeletConfig.PodManifestPath = "/etc/kubernetes/manifests"
 
 	return nodeupModelContext, nil
 }
 
-func mockedPopulateClusterSpec(c *kops.Cluster, cloud fi.Cloud) (*kops.Cluster, error) {
+func mockedPopulateClusterSpec(ctx context.Context, c *kops.Cluster, instanceGroups []*kops.InstanceGroup, cloud fi.Cloud) (*kops.Cluster, error) {
 	vfs.Context.ResetMemfsContext(true)
 
-	assetBuilder := assets.NewAssetBuilder(c, false)
+	assetBuilder := assets.NewAssetBuilder(vfs.Context, c.Spec.Assets, false)
 	basePath, err := vfs.Context.BuildVfsPath("memfs://tests")
 	if err != nil {
 		return nil, fmt.Errorf("error building vfspath: %v", err)
 	}
-	clientset := vfsclientset.NewVFSClientset(basePath)
-	return cloudup.PopulateClusterSpec(clientset, c, cloud, assetBuilder)
+	clientset := vfsclientset.NewVFSClientset(vfs.Context, basePath)
+	return cloudup.PopulateClusterSpec(ctx, clientset, c, instanceGroups, cloud, assetBuilder)
 }
 
 // Fixed cert and key, borrowed from the create_kubecfg_test.go test
 // Wouldn't actually work in a real environment, but good enough for (today's) tests
 
-const dummyCertificate = "-----BEGIN CERTIFICATE-----\nMIIC2DCCAcCgAwIBAgIRALJXAkVj964tq67wMSI8oJQwDQYJKoZIhvcNAQELBQAw\nFTETMBEGA1UEAxMKa3ViZXJuZXRlczAeFw0xNzEyMjcyMzUyNDBaFw0yNzEyMjcy\nMzUyNDBaMBUxEzARBgNVBAMTCmt1YmVybmV0ZXMwggEiMA0GCSqGSIb3DQEBAQUA\nA4IBDwAwggEKAoIBAQDgnCkSmtnmfxEgS3qNPaUCH5QOBGDH/inHbWCODLBCK9gd\nXEcBl7FVv8T2kFr1DYb0HVDtMI7tixRVFDLgkwNlW34xwWdZXB7GeoFgU1xWOQSY\nOACC8JgYTQ/139HBEvgq4sej67p+/s/SNcw34Kk7HIuFhlk1rRk5kMexKIlJBKP1\nYYUYetsJ/QpUOkqJ5HW4GoetE76YtHnORfYvnybviSMrh2wGGaN6r/s4ChOaIbZC\nAn8/YiPKGIDaZGpj6GXnmXARRX/TIdgSQkLwt0aTDBnPZ4XvtpI8aaL8DYJIqAzA\nNPH2b4/uNylat5jDo0b0G54agMi97+2AUrC9UUXpAgMBAAGjIzAhMA4GA1UdDwEB\n/wQEAwIBBjAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQBVGR2r\nhzXzRMU5wriPQAJScszNORvoBpXfZoZ09FIupudFxBVU3d4hV9StKnQgPSGA5XQO\nHE97+BxJDuA/rB5oBUsMBjc7y1cde/T6hmi3rLoEYBSnSudCOXJE4G9/0f8byAJe\nrN8+No1r2VgZvZh6p74TEkXv/l3HBPWM7IdUV0HO9JDhSgOVF1fyQKJxRuLJR8jt\nO6mPH2UX0vMwVa4jvwtkddqk2OAdYQvH9rbDjjbzaiW0KnmdueRo92KHAN7BsDZy\nVpXHpqo1Kzg7D3fpaXCf5si7lqqrdJVXH4JC72zxsPehqgi8eIuqOBkiDWmRxAxh\n8yGeRx9AbknHh4Ia\n-----END CERTIFICATE-----\n"
-const dummyKey = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA4JwpEprZ5n8RIEt6jT2lAh+UDgRgx/4px21gjgywQivYHVxH\nAZexVb/E9pBa9Q2G9B1Q7TCO7YsUVRQy4JMDZVt+McFnWVwexnqBYFNcVjkEmDgA\ngvCYGE0P9d/RwRL4KuLHo+u6fv7P0jXMN+CpOxyLhYZZNa0ZOZDHsSiJSQSj9WGF\nGHrbCf0KVDpKieR1uBqHrRO+mLR5zkX2L58m74kjK4dsBhmjeq/7OAoTmiG2QgJ/\nP2IjyhiA2mRqY+hl55lwEUV/0yHYEkJC8LdGkwwZz2eF77aSPGmi/A2CSKgMwDTx\n9m+P7jcpWreYw6NG9BueGoDIve/tgFKwvVFF6QIDAQABAoIBAA0ktjaTfyrAxsTI\nBezb7Zr5NBW55dvuII299cd6MJo+rI/TRYhvUv48kY8IFXp/hyUjzgeDLunxmIf9\n/Zgsoic9Ol44/g45mMduhcGYPzAAeCdcJ5OB9rR9VfDCXyjYLlN8H8iU0734tTqM\n0V13tQ9zdSqkGPZOIcq/kR/pylbOZaQMe97BTlsAnOMSMKDgnftY4122Lq3GYy+t\nvpr+bKVaQZwvkLoSU3rECCaKaghgwCyX7jft9aEkhdJv+KlwbsGY6WErvxOaLWHd\ncuMQjGapY1Fa/4UD00mvrA260NyKfzrp6+P46RrVMwEYRJMIQ8YBAk6N6Hh7dc0G\n8Z6i1m0CgYEA9HeCJR0TSwbIQ1bDXUrzpftHuidG5BnSBtax/ND9qIPhR/FBW5nj\n22nwLc48KkyirlfIULd0ae4qVXJn7wfYcuX/cJMLDmSVtlM5Dzmi/91xRiFgIzx1\nAsbBzaFjISP2HpSgL+e9FtSXaaqeZVrflitVhYKUpI/AKV31qGHf04sCgYEA6zTV\n99Sb49Wdlns5IgsfnXl6ToRttB18lfEKcVfjAM4frnkk06JpFAZeR+9GGKUXZHqs\nz2qcplw4d/moCC6p3rYPBMLXsrGNEUFZqBlgz72QA6BBq3X0Cg1Bc2ZbK5VIzwkg\nST2SSux6ccROfgULmN5ZiLOtdUKNEZpFF3i3qtsCgYADT/s7dYFlatobz3kmMnXK\nsfTu2MllHdRys0YGHu7Q8biDuQkhrJwhxPW0KS83g4JQym+0aEfzh36bWcl+u6R7\nKhKj+9oSf9pndgk345gJz35RbPJYh+EuAHNvzdgCAvK6x1jETWeKf6btj5pF1U1i\nQ4QNIw/QiwIXjWZeubTGsQKBgQCbduLu2rLnlyyAaJZM8DlHZyH2gAXbBZpxqU8T\nt9mtkJDUS/KRiEoYGFV9CqS0aXrayVMsDfXY6B/S/UuZjO5u7LtklDzqOf1aKG3Q\ndGXPKibknqqJYH+bnUNjuYYNerETV57lijMGHuSYCf8vwLn3oxBfERRX61M/DU8Z\nworz/QKBgQDCTJI2+jdXg26XuYUmM4XXfnocfzAXhXBULt1nENcogNf1fcptAVtu\nBAiz4/HipQKqoWVUYmxfgbbLRKKLK0s0lOWKbYdVjhEm/m2ZU8wtXTagNwkIGoyq\nY/C1Lox4f1ROJnCjc/hfcOjcxX5M8A8peecHWlVtUPKTJgxQ7oMKcw==\n-----END RSA PRIVATE KEY-----\n"
-const previousCertificate = "-----BEGIN CERTIFICATE-----\nMIIBZzCCARGgAwIBAgIBAjANBgkqhkiG9w0BAQsFADAaMRgwFgYDVQQDEw9zZXJ2\naWNlLWFjY291bnQwHhcNMjEwNTAyMjAzMDA2WhcNMzEwNTAyMjAzMDA2WjAaMRgw\nFgYDVQQDEw9zZXJ2aWNlLWFjY291bnQwXDANBgkqhkiG9w0BAQEFAANLADBIAkEA\n2JbeF8dNwqfEKKD65aGlVs58fWkA0qZdVLKw8qATzRBJTi1nqbj2kAR4gyy/C8Mx\nouxva/om9d7Sq8Ka55T7+wIDAQABo0IwQDAOBgNVHQ8BAf8EBAMCAQYwDwYDVR0T\nAQH/BAUwAwEB/zAdBgNVHQ4EFgQUI5beFHueAGyT1pQ6UTOdbMfj3gQwDQYJKoZI\nhvcNAQELBQADQQBwPLO+Np8o6k3aNBGKE4JTCOs06X72OXNivkWWWP/9XGz6x4DI\nHPU65kbUn/pWXBUVVlpsKsdmWA2Bu8pd/vD+\n-----END CERTIFICATE-----\n"
-const previousKey = "-----BEGIN RSA PRIVATE KEY-----\nMIIBPQIBAAJBANiW3hfHTcKnxCig+uWhpVbOfH1pANKmXVSysPKgE80QSU4tZ6m4\n9pAEeIMsvwvDMaLsb2v6JvXe0qvCmueU+/sCAwEAAQJBAKt/gmpHqP3qA3u8RA5R\n2W6L360Z2Mnza1FmkI/9StCCkJGjuE5yDhxU4JcVnFyX/nMxm2ockEEQDqRSu7Oo\nxTECIQD2QsUsgFL4FnXWzTclySJ6ajE4Cte3gSDOIvyMNMireQIhAOEnsV8UaSI+\nZyL7NMLzMPLCgtsrPnlamr8gdrEHf9ITAiEAxCCLbpTI/4LL2QZZrINTLVGT34Fr\nKl/yI5pjrrp/M2kCIQDfOktQyRuzJ8t5kzWsUxCkntS+FxHJn1rtQ3Jp8dV4oQIh\nAOyiVWDyLZJvg7Y24Ycmp86BZjM9Wk/BfWpBXKnl9iDY\n-----END RSA PRIVATE KEY-----"
-const nextCertificate = "-----BEGIN CERTIFICATE-----\nMIIBZzCCARGgAwIBAgIBBDANBgkqhkiG9w0BAQsFADAaMRgwFgYDVQQDEw9zZXJ2\naWNlLWFjY291bnQwHhcNMjEwNTAyMjAzMjE3WhcNMzEwNTAyMjAzMjE3WjAaMRgw\nFgYDVQQDEw9zZXJ2aWNlLWFjY291bnQwXDANBgkqhkiG9w0BAQEFAANLADBIAkEA\no4Tridlsf4Yz3UAiup/scSTiG/OqxkUW3Fz7zGKvVcLeYj9GEIKuzoB1VFk1nboD\nq4cCuGLfdzaQdCQKPIsDuwIDAQABo0IwQDAOBgNVHQ8BAf8EBAMCAQYwDwYDVR0T\nAQH/BAUwAwEB/zAdBgNVHQ4EFgQUhPbxEmUbwVOCa+fZgxreFhf67UEwDQYJKoZI\nhvcNAQELBQADQQALMsyK2Q7C/bk27eCvXyZKUfrLvor10hEjwGhv14zsKWDeTj/J\nA1LPYp7U9VtFfgFOkVbkLE9Rstc0ltNrPqxA\n-----END CERTIFICATE-----\n"
-const nextKey = "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAKOE64nZbH+GM91AIrqf7HEk4hvzqsZFFtxc+8xir1XC3mI/RhCC\nrs6AdVRZNZ26A6uHArhi33c2kHQkCjyLA7sCAwEAAQJAejInjmEzqmzQr0NxcIN4\nPukwK3FBKl+RAOZfqNIKcww14mfOn7Gc6lF2zEC4GnLiB3tthbSXoBGi54nkW4ki\nyQIhANZNne9UhQlwyjsd3WxDWWrl6OOZ3J8ppMOIQni9WRLlAiEAw1XEdxPOSOSO\nB6rucpTT1QivVvyEFIb/ukvPm769Mh8CIQDNQwKnHdlfNX0+KljPPaMD1LrAZbr/\naC+8aWLhqtsKUQIgF7gUcTkwdV17eabh6Xv09Qtm7zMefred2etWvFy+8JUCIECv\nFYOKQVWHX+Q7CHX2K1oTECVnZuW1UItdDYVlFYxQ\n-----END RSA PRIVATE KEY-----"
+const (
+	dummyCertificate    = "-----BEGIN CERTIFICATE-----\nMIIC2DCCAcCgAwIBAgIRALJXAkVj964tq67wMSI8oJQwDQYJKoZIhvcNAQELBQAw\nFTETMBEGA1UEAxMKa3ViZXJuZXRlczAeFw0xNzEyMjcyMzUyNDBaFw0yNzEyMjcy\nMzUyNDBaMBUxEzARBgNVBAMTCmt1YmVybmV0ZXMwggEiMA0GCSqGSIb3DQEBAQUA\nA4IBDwAwggEKAoIBAQDgnCkSmtnmfxEgS3qNPaUCH5QOBGDH/inHbWCODLBCK9gd\nXEcBl7FVv8T2kFr1DYb0HVDtMI7tixRVFDLgkwNlW34xwWdZXB7GeoFgU1xWOQSY\nOACC8JgYTQ/139HBEvgq4sej67p+/s/SNcw34Kk7HIuFhlk1rRk5kMexKIlJBKP1\nYYUYetsJ/QpUOkqJ5HW4GoetE76YtHnORfYvnybviSMrh2wGGaN6r/s4ChOaIbZC\nAn8/YiPKGIDaZGpj6GXnmXARRX/TIdgSQkLwt0aTDBnPZ4XvtpI8aaL8DYJIqAzA\nNPH2b4/uNylat5jDo0b0G54agMi97+2AUrC9UUXpAgMBAAGjIzAhMA4GA1UdDwEB\n/wQEAwIBBjAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQBVGR2r\nhzXzRMU5wriPQAJScszNORvoBpXfZoZ09FIupudFxBVU3d4hV9StKnQgPSGA5XQO\nHE97+BxJDuA/rB5oBUsMBjc7y1cde/T6hmi3rLoEYBSnSudCOXJE4G9/0f8byAJe\nrN8+No1r2VgZvZh6p74TEkXv/l3HBPWM7IdUV0HO9JDhSgOVF1fyQKJxRuLJR8jt\nO6mPH2UX0vMwVa4jvwtkddqk2OAdYQvH9rbDjjbzaiW0KnmdueRo92KHAN7BsDZy\nVpXHpqo1Kzg7D3fpaXCf5si7lqqrdJVXH4JC72zxsPehqgi8eIuqOBkiDWmRxAxh\n8yGeRx9AbknHh4Ia\n-----END CERTIFICATE-----\n"
+	dummyKey            = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA4JwpEprZ5n8RIEt6jT2lAh+UDgRgx/4px21gjgywQivYHVxH\nAZexVb/E9pBa9Q2G9B1Q7TCO7YsUVRQy4JMDZVt+McFnWVwexnqBYFNcVjkEmDgA\ngvCYGE0P9d/RwRL4KuLHo+u6fv7P0jXMN+CpOxyLhYZZNa0ZOZDHsSiJSQSj9WGF\nGHrbCf0KVDpKieR1uBqHrRO+mLR5zkX2L58m74kjK4dsBhmjeq/7OAoTmiG2QgJ/\nP2IjyhiA2mRqY+hl55lwEUV/0yHYEkJC8LdGkwwZz2eF77aSPGmi/A2CSKgMwDTx\n9m+P7jcpWreYw6NG9BueGoDIve/tgFKwvVFF6QIDAQABAoIBAA0ktjaTfyrAxsTI\nBezb7Zr5NBW55dvuII299cd6MJo+rI/TRYhvUv48kY8IFXp/hyUjzgeDLunxmIf9\n/Zgsoic9Ol44/g45mMduhcGYPzAAeCdcJ5OB9rR9VfDCXyjYLlN8H8iU0734tTqM\n0V13tQ9zdSqkGPZOIcq/kR/pylbOZaQMe97BTlsAnOMSMKDgnftY4122Lq3GYy+t\nvpr+bKVaQZwvkLoSU3rECCaKaghgwCyX7jft9aEkhdJv+KlwbsGY6WErvxOaLWHd\ncuMQjGapY1Fa/4UD00mvrA260NyKfzrp6+P46RrVMwEYRJMIQ8YBAk6N6Hh7dc0G\n8Z6i1m0CgYEA9HeCJR0TSwbIQ1bDXUrzpftHuidG5BnSBtax/ND9qIPhR/FBW5nj\n22nwLc48KkyirlfIULd0ae4qVXJn7wfYcuX/cJMLDmSVtlM5Dzmi/91xRiFgIzx1\nAsbBzaFjISP2HpSgL+e9FtSXaaqeZVrflitVhYKUpI/AKV31qGHf04sCgYEA6zTV\n99Sb49Wdlns5IgsfnXl6ToRttB18lfEKcVfjAM4frnkk06JpFAZeR+9GGKUXZHqs\nz2qcplw4d/moCC6p3rYPBMLXsrGNEUFZqBlgz72QA6BBq3X0Cg1Bc2ZbK5VIzwkg\nST2SSux6ccROfgULmN5ZiLOtdUKNEZpFF3i3qtsCgYADT/s7dYFlatobz3kmMnXK\nsfTu2MllHdRys0YGHu7Q8biDuQkhrJwhxPW0KS83g4JQym+0aEfzh36bWcl+u6R7\nKhKj+9oSf9pndgk345gJz35RbPJYh+EuAHNvzdgCAvK6x1jETWeKf6btj5pF1U1i\nQ4QNIw/QiwIXjWZeubTGsQKBgQCbduLu2rLnlyyAaJZM8DlHZyH2gAXbBZpxqU8T\nt9mtkJDUS/KRiEoYGFV9CqS0aXrayVMsDfXY6B/S/UuZjO5u7LtklDzqOf1aKG3Q\ndGXPKibknqqJYH+bnUNjuYYNerETV57lijMGHuSYCf8vwLn3oxBfERRX61M/DU8Z\nworz/QKBgQDCTJI2+jdXg26XuYUmM4XXfnocfzAXhXBULt1nENcogNf1fcptAVtu\nBAiz4/HipQKqoWVUYmxfgbbLRKKLK0s0lOWKbYdVjhEm/m2ZU8wtXTagNwkIGoyq\nY/C1Lox4f1ROJnCjc/hfcOjcxX5M8A8peecHWlVtUPKTJgxQ7oMKcw==\n-----END RSA PRIVATE KEY-----\n"
+	previousCertificate = "-----BEGIN CERTIFICATE-----\nMIIBZzCCARGgAwIBAgIBAjANBgkqhkiG9w0BAQsFADAaMRgwFgYDVQQDEw9zZXJ2\naWNlLWFjY291bnQwHhcNMjEwNTAyMjAzMDA2WhcNMzEwNTAyMjAzMDA2WjAaMRgw\nFgYDVQQDEw9zZXJ2aWNlLWFjY291bnQwXDANBgkqhkiG9w0BAQEFAANLADBIAkEA\n2JbeF8dNwqfEKKD65aGlVs58fWkA0qZdVLKw8qATzRBJTi1nqbj2kAR4gyy/C8Mx\nouxva/om9d7Sq8Ka55T7+wIDAQABo0IwQDAOBgNVHQ8BAf8EBAMCAQYwDwYDVR0T\nAQH/BAUwAwEB/zAdBgNVHQ4EFgQUI5beFHueAGyT1pQ6UTOdbMfj3gQwDQYJKoZI\nhvcNAQELBQADQQBwPLO+Np8o6k3aNBGKE4JTCOs06X72OXNivkWWWP/9XGz6x4DI\nHPU65kbUn/pWXBUVVlpsKsdmWA2Bu8pd/vD+\n-----END CERTIFICATE-----\n"
+	previousKey         = "-----BEGIN RSA PRIVATE KEY-----\nMIIBPQIBAAJBANiW3hfHTcKnxCig+uWhpVbOfH1pANKmXVSysPKgE80QSU4tZ6m4\n9pAEeIMsvwvDMaLsb2v6JvXe0qvCmueU+/sCAwEAAQJBAKt/gmpHqP3qA3u8RA5R\n2W6L360Z2Mnza1FmkI/9StCCkJGjuE5yDhxU4JcVnFyX/nMxm2ockEEQDqRSu7Oo\nxTECIQD2QsUsgFL4FnXWzTclySJ6ajE4Cte3gSDOIvyMNMireQIhAOEnsV8UaSI+\nZyL7NMLzMPLCgtsrPnlamr8gdrEHf9ITAiEAxCCLbpTI/4LL2QZZrINTLVGT34Fr\nKl/yI5pjrrp/M2kCIQDfOktQyRuzJ8t5kzWsUxCkntS+FxHJn1rtQ3Jp8dV4oQIh\nAOyiVWDyLZJvg7Y24Ycmp86BZjM9Wk/BfWpBXKnl9iDY\n-----END RSA PRIVATE KEY-----"
+	nextCertificate     = "-----BEGIN CERTIFICATE-----\nMIIBZzCCARGgAwIBAgIBBDANBgkqhkiG9w0BAQsFADAaMRgwFgYDVQQDEw9zZXJ2\naWNlLWFjY291bnQwHhcNMjEwNTAyMjAzMjE3WhcNMzEwNTAyMjAzMjE3WjAaMRgw\nFgYDVQQDEw9zZXJ2aWNlLWFjY291bnQwXDANBgkqhkiG9w0BAQEFAANLADBIAkEA\no4Tridlsf4Yz3UAiup/scSTiG/OqxkUW3Fz7zGKvVcLeYj9GEIKuzoB1VFk1nboD\nq4cCuGLfdzaQdCQKPIsDuwIDAQABo0IwQDAOBgNVHQ8BAf8EBAMCAQYwDwYDVR0T\nAQH/BAUwAwEB/zAdBgNVHQ4EFgQUhPbxEmUbwVOCa+fZgxreFhf67UEwDQYJKoZI\nhvcNAQELBQADQQALMsyK2Q7C/bk27eCvXyZKUfrLvor10hEjwGhv14zsKWDeTj/J\nA1LPYp7U9VtFfgFOkVbkLE9Rstc0ltNrPqxA\n-----END CERTIFICATE-----\n"
+	nextKey             = "-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAKOE64nZbH+GM91AIrqf7HEk4hvzqsZFFtxc+8xir1XC3mI/RhCC\nrs6AdVRZNZ26A6uHArhi33c2kHQkCjyLA7sCAwEAAQJAejInjmEzqmzQr0NxcIN4\nPukwK3FBKl+RAOZfqNIKcww14mfOn7Gc6lF2zEC4GnLiB3tthbSXoBGi54nkW4ki\nyQIhANZNne9UhQlwyjsd3WxDWWrl6OOZ3J8ppMOIQni9WRLlAiEAw1XEdxPOSOSO\nB6rucpTT1QivVvyEFIb/ukvPm769Mh8CIQDNQwKnHdlfNX0+KljPPaMD1LrAZbr/\naC+8aWLhqtsKUQIgF7gUcTkwdV17eabh6Xv09Qtm7zMefred2etWvFy+8JUCIECv\nFYOKQVWHX+Q7CHX2K1oTECVnZuW1UItdDYVlFYxQ\n-----END RSA PRIVATE KEY-----"
+)
 
 func simplePrivateKeyset(cert, key string) *kops.Keyset {
 	return &kops.Keyset{
 		Spec: kops.KeysetSpec{
-			PrimaryId: "3",
+			PrimaryID: "3",
 			Keys: []kops.KeysetItem{
 				{
 					Id:              "3",
@@ -368,15 +378,15 @@ func mustParseKey(s string) *pki.PrivateKey {
 	return k
 }
 
-func RunGoldenTest(t *testing.T, basedir string, key string, builder func(*NodeupModelContext, *fi.ModelBuilderContext) error) {
+func RunGoldenTest(t *testing.T, basedir string, key string, builder func(*NodeupModelContext, *fi.NodeupModelBuilderContext) error) {
 	h := testutils.NewIntegrationTestHarness(t)
 	defer h.Close()
 
 	h.MockKopsVersion("1.18.0")
 	h.SetupMockAWS()
 
-	context := &fi.ModelBuilderContext{
-		Tasks: make(map[string]fi.Task),
+	context := &fi.NodeupModelBuilderContext{
+		Tasks: make(map[string]fi.NodeupTask),
 	}
 
 	model, err := testutils.LoadModel(basedir)
@@ -403,7 +413,7 @@ func RunGoldenTest(t *testing.T, basedir string, key string, builder func(*Nodeu
 
 	nodeupModelContext.KeyStore = keystore
 
-	nodeupModelContext.Distribution = distributions.DistributionUbuntu2004
+	nodeupModelContext.Distribution = distributions.DistributionUbuntu2604
 
 	if err := nodeupModelContext.Init(); err != nil {
 		t.Fatalf("error from nodeupModelContext.Init(): %v", err)
@@ -414,4 +424,187 @@ func RunGoldenTest(t *testing.T, basedir string, key string, builder func(*Nodeu
 	}
 
 	testutils.ValidateTasks(t, filepath.Join(basedir, "tasks-"+key+".yaml"), context)
+}
+
+func Test_BuildComponentConfigFile(t *testing.T) {
+	componentConfig := kops.KubeletConfigSpec{
+		ShutdownGracePeriod:             &metav1.Duration{Duration: 30 * time.Second},
+		ShutdownGracePeriodCriticalPods: &metav1.Duration{Duration: 10 * time.Second},
+		ImageMaximumGCAge:               &metav1.Duration{Duration: 30 * time.Hour},
+		ImageMinimumGCAge:               &metav1.Duration{Duration: 30 * time.Minute},
+		MaxParallelImagePulls:           new(int32(5)),
+	}
+
+	builder := &KubeletBuilder{NodeupModelContext: &NodeupModelContext{
+		NodeupConfig: &nodeup.Config{
+			ContainerdConfig: &kops.ContainerdConfig{},
+		},
+	}}
+
+	_, err := builder.buildKubeletComponentConfig(&componentConfig, "")
+	if err != nil {
+		t.Errorf("Failed to build component config file: %v", err)
+	}
+}
+
+func Test_KubeletConfiguration_KubeAPIRateLimits(t *testing.T) {
+	builder := &KubeletBuilder{NodeupModelContext: &NodeupModelContext{
+		NodeupConfig: &nodeup.Config{
+			ContainerdConfig: &kops.ContainerdConfig{},
+		},
+	}}
+
+	cc, err := builder.kubeletConfiguration(&kops.KubeletConfigSpec{
+		KubeAPIQPS:   new(int32(500)),
+		KubeAPIBurst: new(int32(1000)),
+	}, "")
+	if err != nil {
+		t.Fatalf("kubeletConfiguration() error = %v", err)
+	}
+	if fi.ValueOf(cc.KubeAPIQPS) != 500 {
+		t.Errorf("KubeAPIQPS = %v, want 500", fi.ValueOf(cc.KubeAPIQPS))
+	}
+	if cc.KubeAPIBurst != 1000 {
+		t.Errorf("KubeAPIBurst = %d, want 1000", cc.KubeAPIBurst)
+	}
+}
+
+func Test_KubeletConfiguration_NodeStatusFrequencies(t *testing.T) {
+	builder := &KubeletBuilder{NodeupModelContext: &NodeupModelContext{
+		NodeupConfig: &nodeup.Config{
+			ContainerdConfig: &kops.ContainerdConfig{},
+		},
+	}}
+
+	tests := []struct {
+		name       string
+		config     kops.KubeletConfigSpec
+		wantUpdate time.Duration
+		wantReport time.Duration
+	}{
+		{
+			// Zero values let the kubelet apply its own defaults (10s update, 5m report).
+			name: "unset",
+		},
+		{
+			// The kubelet copies an explicit update frequency into an unset report frequency,
+			// so the report frequency must be settable on its own to keep the 5m default.
+			name: "update and report frequencies",
+			config: kops.KubeletConfigSpec{
+				NodeStatusUpdateFrequency: &metav1.Duration{Duration: 4 * time.Second},
+				NodeStatusReportFrequency: &metav1.Duration{Duration: 5 * time.Minute},
+			},
+			wantUpdate: 4 * time.Second,
+			wantReport: 5 * time.Minute,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cc, err := builder.kubeletConfiguration(&tt.config, "")
+			if err != nil {
+				t.Fatalf("kubeletConfiguration() error = %v", err)
+			}
+			if cc.NodeStatusUpdateFrequency.Duration != tt.wantUpdate {
+				t.Errorf("NodeStatusUpdateFrequency = %v, want %v", cc.NodeStatusUpdateFrequency.Duration, tt.wantUpdate)
+			}
+			if cc.NodeStatusReportFrequency.Duration != tt.wantReport {
+				t.Errorf("NodeStatusReportFrequency = %v, want %v", cc.NodeStatusReportFrequency.Duration, tt.wantReport)
+			}
+		})
+	}
+}
+
+func TestParseKeyValueList(t *testing.T) {
+	tests := []struct {
+		name            string
+		in              string
+		sep             string
+		want            map[string]string
+		wantErrContains string
+	}{
+		{name: "empty input returns nil map", in: "", sep: "<", want: nil},
+		{name: "less-than separator", in: "memory.available<100Mi,nodefs.available<10%", sep: "<", want: map[string]string{"memory.available": "100Mi", "nodefs.available": "10%"}},
+		{name: "equals separator", in: "memory.available=30s", sep: "=", want: map[string]string{"memory.available": "30s"}},
+		{name: "trims whitespace around keys and values", in: " memory.available = 100Mi ", sep: "=", want: map[string]string{"memory.available": "100Mi"}},
+		{name: "missing separator returns error", in: "memory.available", sep: "<", wantErrContains: "expected separator"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseKeyValueList(tc.in, tc.sep)
+			if tc.wantErrContains != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErrContains) {
+					t.Fatalf("parseKeyValueList(%q, %q) error = %v, want error containing %q", tc.in, tc.sep, err, tc.wantErrContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseKeyValueList(%q, %q) unexpected error: %v", tc.in, tc.sep, err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("parseKeyValueList(%q, %q) = %v, want %v", tc.in, tc.sep, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseFeatureGates(t *testing.T) {
+	tests := []struct {
+		name            string
+		in              map[string]string
+		want            map[string]bool
+		wantErrContains string
+	}{
+		{name: "nil input returns nil map", in: nil, want: nil},
+		{name: "valid bools", in: map[string]string{"A": "true", "B": "false"}, want: map[string]bool{"A": true, "B": false}},
+		{name: "invalid bool returns error naming the gate", in: map[string]string{"A": "yesplz"}, wantErrContains: `"A"="yesplz"`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseFeatureGates(tc.in)
+			if tc.wantErrContains != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErrContains) {
+					t.Fatalf("parseFeatureGates(%v) error = %v, want error containing %q", tc.in, err, tc.wantErrContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseFeatureGates(%v) unexpected error: %v", tc.in, err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("parseFeatureGates(%v) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func Test_Kubelet_BuildFlags(t *testing.T) {
+	tests := []struct {
+		name   string
+		config kops.KubeletConfigSpec
+		want   string
+	}{
+		{
+			name:   "ImageMaximumGCAge migrated to config file",
+			config: kops.KubeletConfigSpec{ImageMaximumGCAge: &metav1.Duration{Duration: 30 * time.Hour}},
+			want:   "",
+		},
+		{
+			name:   "KubeAPIQPS and KubeAPIBurst migrated to config file",
+			config: kops.KubeletConfigSpec{KubeAPIQPS: new(int32(500)), KubeAPIBurst: new(int32(1000))},
+			want:   "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := flagbuilder.BuildFlags(&tc.config)
+			if err != nil {
+				t.Fatalf("BuildFlags(%+v) error = %v", tc.config, err)
+			}
+			if got != tc.want {
+				t.Errorf("BuildFlags(%+v) = %q, want %q", tc.config, got, tc.want)
+			}
+		})
+	}
 }

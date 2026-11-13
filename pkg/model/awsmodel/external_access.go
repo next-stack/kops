@@ -23,7 +23,6 @@ import (
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awstasks"
-	"k8s.io/kops/upup/pkg/fi/utils"
 )
 
 // ExternalAccessModelBuilder configures security group rules for external access
@@ -33,10 +32,10 @@ type ExternalAccessModelBuilder struct {
 	Lifecycle fi.Lifecycle
 }
 
-var _ fi.ModelBuilder = &ExternalAccessModelBuilder{}
+var _ fi.CloudupModelBuilder = &ExternalAccessModelBuilder{}
 
-func (b *ExternalAccessModelBuilder) Build(c *fi.ModelBuilderContext) error {
-	if len(b.Cluster.Spec.KubernetesAPIAccess) == 0 {
+func (b *ExternalAccessModelBuilder) Build(c *fi.CloudupModelBuilderContext) error {
+	if len(b.Cluster.Spec.API.Access) == 0 {
 		klog.Warningf("KubernetesAPIAccess is empty")
 	}
 
@@ -44,7 +43,7 @@ func (b *ExternalAccessModelBuilder) Build(c *fi.ModelBuilderContext) error {
 		klog.Warningf("SSHAccess is empty")
 	}
 
-	masterGroups, err := b.GetSecurityGroups(kops.InstanceGroupRoleMaster)
+	masterGroups, err := b.GetSecurityGroups(kops.InstanceGroupRoleControlPlane)
 	if err != nil {
 		return err
 	}
@@ -58,42 +57,34 @@ func (b *ExternalAccessModelBuilder) Build(c *fi.ModelBuilderContext) error {
 		// If we are using a bastion, we only access through the bastion
 		// This is admittedly a little odd... adding a bastion shuts down direct access to the masters/nodes
 		// But I think we can always add more permissions in this case later, but we can't easily take them away
-		klog.V(2).Infof("bastion is in use; won't configure SSH access to master / node instances")
+		klog.V(2).Infof("bastion is in use; won't configure SSH access to control-plane / worker node instances")
 	} else {
 		for _, sshAccess := range b.Cluster.Spec.SSHAccess {
 			for _, masterGroup := range masterGroups {
 				suffix := masterGroup.Suffix
 				t := &awstasks.SecurityGroupRule{
-					Name:          fi.String(fmt.Sprintf("ssh-external-to-master-%s%s", sshAccess, suffix)),
+					Name:          new(fmt.Sprintf("ssh-external-to-master-%s%s", sshAccess, suffix)),
 					Lifecycle:     b.Lifecycle,
 					SecurityGroup: masterGroup.Task,
-					Protocol:      fi.String("tcp"),
-					FromPort:      fi.Int64(22),
-					ToPort:        fi.Int64(22),
+					Protocol:      new("tcp"),
+					FromPort:      new(int32(22)),
+					ToPort:        new(int32(22)),
 				}
-				if utils.IsIPv6CIDR(sshAccess) {
-					t.IPv6CIDR = fi.String(sshAccess)
-				} else {
-					t.CIDR = fi.String(sshAccess)
-				}
+				t.SetCidrOrPrefix(sshAccess)
 				AddDirectionalGroupRule(c, t)
 			}
 
 			for _, nodeGroup := range nodeGroups {
 				suffix := nodeGroup.Suffix
 				t := &awstasks.SecurityGroupRule{
-					Name:          fi.String(fmt.Sprintf("ssh-external-to-node-%s%s", sshAccess, suffix)),
+					Name:          new(fmt.Sprintf("ssh-external-to-node-%s%s", sshAccess, suffix)),
 					Lifecycle:     b.Lifecycle,
 					SecurityGroup: nodeGroup.Task,
-					Protocol:      fi.String("tcp"),
-					FromPort:      fi.Int64(22),
-					ToPort:        fi.Int64(22),
+					Protocol:      new("tcp"),
+					FromPort:      new(int32(22)),
+					ToPort:        new(int32(22)),
 				}
-				if utils.IsIPv6CIDR(sshAccess) {
-					t.IPv6CIDR = fi.String(sshAccess)
-				} else {
-					t.CIDR = fi.String(sshAccess)
-				}
+				t.SetCidrOrPrefix(sshAccess)
 				AddDirectionalGroupRule(c, t)
 			}
 		}
@@ -109,34 +100,26 @@ func (b *ExternalAccessModelBuilder) Build(c *fi.ModelBuilderContext) error {
 			suffix := nodeGroup.Suffix
 			{
 				t := &awstasks.SecurityGroupRule{
-					Name:          fi.String(fmt.Sprintf("nodeport-tcp-external-to-node-%s%s", nodePortAccess, suffix)),
+					Name:          new(fmt.Sprintf("nodeport-tcp-external-to-node-%s%s", nodePortAccess, suffix)),
 					Lifecycle:     b.Lifecycle,
 					SecurityGroup: nodeGroup.Task,
-					Protocol:      fi.String("tcp"),
-					FromPort:      fi.Int64(int64(nodePortRange.Base)),
-					ToPort:        fi.Int64(int64(nodePortRange.Base + nodePortRange.Size - 1)),
+					Protocol:      new("tcp"),
+					FromPort:      new(int32(nodePortRange.Base)),
+					ToPort:        new(int32(nodePortRange.Base + nodePortRange.Size - 1)),
 				}
-				if utils.IsIPv6CIDR(nodePortAccess) {
-					t.IPv6CIDR = fi.String(nodePortAccess)
-				} else {
-					t.CIDR = fi.String(nodePortAccess)
-				}
+				t.SetCidrOrPrefix(nodePortAccess)
 				c.AddTask(t)
 			}
 			{
 				t := &awstasks.SecurityGroupRule{
-					Name:          fi.String(fmt.Sprintf("nodeport-udp-external-to-node-%s%s", nodePortAccess, suffix)),
+					Name:          new(fmt.Sprintf("nodeport-udp-external-to-node-%s%s", nodePortAccess, suffix)),
 					Lifecycle:     b.Lifecycle,
 					SecurityGroup: nodeGroup.Task,
-					Protocol:      fi.String("udp"),
-					FromPort:      fi.Int64(int64(nodePortRange.Base)),
-					ToPort:        fi.Int64(int64(nodePortRange.Base + nodePortRange.Size - 1)),
+					Protocol:      new("udp"),
+					FromPort:      new(int32(nodePortRange.Base)),
+					ToPort:        new(int32(nodePortRange.Base + nodePortRange.Size - 1)),
 				}
-				if utils.IsIPv6CIDR(nodePortAccess) {
-					t.IPv6CIDR = fi.String(nodePortAccess)
-				} else {
-					t.CIDR = fi.String(nodePortAccess)
-				}
+				t.SetCidrOrPrefix(nodePortAccess)
 				c.AddTask(t)
 			}
 		}
@@ -148,22 +131,18 @@ func (b *ExternalAccessModelBuilder) Build(c *fi.ModelBuilderContext) error {
 		// We need to open security groups directly to the master nodes (instead of via the ELB)
 
 		// HTTPS to the master is allowed (for API access)
-		for _, apiAccess := range b.Cluster.Spec.KubernetesAPIAccess {
+		for _, apiAccess := range b.Cluster.Spec.API.Access {
 			for _, masterGroup := range masterGroups {
 				suffix := masterGroup.Suffix
 				t := &awstasks.SecurityGroupRule{
-					Name:          fi.String(fmt.Sprintf("https-external-to-master-%s%s", apiAccess, suffix)),
+					Name:          new(fmt.Sprintf("https-external-to-master-%s%s", apiAccess, suffix)),
 					Lifecycle:     b.Lifecycle,
 					SecurityGroup: masterGroup.Task,
-					Protocol:      fi.String("tcp"),
-					FromPort:      fi.Int64(443),
-					ToPort:        fi.Int64(443),
+					Protocol:      new("tcp"),
+					FromPort:      new(int32(443)),
+					ToPort:        new(int32(443)),
 				}
-				if utils.IsIPv6CIDR(apiAccess) {
-					t.IPv6CIDR = fi.String(apiAccess)
-				} else {
-					t.CIDR = fi.String(apiAccess)
-				}
+				t.SetCidrOrPrefix(apiAccess)
 				AddDirectionalGroupRule(c, t)
 			}
 		}

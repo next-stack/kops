@@ -27,7 +27,7 @@ import (
 
 // EBSVolume
 
-var _ fi.HasLifecycle = &EBSVolume{}
+var _ fi.HasLifecycle = (*EBSVolume)(nil)
 
 // GetLifecycle returns the Lifecycle of the object, implementing fi.HasLifecycle
 func (o *EBSVolume) GetLifecycle() fi.Lifecycle {
@@ -39,7 +39,7 @@ func (o *EBSVolume) SetLifecycle(lifecycle fi.Lifecycle) {
 	o.Lifecycle = lifecycle
 }
 
-var _ fi.HasName = &EBSVolume{}
+var _ fi.HasName = (*EBSVolume)(nil)
 
 // GetName returns the Name of the object, implementing fi.HasName
 func (o *EBSVolume) GetName() *string {
@@ -48,5 +48,5 @@ func (o *EBSVolume) GetName() *string {
 
 // String is the stringer function for the task, producing readable output using fi.TaskAsString
 func (o *EBSVolume) String() string {
-	return fi.TaskAsString(o)
+	return fi.CloudupTaskAsString(o)
 }

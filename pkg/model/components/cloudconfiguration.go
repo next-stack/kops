@@ -18,7 +18,6 @@ package components
 
 import (
 	"k8s.io/kops/pkg/apis/kops"
-	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/loader"
 )
 
@@ -27,10 +26,10 @@ type CloudConfigurationOptionsBuilder struct {
 	Context *OptionsContext
 }
 
-var _ loader.OptionsBuilder = &CloudConfigurationOptionsBuilder{}
+var _ loader.ClusterOptionsBuilder = &CloudConfigurationOptionsBuilder{}
 
-func (b *CloudConfigurationOptionsBuilder) BuildOptions(o interface{}) error {
-	clusterSpec := o.(*kops.ClusterSpec)
+func (b *CloudConfigurationOptionsBuilder) BuildOptions(o *kops.Cluster) error {
+	clusterSpec := &o.Spec
 	c := clusterSpec.CloudConfig
 	if c == nil {
 		c = &kops.CloudConfiguration{}
@@ -42,18 +41,14 @@ func (b *CloudConfigurationOptionsBuilder) BuildOptions(o interface{}) error {
 
 	if c.ManageStorageClasses == nil {
 		var manage *bool
-		if c.Openstack != nil && c.Openstack.BlockStorage != nil && c.Openstack.BlockStorage.CreateStorageClass != nil {
+		if clusterSpec.CloudProvider.Openstack != nil && clusterSpec.CloudProvider.Openstack.BlockStorage != nil && clusterSpec.CloudProvider.Openstack.BlockStorage.CreateStorageClass != nil {
 			// Avoid a spurious conflict with a user-specified configuration for OpenStack by
 			// adopting that more particular setting generally.
-			manage = c.Openstack.BlockStorage.CreateStorageClass
+			manage = clusterSpec.CloudProvider.Openstack.BlockStorage.CreateStorageClass
 		} else {
-			manage = fi.Bool(true)
+			manage = new(true)
 		}
 		c.ManageStorageClasses = manage
-	}
-
-	if clusterSpec.IsIPv6Only() && len(c.NodeIPFamilies) == 0 {
-		c.NodeIPFamilies = []string{"ipv6", "ipv4"}
 	}
 
 	return nil

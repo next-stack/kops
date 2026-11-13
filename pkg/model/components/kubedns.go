@@ -18,6 +18,7 @@ package components
 
 import (
 	"k8s.io/apimachinery/pkg/api/resource"
+
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/loader"
@@ -28,17 +29,15 @@ type KubeDnsOptionsBuilder struct {
 	Context *OptionsContext
 }
 
-var _ loader.OptionsBuilder = &KubeDnsOptionsBuilder{}
+var _ loader.ClusterOptionsBuilder = &KubeDnsOptionsBuilder{}
 
 // BuildOptions fills in the kubedns model
-func (b *KubeDnsOptionsBuilder) BuildOptions(o interface{}) error {
-	clusterSpec := o.(*kops.ClusterSpec)
+func (b *KubeDnsOptionsBuilder) BuildOptions(cluster *kops.Cluster) error {
+	clusterSpec := &cluster.Spec
 
 	if clusterSpec.KubeDNS == nil {
 		clusterSpec.KubeDNS = &kops.KubeDNSConfig{}
 	}
-
-	clusterSpec.KubeDNS.Replicas = 2
 
 	if clusterSpec.KubeDNS.CacheMaxSize == 0 {
 		clusterSpec.KubeDNS.CacheMaxSize = 1000
@@ -49,7 +48,7 @@ func (b *KubeDnsOptionsBuilder) BuildOptions(o interface{}) error {
 	}
 
 	if clusterSpec.KubeDNS.ServerIP == "" {
-		ip, err := WellKnownServiceIP(clusterSpec, 10)
+		ip, err := WellKnownServiceIP(&clusterSpec.Networking, 10)
 		if err != nil {
 			return err
 		}
@@ -75,7 +74,7 @@ func (b *KubeDnsOptionsBuilder) BuildOptions(o interface{}) error {
 		clusterSpec.KubeDNS.MemoryLimit = &defaultMemoryLimit
 	}
 
-	if clusterSpec.IsIPv6Only() && kops.CloudProviderID(clusterSpec.CloudProvider) == kops.CloudProviderAWS {
+	if clusterSpec.IsIPv6Only() && cluster.GetCloudProvider() == kops.CloudProviderAWS {
 		if len(clusterSpec.KubeDNS.UpstreamNameservers) == 0 {
 			clusterSpec.KubeDNS.UpstreamNameservers = []string{"fd00:ec2::253"}
 		}
@@ -87,13 +86,17 @@ func (b *KubeDnsOptionsBuilder) BuildOptions(o interface{}) error {
 		clusterSpec.KubeDNS.NodeLocalDNS = nodeLocalDNS
 	}
 	if nodeLocalDNS.Enabled == nil {
-		nodeLocalDNS.Enabled = fi.Bool(false)
+		nodeLocalDNS.Enabled = new(false)
 	}
-	if fi.BoolValue(nodeLocalDNS.Enabled) && nodeLocalDNS.LocalIP == "" {
-		nodeLocalDNS.LocalIP = "169.254.20.10"
+	if fi.ValueOf(nodeLocalDNS.Enabled) && nodeLocalDNS.LocalIP == "" {
+		if clusterSpec.IsIPv6Only() {
+			nodeLocalDNS.LocalIP = "fd00:90de:d95::1"
+		} else {
+			nodeLocalDNS.LocalIP = "169.254.20.10"
+		}
 	}
-	if fi.BoolValue(nodeLocalDNS.Enabled) && nodeLocalDNS.ForwardToKubeDNS == nil {
-		nodeLocalDNS.ForwardToKubeDNS = fi.Bool(false)
+	if fi.ValueOf(nodeLocalDNS.Enabled) && nodeLocalDNS.ForwardToKubeDNS == nil {
+		nodeLocalDNS.ForwardToKubeDNS = new(false)
 	}
 
 	if nodeLocalDNS.MemoryRequest == nil || nodeLocalDNS.MemoryRequest.IsZero() {
@@ -107,7 +110,7 @@ func (b *KubeDnsOptionsBuilder) BuildOptions(o interface{}) error {
 	}
 
 	if nodeLocalDNS.Image == nil {
-		nodeLocalDNS.Image = fi.String("k8s.gcr.io/dns/k8s-dns-node-cache:1.20.0")
+		nodeLocalDNS.Image = new("registry.k8s.io/dns/k8s-dns-node-cache:1.26.0")
 	}
 
 	return nil

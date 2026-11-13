@@ -17,6 +17,9 @@ limitations under the License.
 package kops
 
 import (
+	"strings"
+
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -30,7 +33,7 @@ const (
 // +genclient
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
-// InstanceGroup represents a group of instances (either nodes or masters) with the same configuration
+// InstanceGroup represents a group of instances with the same configuration.
 type InstanceGroup struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -48,26 +51,67 @@ type InstanceGroupList struct {
 	Items []InstanceGroup `json:"items"`
 }
 
-// InstanceGroupRole describes the roles of the nodes in this InstanceGroup (master or nodes)
+// InstanceGroupRole describes the roles of the nodes in this InstanceGroup.
 type InstanceGroupRole string
 
 const (
-	// InstanceGroupRoleMaster is a master role
-	InstanceGroupRoleMaster InstanceGroupRole = "Master"
-	// InstanceGroupRoleNode is a node role
+	// InstanceGroupRoleControlPlane is a control-plane role.
+	InstanceGroupRoleControlPlane InstanceGroupRole = "ControlPlane"
+	// InstanceGroupRoleNode is a node role.
 	InstanceGroupRoleNode InstanceGroupRole = "Node"
-	// InstanceGroupRoleBastion is a bastion role
+	// InstanceGroupRoleBastion is a bastion role.
 	InstanceGroupRoleBastion InstanceGroupRole = "Bastion"
-	// InstanceGroupRoleAPIServer is an API server role
+	// InstanceGroupRoleAPIServer is an API server role.
 	InstanceGroupRoleAPIServer InstanceGroupRole = "APIServer"
+	// InstanceGroupRoleEtcd is an Etcd role.
+	InstanceGroupRoleEtcd InstanceGroupRole = "Etcd"
+	// InstanceGroupRoleScheduler is a Scheduler role.
+	InstanceGroupRoleScheduler InstanceGroupRole = "Scheduler"
+	// InstanceGroupRoleKubeControllerManager is a KubeControllerManager role.
+	InstanceGroupRoleKubeControllerManager InstanceGroupRole = "KubeControllerManager"
 )
 
 // AllInstanceGroupRoles is a slice of all valid InstanceGroupRole values
 var AllInstanceGroupRoles = []InstanceGroupRole{
-	InstanceGroupRoleMaster,
+	InstanceGroupRoleControlPlane,
 	InstanceGroupRoleAPIServer,
 	InstanceGroupRoleNode,
 	InstanceGroupRoleBastion,
+	InstanceGroupRoleEtcd,
+	InstanceGroupRoleScheduler,
+	InstanceGroupRoleKubeControllerManager,
+}
+
+func (r InstanceGroupRole) HasControlPlane() bool {
+	return r == InstanceGroupRoleControlPlane
+}
+
+func (r InstanceGroupRole) HasNode() bool {
+	return r == InstanceGroupRoleNode
+}
+
+func (r InstanceGroupRole) HasBastion() bool {
+	return r == InstanceGroupRoleBastion
+}
+
+func (r InstanceGroupRole) HasAPIServer() bool {
+	return r == InstanceGroupRoleAPIServer
+}
+
+func (r InstanceGroupRole) HasEtcd() bool {
+	return r == InstanceGroupRoleEtcd
+}
+
+func (r InstanceGroupRole) HasScheduler() bool {
+	return r == InstanceGroupRoleScheduler
+}
+
+func (r InstanceGroupRole) HasKubeControllerManager() bool {
+	return r == InstanceGroupRoleKubeControllerManager
+}
+
+func (r InstanceGroupRole) IsControlPlaneType() bool {
+	return r.HasControlPlane() || r.HasAPIServer() || r.HasEtcd() || r.HasScheduler() || r.HasKubeControllerManager()
 }
 
 const (
@@ -79,14 +123,21 @@ const (
 	XFSFilesystem = "xfs"
 )
 
-var (
-	// SupportedFilesystems is a list of supported filesystems to format as
-	SupportedFilesystems = []string{BtfsFilesystem, Ext4Filesystem, XFSFilesystem}
+// SupportedFilesystems is a list of supported filesystems to format as
+var SupportedFilesystems = []string{BtfsFilesystem, Ext4Filesystem, XFSFilesystem}
+
+type InstanceManager string
+
+const (
+	InstanceManagerCloudGroup InstanceManager = "CloudGroup"
+	InstanceManagerKarpenter  InstanceManager = "Karpenter"
 )
 
 // InstanceGroupSpec is the specification for an InstanceGroup
 type InstanceGroupSpec struct {
-	// Type determines the role of instances in this instance group: masters or nodes
+	// Manager determines what is managing the node lifecycle
+	Manager InstanceManager `json:"manager,omitempty"`
+	// Role determines the role of instances in this instance group.
 	Role InstanceGroupRole `json:"role,omitempty"`
 	// Image is the instance (ami etc) we should use
 	Image string `json:"image,omitempty"`
@@ -96,22 +147,12 @@ type InstanceGroupSpec struct {
 	MaxSize *int32 `json:"maxSize,omitempty"`
 	// Autoscale determines if autoscaling will be enabled for this instance group if cluster autoscaler is enabled
 	Autoscale *bool `json:"autoscale,omitempty"`
+	// AutoscalePriority determines the InstanceGroup priority for scaling when cluster autoscaler uses the priority expander.
+	AutoscalePriority int16 `json:"autoscalePriority,omitempty"`
 	// MachineType is the instance class
 	MachineType string `json:"machineType,omitempty"`
-	// RootVolumeSize is the size of the EBS root volume to use, in GB
-	RootVolumeSize *int32 `json:"rootVolumeSize,omitempty"`
-	// RootVolumeType is the type of the EBS root volume to use (e.g. gp2)
-	RootVolumeType *string `json:"rootVolumeType,omitempty"`
-	// RootVolumeIops is the provisioned IOPS when the volume type is io1, io2 or gp3 (AWS only).
-	RootVolumeIops *int32 `json:"rootVolumeIops,omitempty"`
-	// RootVolumeThroughput is the volume throughput in MBps when the volume type is gp3 (AWS only).
-	RootVolumeThroughput *int32 `json:"rootVolumeThroughput,omitempty"`
-	// RootVolumeOptimization enables EBS optimization for an instance
-	RootVolumeOptimization *bool `json:"rootVolumeOptimization,omitempty"`
-	// RootVolumeEncryption enables EBS root volume encryption for an instance
-	RootVolumeEncryption *bool `json:"rootVolumeEncryption,omitempty"`
-	// RootVolumeEncryptionKey provides the key identifier for root volume encryption
-	RootVolumeEncryptionKey *string `json:"rootVolumeEncryptionKey,omitempty"`
+	// RootVolume specifies options for the instances' root volumes.
+	RootVolume *InstanceRootVolumeSpec `json:"rootVolume,omitempty"`
 	// Volumes is a collection of additional volumes to create for instances within this instance group
 	Volumes []VolumeSpec `json:"volumes,omitempty"`
 	// VolumeMounts a collection of volume mounts
@@ -130,7 +171,7 @@ type InstanceGroupSpec struct {
 	// CPUCredits is the credit option for CPU Usage on burstable instance types (AWS only)
 	CPUCredits *string `json:"cpuCredits,omitempty"`
 	// AssociatePublicIP is true if we want instances to have a public IP
-	AssociatePublicIP *bool `json:"associatePublicIp,omitempty"`
+	AssociatePublicIP *bool `json:"associatePublicIP,omitempty"`
 	// AdditionalSecurityGroups attaches additional security groups (e.g. i-123456)
 	AdditionalSecurityGroups []string `json:"additionalSecurityGroups,omitempty"`
 	// CloudLabels defines additional tags or labels on cloud provider resources
@@ -147,12 +188,14 @@ type InstanceGroupSpec struct {
 	Taints []string `json:"taints,omitempty"`
 	// MixedInstancesPolicy defined a optional backing of an AWS ASG by a EC2 Fleet (AWS Only)
 	MixedInstancesPolicy *MixedInstancesPolicySpec `json:"mixedInstancesPolicy,omitempty"`
+	// CapacityRebalance makes ASGs proactively replace spot instances when the ASG receives a rebalance recommendation (AWS Only).
+	CapacityRebalance *bool `json:"capacityRebalance,omitempty"`
 	// AdditionalUserData is any additional user-data to be passed to the host
 	AdditionalUserData []UserData `json:"additionalUserData,omitempty"`
 	// SuspendProcesses disables the listed Scaling Policies
 	SuspendProcesses []string `json:"suspendProcesses,omitempty"`
 	// ExternalLoadBalancers define loadbalancers that should be attached to this instance group
-	ExternalLoadBalancers []LoadBalancer `json:"externalLoadBalancers,omitempty"`
+	ExternalLoadBalancers []LoadBalancerSpec `json:"externalLoadBalancers,omitempty"`
 	// DetailedInstanceMonitoring defines if detailed-monitoring is enabled (AWS only)
 	DetailedInstanceMonitoring *bool `json:"detailedInstanceMonitoring,omitempty"`
 	// IAMProfileSpec defines the identity of the cloud group IAM profile (AWS only).
@@ -182,6 +225,20 @@ type InstanceGroupSpec struct {
 	UpdatePolicy *string `json:"updatePolicy,omitempty"`
 	// WarmPool specifies a pool of pre-warmed instances for later use (AWS only).
 	WarmPool *WarmPoolSpec `json:"warmPool,omitempty"`
+	// Containerd specifies override configuration for instance group
+	Containerd *ContainerdConfig `json:"containerd,omitempty"`
+	// Packages specifies additional packages to be installed.
+	Packages []string `json:"packages,omitempty"`
+	// GuestAccelerators configures additional accelerators
+	GuestAccelerators []AcceleratorConfig `json:"guestAccelerators,omitempty"`
+	// MaxInstanceLifetime to the maximum amount of time, in seconds, that an instance can be in service.
+	// Value expected must be in form of duration ("ms", "s", "m", "h")
+	MaxInstanceLifetime *metav1.Duration `json:"maxInstanceLifetime,omitempty"`
+	// GCPProvisioningModel: Specifies the provisioning model of the GCP instance.
+	// Valid values:
+	//   'STANDARD': (default) standard provisioning with user controlled run time, no discounts
+	//   'SPOT': heavily discounted, no guaranteed run time.
+	GCPProvisioningModel *string `json:"gcpProvisioningModel,omitempty"`
 }
 
 const (
@@ -193,6 +250,8 @@ const (
 	SpotAllocationStrategyCapacityOptimized = "capacity-optimized"
 	// SpotAllocationStrategyCapacityOptimizedPrioritized indicates a capacity optimized prioritized strategy
 	SpotAllocationStrategyCapacityOptimizedPrioritized = "capacity-optimized-prioritized"
+	// SpotAllocationStrategyPriceCapacityOptimized indicates a price/capacity optimized strategy
+	SpotAllocationStrategyPriceCapacityOptimized = "price-capacity-optimized"
 )
 
 // SpotAllocationStrategies is a collection of supported strategies
@@ -201,6 +260,27 @@ var SpotAllocationStrategies = []string{
 	SpotAllocationStrategyDiversified,
 	SpotAllocationStrategyCapacityOptimized,
 	SpotAllocationStrategyCapacityOptimizedPrioritized,
+	SpotAllocationStrategyPriceCapacityOptimized,
+}
+
+// InstanceRootVolumeSpec specifies options for an instance's root volume.
+type InstanceRootVolumeSpec struct {
+	// Size is the size of the EBS root volume to use, in GB.
+	Size *int32 `json:"size,omitempty"`
+	// Type is the type of the root volume to use, for example gp3 on AWS, pd-ssd on GCE or
+	// StandardSSD_LRS on Azure. On Azure, CacheDisk, ResourceDisk or NvmeDisk place the root volume
+	// on the VM's local storage as an ephemeral OS disk instead of a managed disk.
+	Type *string `json:"type,omitempty"`
+	// IOPS is the provisioned IOPS when the volume type is io1, io2 or gp3 (AWS only).
+	IOPS *int32 `json:"iops,omitempty"`
+	// Throughput is the volume throughput in MBps when the volume type is gp3 (AWS only).
+	Throughput *int32 `json:"throughput,omitempty"`
+	// Optimization enables EBS optimization for an instance.
+	Optimization *bool `json:"optimization,omitempty"`
+	// Encryption enables EBS root volume encryption for an instance.
+	Encryption *bool `json:"encryption,omitempty"`
+	// EncryptionKey provides the key identifier for root volume encryption.
+	EncryptionKey *string `json:"encryptionKey,omitempty"`
 }
 
 // InstanceMetadataOptions defines the EC2 instance metadata service options (AWS Only)
@@ -217,6 +297,8 @@ type InstanceMetadataOptions struct {
 type MixedInstancesPolicySpec struct {
 	// Instances is a list of instance types which we are willing to run in the EC2 fleet
 	Instances []string `json:"instances,omitempty"`
+	// InstanceRequirements is a list of requirements for any instance type we are willing to run in the EC2 fleet.
+	InstanceRequirements *InstanceRequirementsSpec `json:"instanceRequirements,omitempty"`
 	// OnDemandAllocationStrategy indicates how to allocate instance types to fulfill On-Demand capacity
 	OnDemandAllocationStrategy *string `json:"onDemandAllocationStrategy,omitempty"`
 	// OnDemandBase is the minimum amount of the Auto Scaling group's capacity that must be
@@ -234,6 +316,21 @@ type MixedInstancesPolicySpec struct {
 	// SpotInstancePools is the number of Spot pools to use to allocate your Spot capacity (defaults to 2)
 	// pools are determined from the different instance types in the Overrides array of LaunchTemplate
 	SpotInstancePools *int64 `json:"spotInstancePools,omitempty"`
+}
+
+// InstanceRequirementsSpec is a list of requirements for any instance type we are willing to run in the EC2 fleet.
+type InstanceRequirementsSpec struct {
+	CPU    *MinMaxSpec `json:"cpu,omitempty"`
+	Memory *MinMaxSpec `json:"memory,omitempty"`
+	// ExcludedInstanceTypes is a list of instance types which will not be used by the instance group.
+	// You can use strings with one or more wild cards, represented by an asterisk (*), to exclude an
+	// instance type, size, or generation.
+	ExcludedInstanceTypes []string `json:"excludedInstanceTypes,omitempty"`
+}
+
+type MinMaxSpec struct {
+	Max *resource.Quantity `json:"max,omitempty"`
+	Min *resource.Quantity `json:"min,omitempty"`
 }
 
 // UserData defines a user-data section
@@ -255,8 +352,8 @@ type VolumeSpec struct {
 	Device string `json:"device,omitempty"`
 	// Encrypted indicates you want to encrypt the volume
 	Encrypted *bool `json:"encrypted,omitempty"`
-	// Iops is the provisioned IOPS for the volume when the volume type is io1, io2 or gp3 (AWS only).
-	Iops *int64 `json:"iops,omitempty"`
+	// IOPS is the provisioned IOPS for the volume when the volume type is io1, io2 or gp3 (AWS only).
+	IOPS *int64 `json:"iops,omitempty"`
 	// Throughput is the volume throughput in MBps when the volume type is gp3 (AWS only).
 	Throughput *int64 `json:"throughput,omitempty"`
 	// Key is the encryption key identifier for the volume
@@ -289,10 +386,20 @@ type IAMProfileSpec struct {
 	Profile *string `json:"profile,omitempty"`
 }
 
-// IsMaster checks if instanceGroup is a master
-func (g *InstanceGroup) IsMaster() bool {
-	switch g.Spec.Role {
-	case InstanceGroupRoleMaster:
+// IsControlPlane checks if instanceGroup is a control-plane node.
+func (g *InstanceGroup) IsControlPlane() bool {
+	switch {
+	case g.Spec.Role.HasControlPlane():
+		return true
+	default:
+		return false
+	}
+}
+
+// IsControlPlane checks if instanceGroup is a control-plane node.
+func (g *InstanceGroup) IsControlPlaneType() bool {
+	switch {
+	case g.Spec.Role.IsControlPlaneType():
 		return true
 	default:
 		return false
@@ -301,8 +408,8 @@ func (g *InstanceGroup) IsMaster() bool {
 
 // IsAPIServerOnly checks if instanceGroup runs only the API Server
 func (g *InstanceGroup) IsAPIServerOnly() bool {
-	switch g.Spec.Role {
-	case InstanceGroupRoleAPIServer:
+	switch {
+	case g.Spec.Role.HasAPIServer():
 		return true
 	default:
 		return false
@@ -310,18 +417,63 @@ func (g *InstanceGroup) IsAPIServerOnly() bool {
 }
 
 // hasAPIServer checks if instanceGroup runs an API Server
-func (g *InstanceGroup) HasAPIServer() bool {
-	return g.IsMaster() || g.IsAPIServerOnly()
+func (g *InstanceGroup) RunsAPIServer() bool {
+	return g.IsControlPlane() || g.IsAPIServerOnly()
+}
+
+// IsEtcdOnly checks if instanceGroup runs only Etcd
+func (g *InstanceGroup) IsEtcdOnly() bool {
+	return g.Spec.Role.HasEtcd()
+}
+
+// HasEtcd checks if instanceGroup runs Etcd
+func (g *InstanceGroup) RunsEtcd() bool {
+	return g.IsControlPlane() || g.IsEtcdOnly()
+}
+
+// IsSchedulerOnly checks if instanceGroup runs only Scheduler
+func (g *InstanceGroup) IsSchedulerOnly() bool {
+	return g.Spec.Role.HasScheduler()
+}
+
+// HasScheduler checks if instanceGroup runs Scheduler
+func (g *InstanceGroup) RunsScheduler() bool {
+	return g.IsControlPlane() || g.IsSchedulerOnly()
+}
+
+// IsKubeControllerManagerOnly checks if instanceGroup runs only KubeControllerManager
+func (g *InstanceGroup) IsKubeControllerManagerOnly() bool {
+	return g.Spec.Role.HasKubeControllerManager()
+}
+
+// RunsKubeControllerManager checks if instanceGroup runs KubeControllerManager
+func (g *InstanceGroup) RunsKubeControllerManager() bool {
+	return g.IsControlPlane() || g.IsKubeControllerManagerOnly()
+}
+
+// HasGVisor checks if instanceGroup is a worker that has the gVisor (runsc) runtime enabled.
+// gVisor is only valid on workers; ValidateInstanceGroup rejects it on other roles.
+func (g *InstanceGroup) HasGVisor() bool {
+	return g.Spec.Role.HasNode() &&
+		g.Spec.Containerd != nil &&
+		g.Spec.Containerd.GVisor != nil &&
+		g.Spec.Containerd.GVisor.Enabled != nil &&
+		*g.Spec.Containerd.GVisor.Enabled
 }
 
 // IsBastion checks if instanceGroup is a bastion
 func (g *InstanceGroup) IsBastion() bool {
-	switch g.Spec.Role {
-	case InstanceGroupRoleBastion:
+	switch {
+	case g.Spec.Role.HasBastion():
 		return true
 	default:
 		return false
 	}
+}
+
+// IsKarpenterManaged checks if instanceGroup is a worker node group managed by Karpenter.
+func (g *InstanceGroup) IsKarpenterManaged() bool {
+	return g.Spec.Manager == InstanceManagerKarpenter && g.Spec.Role == InstanceGroupRoleNode
 }
 
 func (g *InstanceGroup) AddInstanceGroupNodeLabel() {
@@ -331,10 +483,25 @@ func (g *InstanceGroup) AddInstanceGroupNodeLabel() {
 	g.Spec.NodeLabels[NodeLabelInstanceGroup] = g.Name
 }
 
+func (r InstanceGroupRole) ToLowerString() string {
+	switch {
+	case r.HasControlPlane():
+		return "control-plane"
+	default:
+		return strings.ToLower(string(r))
+	}
+}
+
 // LoadBalancer defines a load balancer
-type LoadBalancer struct {
+type LoadBalancerSpec struct {
 	// LoadBalancerName to associate with this instance group (AWS ELB)
 	LoadBalancerName *string `json:"loadBalancerName,omitempty"`
 	// TargetGroupARN to associate with this instance group (AWS ALB/NLB)
-	TargetGroupARN *string `json:"targetGroupArn,omitempty"`
+	TargetGroupARN *string `json:"targetGroupARN,omitempty"`
+}
+
+// AcceleratorConfig defines an accelerator config
+type AcceleratorConfig struct {
+	AcceleratorCount int64  `json:"acceleratorCount,omitempty"`
+	AcceleratorType  string `json:"acceleratorType,omitempty"`
 }

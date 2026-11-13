@@ -27,7 +27,7 @@ import (
 
 // Ocean
 
-var _ fi.HasLifecycle = &Ocean{}
+var _ fi.HasLifecycle = (*Ocean)(nil)
 
 // GetLifecycle returns the Lifecycle of the object, implementing fi.HasLifecycle
 func (o *Ocean) GetLifecycle() fi.Lifecycle {
@@ -39,7 +39,7 @@ func (o *Ocean) SetLifecycle(lifecycle fi.Lifecycle) {
 	o.Lifecycle = lifecycle
 }
 
-var _ fi.HasName = &Ocean{}
+var _ fi.HasName = (*Ocean)(nil)
 
 // GetName returns the Name of the object, implementing fi.HasName
 func (o *Ocean) GetName() *string {
@@ -48,5 +48,5 @@ func (o *Ocean) GetName() *string {
 
 // String is the stringer function for the task, producing readable output using fi.TaskAsString
 func (o *Ocean) String() string {
-	return fi.TaskAsString(o)
+	return fi.CloudupTaskAsString(o)
 }

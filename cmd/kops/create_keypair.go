@@ -21,7 +21,6 @@ import (
 	"crypto/x509/pkix"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"strings"
 	"time"
@@ -64,7 +63,7 @@ var (
 
 	createKeypairExample = templates.Examples(i18n.T(`
 	# Add a CA certificate and private key to a keyset.
-	kops create keypair ca \
+	kops create keypair kubernetes-ca \
 		--cert ~/ca.pem --key ~/ca-key.pem \
 		--name k8s-cluster.example.com --state s3://my-state-store
 
@@ -129,10 +128,10 @@ func NewCmdCreateKeypair(f *util.Factory, out io.Writer) *cobra.Command {
 			return nil
 		},
 		ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-			return completeCreateKeypair(f, options, args, toComplete)
+			return completeCreateKeypair(cmd.Context(), f, options, args, toComplete)
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return RunCreateKeypair(context.TODO(), f, out, options)
+			return RunCreateKeypair(cmd.Context(), f, out, options)
 		},
 	}
 
@@ -154,7 +153,7 @@ func RunCreateKeypair(ctx context.Context, f *util.Factory, out io.Writer, optio
 		return fmt.Errorf("error getting cluster: %q: %v", options.ClusterName, err)
 	}
 
-	clientSet, err := f.Clientset()
+	clientSet, err := f.KopsClient()
 	if err != nil {
 		return fmt.Errorf("error getting clientset: %v", err)
 	}
@@ -165,7 +164,7 @@ func RunCreateKeypair(ctx context.Context, f *util.Factory, out io.Writer, optio
 	}
 
 	if options.Keyset != "all" {
-		return createKeypair(out, options, options.Keyset, keyStore)
+		return createKeypair(ctx, out, options, options.Keyset, keyStore)
 	}
 
 	keysets, err := keyStore.ListKeysets()
@@ -175,7 +174,7 @@ func RunCreateKeypair(ctx context.Context, f *util.Factory, out io.Writer, optio
 
 	for name := range keysets {
 		if rotatableKeysetFilter(name, nil) {
-			if err := createKeypair(out, options, name, keyStore); err != nil {
+			if err := createKeypair(ctx, out, options, name, keyStore); err != nil {
 				return fmt.Errorf("creating keypair for %s: %v", name, err)
 			}
 		}
@@ -184,12 +183,12 @@ func RunCreateKeypair(ctx context.Context, f *util.Factory, out io.Writer, optio
 	return nil
 }
 
-func createKeypair(out io.Writer, options *CreateKeypairOptions, name string, keyStore fi.CAStore) error {
+func createKeypair(ctx context.Context, out io.Writer, options *CreateKeypairOptions, name string, keyStore fi.CAStore) error {
 	var err error
 	var privateKey *pki.PrivateKey
 	if options.PrivateKeyPath != "" {
 		options.PrivateKeyPath = utils.ExpandPath(options.PrivateKeyPath)
-		privateKeyBytes, err := ioutil.ReadFile(options.PrivateKeyPath)
+		privateKeyBytes, err := os.ReadFile(options.PrivateKeyPath)
 		if err != nil {
 			return fmt.Errorf("error reading user provided private key %q: %v", options.PrivateKeyPath, err)
 		}
@@ -216,13 +215,13 @@ func createKeypair(out io.Writer, options *CreateKeypairOptions, name string, ke
 			Serial:     serial,
 			PrivateKey: privateKey,
 		}
-		cert, _, _, err = pki.IssueCert(&req, nil)
+		cert, _, _, err = pki.IssueCert(ctx, &req, nil)
 		if err != nil {
 			return fmt.Errorf("error issuing certificate: %v", err)
 		}
 	} else {
 		options.CertPath = utils.ExpandPath(options.CertPath)
-		certBytes, err := ioutil.ReadFile(options.CertPath)
+		certBytes, err := os.ReadFile(options.CertPath)
 		if err != nil {
 			return fmt.Errorf("error reading user provided cert %q: %v", options.CertPath, err)
 		}
@@ -233,7 +232,7 @@ func createKeypair(out io.Writer, options *CreateKeypairOptions, name string, ke
 		}
 	}
 
-	keyset, err := keyStore.FindKeyset(name)
+	keyset, err := keyStore.FindKeyset(ctx, name)
 	var item *fi.KeysetItem
 	if os.IsNotExist(err) || (err == nil && keyset == nil) {
 		if options.Primary {
@@ -253,7 +252,7 @@ func createKeypair(out io.Writer, options *CreateKeypairOptions, name string, ke
 		return err
 	}
 
-	err = keyStore.StoreKeyset(name, keyset)
+	err = keyStore.StoreKeyset(ctx, name, keyset)
 	if err != nil {
 		return fmt.Errorf("error storing user provided keys %q %q: %v", options.CertPath, options.PrivateKeyPath, err)
 	}
@@ -268,7 +267,7 @@ func createKeypair(out io.Writer, options *CreateKeypairOptions, name string, ke
 	return nil
 }
 
-func completeKeyset(cluster *kopsapi.Cluster, clientSet simple.Clientset, args []string, filter func(name string, keyset *fi.Keyset) bool) (keyset *fi.Keyset, keyStore fi.CAStore, completions []string, directive cobra.ShellCompDirective) {
+func completeKeyset(ctx context.Context, cluster *kopsapi.Cluster, clientSet simple.Clientset, args []string, filter func(name string, keyset *fi.Keyset) bool) (keyset *fi.Keyset, keyStore fi.CAStore, completions []string, directive cobra.ShellCompDirective) {
 	keyStore, err := clientSet.KeyStore(cluster)
 	if err != nil {
 		completions, directive := commandutils.CompletionError("getting keystore", err)
@@ -296,25 +295,26 @@ func completeKeyset(cluster *kopsapi.Cluster, clientSet simple.Clientset, args [
 		return nil, nil, keysets, cobra.ShellCompDirectiveNoFileComp
 	}
 
-	keyset, err = keyStore.FindKeyset(args[0])
+	keyset, err = keyStore.FindKeyset(ctx, args[0])
 	if err != nil {
 		completions, directive := commandutils.CompletionError("finding keyset", err)
 		return nil, keyStore, completions, directive
 	}
 
+	// keyset may be nil if not found
+
 	return keyset, keyStore, nil, cobra.ShellCompDirectiveNoFileComp
 }
 
-func completeCreateKeypair(f commandutils.Factory, options *CreateKeypairOptions, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+func completeCreateKeypair(ctx context.Context, f commandutils.Factory, options *CreateKeypairOptions, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 	commandutils.ConfigureKlogForCompletion()
-	ctx := context.TODO()
 
 	cluster, clientSet, completions, directive := GetClusterForCompletion(ctx, f, nil)
 	if cluster == nil {
 		return completions, directive
 	}
 
-	keyset, _, completions, directive := completeKeyset(cluster, clientSet, args, rotatableKeysetFilter)
+	keyset, _, completions, directive := completeKeyset(ctx, cluster, clientSet, args, rotatableKeysetFilter)
 	if keyset == nil {
 		return completions, directive
 	}

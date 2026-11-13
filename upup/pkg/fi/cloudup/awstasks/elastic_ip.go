@@ -17,16 +17,17 @@ limitations under the License.
 package awstasks
 
 import (
+	"context"
 	"fmt"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"k8s.io/klog/v2"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraformWriter"
 
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
-	"k8s.io/kops/upup/pkg/fi/cloudup/cloudformation"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraform"
 )
 
@@ -53,25 +54,25 @@ type ElasticIP struct {
 	AssociatedNatGatewayRouteTable *RouteTable
 }
 
-var _ fi.CompareWithID = &ElasticIP{}
+var _ fi.CompareWithID = (*ElasticIP)(nil)
 
 func (e *ElasticIP) CompareWithID() *string {
 	return e.ID
 }
 
 // Find returns the actual ElasticIP state, or nil if not found
-func (e *ElasticIP) Find(context *fi.Context) (*ElasticIP, error) {
-	return e.find(context.Cloud.(awsup.AWSCloud))
+func (e *ElasticIP) Find(c *fi.CloudupContext) (*ElasticIP, error) {
+	return e.find(c.Context(), awsup.GetCloud(c))
 }
 
 // find will attempt to look up the elastic IP from AWS
-func (e *ElasticIP) find(cloud awsup.AWSCloud) (*ElasticIP, error) {
+func (e *ElasticIP) find(ctx context.Context, cloud awsup.AWSCloud) (*ElasticIP, error) {
 	publicIP := e.PublicIP
 	allocationID := e.ID
 
 	// Find via RouteTable -> NatGateway -> ElasticIP
 	if allocationID == nil && publicIP == nil && e.AssociatedNatGatewayRouteTable != nil {
-		ngw, err := findNatGatewayFromRouteTable(cloud, e.AssociatedNatGatewayRouteTable)
+		ngw, err := findNatGatewayFromRouteTable(ctx, cloud, e.AssociatedNatGatewayRouteTable)
 		if err != nil {
 			return nil, fmt.Errorf("error finding AssociatedNatGatewayRouteTable: %v", err)
 		}
@@ -97,7 +98,7 @@ func (e *ElasticIP) find(cloud awsup.AWSCloud) (*ElasticIP, error) {
 	// Find via tag on subnet
 	// TODO: Deprecated, because doesn't round-trip with terraform
 	if allocationID == nil && publicIP == nil && e.TagOnSubnet != nil && e.TagOnSubnet.ID != nil {
-		var filters []*ec2.Filter
+		var filters []ec2types.Filter
 		filters = append(filters, awsup.NewEC2Filter("key", "AssociatedElasticIp"))
 		filters = append(filters, awsup.NewEC2Filter("resource-id", *e.TagOnSubnet.ID))
 
@@ -105,7 +106,7 @@ func (e *ElasticIP) find(cloud awsup.AWSCloud) (*ElasticIP, error) {
 			Filters: filters,
 		}
 
-		response, err := cloud.EC2().DescribeTags(request)
+		response, err := cloud.EC2().DescribeTags(ctx, request)
 		if err != nil {
 			return nil, fmt.Errorf("error listing tags: %v", err)
 		}
@@ -125,12 +126,12 @@ func (e *ElasticIP) find(cloud awsup.AWSCloud) (*ElasticIP, error) {
 	if publicIP != nil || allocationID != nil {
 		request := &ec2.DescribeAddressesInput{}
 		if allocationID != nil {
-			request.AllocationIds = []*string{allocationID}
+			request.AllocationIds = []string{fi.ValueOf(allocationID)}
 		} else if publicIP != nil {
-			request.Filters = []*ec2.Filter{awsup.NewEC2Filter("public-ip", *publicIP)}
+			request.Filters = []ec2types.Filter{awsup.NewEC2Filter("public-ip", *publicIP)}
 		}
 
-		response, err := cloud.EC2().DescribeAddresses(request)
+		response, err := cloud.EC2().DescribeAddresses(ctx, request)
 		if err != nil {
 			return nil, fmt.Errorf("error listing ElasticIPs: %v", err)
 		}
@@ -151,20 +152,20 @@ func (e *ElasticIP) find(cloud awsup.AWSCloud) (*ElasticIP, error) {
 		actual.AssociatedNatGatewayRouteTable = e.AssociatedNatGatewayRouteTable
 
 		{
-			tags, err := cloud.EC2().DescribeTags(&ec2.DescribeTagsInput{
-				Filters: []*ec2.Filter{
+			tags, err := cloud.EC2().DescribeTags(ctx, &ec2.DescribeTagsInput{
+				Filters: []ec2types.Filter{
 					{
 						Name:   aws.String("resource-id"),
-						Values: aws.StringSlice([]string{*a.AllocationId}),
+						Values: []string{aws.ToString(a.AllocationId)},
 					},
 				},
 			})
 			if err != nil {
 				return nil, fmt.Errorf("error querying tags for ElasticIP: %v", err)
 			}
-			var ec2Tags []*ec2.Tag
+			var ec2Tags []ec2types.Tag
 			for _, t := range tags.Tags {
-				ec2Tags = append(ec2Tags, &ec2.Tag{
+				ec2Tags = append(ec2Tags, ec2types.Tag{
 					Key:   t.Key,
 					Value: t.Value,
 				})
@@ -190,8 +191,8 @@ func (e *ElasticIP) find(cloud awsup.AWSCloud) (*ElasticIP, error) {
 // This is the main entry point of the task, and will actually
 // connect our internal resource representation to an actual
 // resource in AWS
-func (e *ElasticIP) Run(c *fi.Context) error {
-	return fi.DefaultDeltaRunMethod(e, c)
+func (e *ElasticIP) Run(c *fi.CloudupContext) error {
+	return fi.CloudupDefaultDeltaRunMethod(e, c)
 }
 
 // CheckChanges validates the resource. EIPs are simple, so virtually no
@@ -221,6 +222,7 @@ func (_ *ElasticIP) CheckChanges(a, e, changes *ElasticIP) error {
 
 // RenderAWS is where we actually apply changes to AWS
 func (_ *ElasticIP) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *ElasticIP) error {
+	ctx := context.TODO()
 	var publicIp *string
 	var eipId *string
 
@@ -229,11 +231,11 @@ func (_ *ElasticIP) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *ElasticIP) e
 		klog.V(2).Infof("Creating ElasticIP for VPC")
 
 		request := &ec2.AllocateAddressInput{
-			TagSpecifications: awsup.EC2TagSpecification(ec2.ResourceTypeElasticIp, e.Tags),
+			TagSpecifications: awsup.EC2TagSpecification(ec2types.ResourceTypeElasticIp, e.Tags),
 		}
-		request.Domain = aws.String(ec2.DomainTypeVpc)
+		request.Domain = ec2types.DomainTypeVpc
 
-		response, err := t.Cloud.EC2().AllocateAddress(request)
+		response, err := t.Cloud.EC2().AllocateAddress(ctx, request)
 		if err != nil {
 			return fmt.Errorf("error creating ElasticIP: %v", err)
 		}
@@ -265,36 +267,36 @@ func (_ *ElasticIP) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *ElasticIP) e
 	} else {
 		// TODO: Figure out what we can do.  We're sort of stuck between wanting to have one code-path with
 		// terraform, and having a bigger "window of loss" here before we create the NATGateway
-		klog.V(2).Infof("ElasticIP %q not tagged on subnet; risk of leaking", fi.StringValue(publicIp))
+		klog.V(2).Infof("ElasticIP %q not tagged on subnet; risk of leaking", fi.ValueOf(publicIp))
 	}
 
 	return nil
 }
 
 type terraformElasticIP struct {
-	VPC  *bool             `json:"vpc" cty:"vpc"`
-	Tags map[string]string `json:"tags,omitempty" cty:"tags"`
+	Domain *string           `cty:"domain"`
+	Tags   map[string]string `cty:"tags"`
 }
 
 func (_ *ElasticIP) RenderTerraform(t *terraform.TerraformTarget, a, e, changes *ElasticIP) error {
-	if fi.BoolValue(e.Shared) {
+	if fi.ValueOf(e.Shared) {
 		if e.ID == nil {
 			return fmt.Errorf("ID must be set, if ElasticIP is shared: %v", e)
 		}
-		klog.V(4).Infof("reusing existing ElasticIP with id %q", aws.StringValue(e.ID))
+		klog.V(4).Infof("reusing existing ElasticIP with id %q", aws.ToString(e.ID))
 		return nil
 	}
 
 	tf := &terraformElasticIP{
-		VPC:  aws.Bool(true),
-		Tags: e.Tags,
+		Domain: aws.String("vpc"),
+		Tags:   e.Tags,
 	}
 
 	return t.RenderResource("aws_eip", *e.Name, tf)
 }
 
 func (e *ElasticIP) TerraformLink() *terraformWriter.Literal {
-	if fi.BoolValue(e.Shared) {
+	if fi.ValueOf(e.Shared) {
 		if e.ID == nil {
 			klog.Fatalf("ID must be set, if ElasticIP is shared: %v", e)
 		}
@@ -302,42 +304,4 @@ func (e *ElasticIP) TerraformLink() *terraformWriter.Literal {
 	}
 
 	return terraformWriter.LiteralProperty("aws_eip", *e.Name, "id")
-}
-
-type cloudformationElasticIP struct {
-	Domain *string             `json:"Domain"`
-	Tags   []cloudformationTag `json:"Tags,omitempty"`
-}
-
-func (_ *ElasticIP) RenderCloudformation(t *cloudformation.CloudformationTarget, a, e, changes *ElasticIP) error {
-	if fi.BoolValue(e.Shared) {
-		if e.ID == nil {
-			return fmt.Errorf("ID must be set, if ElasticIP is shared: %v", e)
-		}
-		klog.V(4).Infof("reusing existing ElasticIP with id %q", aws.StringValue(e.ID))
-		return nil
-	}
-
-	tf := &cloudformationElasticIP{
-		Domain: aws.String("vpc"),
-		Tags:   buildCloudformationTags(e.Tags),
-	}
-
-	return t.RenderResource("AWS::EC2::EIP", *e.Name, tf)
-}
-
-// Removed because you normally want CloudformationAllocationID
-//func (e *ElasticIP) CloudformationLink() *cloudformation.Literal {
-//	return cloudformation.Ref("AWS::EC2::EIP", *e.Name)
-//}
-
-func (e *ElasticIP) CloudformationAllocationID() *cloudformation.Literal {
-	if fi.BoolValue(e.Shared) {
-		if e.ID == nil {
-			klog.Fatalf("ID must be set, if ElasticIP is shared: %v", e)
-		}
-		return cloudformation.LiteralString(*e.ID)
-	}
-
-	return cloudformation.GetAtt("AWS::EC2::EIP", *e.Name, "AllocationId")
 }

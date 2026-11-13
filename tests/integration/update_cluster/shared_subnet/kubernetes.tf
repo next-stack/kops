@@ -12,7 +12,10 @@ locals {
   region                       = "us-test-1"
   subnet_ids                   = ["subnet-12345678"]
   subnet_us-test-1a_id         = "subnet-12345678"
+  vpc_cidr_block               = data.aws_vpc.sharedsubnet-example-com.cidr_block
   vpc_id                       = "vpc-12345678"
+  vpc_ipv6_cidr_block          = element(concat([for a in data.aws_vpc.sharedsubnet-example-com.ipv6_cidr_block_associations : a.ipv6_cidr_block if a.state == "associated"], [""]), 0)
+  vpc_ipv6_cidr_length         = local.vpc_ipv6_cidr_block == "" ? null : tonumber(regex(".*/(\\d+)", local.vpc_ipv6_cidr_block)[0])
 }
 
 output "cluster_name" {
@@ -67,8 +70,20 @@ output "subnet_us-test-1a_id" {
   value = "subnet-12345678"
 }
 
+output "vpc_cidr_block" {
+  value = data.aws_vpc.sharedsubnet-example-com.cidr_block
+}
+
 output "vpc_id" {
   value = "vpc-12345678"
+}
+
+output "vpc_ipv6_cidr_block" {
+  value = element(concat([for a in data.aws_vpc.sharedsubnet-example-com.ipv6_cidr_block_associations : a.ipv6_cidr_block if a.state == "associated"], [""]), 0)
+}
+
+output "vpc_ipv6_cidr_length" {
+  value = local.vpc_ipv6_cidr_block == "" ? null : tonumber(regex(".*/(\\d+)", local.vpc_ipv6_cidr_block)[0])
 }
 
 provider "aws" {
@@ -86,6 +101,7 @@ resource "aws_autoscaling_group" "master-us-test-1a-masters-sharedsubnet-example
     id      = aws_launch_template.master-us-test-1a-masters-sharedsubnet-example-com.id
     version = aws_launch_template.master-us-test-1a-masters-sharedsubnet-example-com.latest_version
   }
+  max_instance_lifetime = 0
   max_size              = 1
   metrics_granularity   = "1Minute"
   min_size              = 1
@@ -102,14 +118,14 @@ resource "aws_autoscaling_group" "master-us-test-1a-masters-sharedsubnet-example
     value               = "master-us-test-1a.masters.sharedsubnet.example.com"
   }
   tag {
-    key                 = "k8s.io/cluster-autoscaler/node-template/label/kops.k8s.io/kops-controller-pki"
+    key                 = "aws-node-termination-handler/managed"
     propagate_at_launch = true
     value               = ""
   }
   tag {
-    key                 = "k8s.io/cluster-autoscaler/node-template/label/kubernetes.io/role"
+    key                 = "k8s.io/cluster-autoscaler/node-template/label/kops.k8s.io/kops-controller-pki"
     propagate_at_launch = true
-    value               = "master"
+    value               = ""
   }
   tag {
     key                 = "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/control-plane"
@@ -117,14 +133,14 @@ resource "aws_autoscaling_group" "master-us-test-1a-masters-sharedsubnet-example
     value               = ""
   }
   tag {
-    key                 = "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/master"
+    key                 = "k8s.io/cluster-autoscaler/node-template/label/node.kubernetes.io/exclude-from-external-load-balancers"
     propagate_at_launch = true
     value               = ""
   }
   tag {
-    key                 = "k8s.io/cluster-autoscaler/node-template/label/node.kubernetes.io/exclude-from-external-load-balancers"
+    key                 = "k8s.io/role/control-plane"
     propagate_at_launch = true
-    value               = ""
+    value               = "1"
   }
   tag {
     key                 = "k8s.io/role/master"
@@ -150,6 +166,7 @@ resource "aws_autoscaling_group" "nodes-sharedsubnet-example-com" {
     id      = aws_launch_template.nodes-sharedsubnet-example-com.id
     version = aws_launch_template.nodes-sharedsubnet-example-com.latest_version
   }
+  max_instance_lifetime = 0
   max_size              = 2
   metrics_granularity   = "1Minute"
   min_size              = 2
@@ -166,9 +183,9 @@ resource "aws_autoscaling_group" "nodes-sharedsubnet-example-com" {
     value               = "nodes.sharedsubnet.example.com"
   }
   tag {
-    key                 = "k8s.io/cluster-autoscaler/node-template/label/kubernetes.io/role"
+    key                 = "aws-node-termination-handler/managed"
     propagate_at_launch = true
-    value               = "node"
+    value               = ""
   }
   tag {
     key                 = "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/node"
@@ -193,6 +210,82 @@ resource "aws_autoscaling_group" "nodes-sharedsubnet-example-com" {
   vpc_zone_identifier = ["subnet-12345678"]
 }
 
+resource "aws_autoscaling_lifecycle_hook" "master-us-test-1a-NTHLifecycleHook" {
+  autoscaling_group_name = aws_autoscaling_group.master-us-test-1a-masters-sharedsubnet-example-com.id
+  default_result         = "CONTINUE"
+  heartbeat_timeout      = 300
+  lifecycle_transition   = "autoscaling:EC2_INSTANCE_TERMINATING"
+  name                   = "master-us-test-1a-NTHLifecycleHook"
+}
+
+resource "aws_autoscaling_lifecycle_hook" "nodes-NTHLifecycleHook" {
+  autoscaling_group_name = aws_autoscaling_group.nodes-sharedsubnet-example-com.id
+  default_result         = "CONTINUE"
+  heartbeat_timeout      = 300
+  lifecycle_transition   = "autoscaling:EC2_INSTANCE_TERMINATING"
+  name                   = "nodes-NTHLifecycleHook"
+}
+
+resource "aws_cloudwatch_event_rule" "sharedsubnet-example-com-ASGLifecycle" {
+  event_pattern = file("${path.module}/data/aws_cloudwatch_event_rule_sharedsubnet.example.com-ASGLifecycle_event_pattern")
+  name          = "sharedsubnet.example.com-ASGLifecycle"
+  tags = {
+    "KubernetesCluster"                              = "sharedsubnet.example.com"
+    "Name"                                           = "sharedsubnet.example.com-ASGLifecycle"
+    "kubernetes.io/cluster/sharedsubnet.example.com" = "owned"
+  }
+}
+
+resource "aws_cloudwatch_event_rule" "sharedsubnet-example-com-InstanceScheduledChange" {
+  event_pattern = file("${path.module}/data/aws_cloudwatch_event_rule_sharedsubnet.example.com-InstanceScheduledChange_event_pattern")
+  name          = "sharedsubnet.example.com-InstanceScheduledChange"
+  tags = {
+    "KubernetesCluster"                              = "sharedsubnet.example.com"
+    "Name"                                           = "sharedsubnet.example.com-InstanceScheduledChange"
+    "kubernetes.io/cluster/sharedsubnet.example.com" = "owned"
+  }
+}
+
+resource "aws_cloudwatch_event_rule" "sharedsubnet-example-com-InstanceStateChange" {
+  event_pattern = file("${path.module}/data/aws_cloudwatch_event_rule_sharedsubnet.example.com-InstanceStateChange_event_pattern")
+  name          = "sharedsubnet.example.com-InstanceStateChange"
+  tags = {
+    "KubernetesCluster"                              = "sharedsubnet.example.com"
+    "Name"                                           = "sharedsubnet.example.com-InstanceStateChange"
+    "kubernetes.io/cluster/sharedsubnet.example.com" = "owned"
+  }
+}
+
+resource "aws_cloudwatch_event_rule" "sharedsubnet-example-com-SpotInterruption" {
+  event_pattern = file("${path.module}/data/aws_cloudwatch_event_rule_sharedsubnet.example.com-SpotInterruption_event_pattern")
+  name          = "sharedsubnet.example.com-SpotInterruption"
+  tags = {
+    "KubernetesCluster"                              = "sharedsubnet.example.com"
+    "Name"                                           = "sharedsubnet.example.com-SpotInterruption"
+    "kubernetes.io/cluster/sharedsubnet.example.com" = "owned"
+  }
+}
+
+resource "aws_cloudwatch_event_target" "sharedsubnet-example-com-ASGLifecycle-Target" {
+  arn  = aws_sqs_queue.sharedsubnet-example-com-nth.arn
+  rule = aws_cloudwatch_event_rule.sharedsubnet-example-com-ASGLifecycle.id
+}
+
+resource "aws_cloudwatch_event_target" "sharedsubnet-example-com-InstanceScheduledChange-Target" {
+  arn  = aws_sqs_queue.sharedsubnet-example-com-nth.arn
+  rule = aws_cloudwatch_event_rule.sharedsubnet-example-com-InstanceScheduledChange.id
+}
+
+resource "aws_cloudwatch_event_target" "sharedsubnet-example-com-InstanceStateChange-Target" {
+  arn  = aws_sqs_queue.sharedsubnet-example-com-nth.arn
+  rule = aws_cloudwatch_event_rule.sharedsubnet-example-com-InstanceStateChange.id
+}
+
+resource "aws_cloudwatch_event_target" "sharedsubnet-example-com-SpotInterruption-Target" {
+  arn  = aws_sqs_queue.sharedsubnet-example-com-nth.arn
+  rule = aws_cloudwatch_event_rule.sharedsubnet-example-com-SpotInterruption.id
+}
+
 resource "aws_ebs_volume" "us-test-1a-etcd-events-sharedsubnet-example-com" {
   availability_zone = "us-test-1a"
   encrypted         = false
@@ -202,6 +295,7 @@ resource "aws_ebs_volume" "us-test-1a-etcd-events-sharedsubnet-example-com" {
     "KubernetesCluster"                              = "sharedsubnet.example.com"
     "Name"                                           = "us-test-1a.etcd-events.sharedsubnet.example.com"
     "k8s.io/etcd/events"                             = "us-test-1a/us-test-1a"
+    "k8s.io/role/control-plane"                      = "1"
     "k8s.io/role/master"                             = "1"
     "kubernetes.io/cluster/sharedsubnet.example.com" = "owned"
   }
@@ -218,6 +312,7 @@ resource "aws_ebs_volume" "us-test-1a-etcd-main-sharedsubnet-example-com" {
     "KubernetesCluster"                              = "sharedsubnet.example.com"
     "Name"                                           = "us-test-1a.etcd-main.sharedsubnet.example.com"
     "k8s.io/etcd/main"                               = "us-test-1a/us-test-1a"
+    "k8s.io/role/control-plane"                      = "1"
     "k8s.io/role/master"                             = "1"
     "kubernetes.io/cluster/sharedsubnet.example.com" = "owned"
   }
@@ -271,12 +366,6 @@ resource "aws_iam_role_policy" "masters-sharedsubnet-example-com" {
   role   = aws_iam_role.masters-sharedsubnet-example-com.name
 }
 
-resource "aws_iam_role_policy" "nodes-sharedsubnet-example-com" {
-  name   = "nodes.sharedsubnet.example.com"
-  policy = file("${path.module}/data/aws_iam_role_policy_nodes.sharedsubnet.example.com_policy")
-  role   = aws_iam_role.nodes-sharedsubnet-example-com.name
-}
-
 resource "aws_key_pair" "kubernetes-sharedsubnet-example-com-c4a6ed9aa889b9e2c39cd663eb9c7157" {
   key_name   = "kubernetes.sharedsubnet.example.com-c4:a6:ed:9a:a8:89:b9:e2:c3:9c:d6:63:eb:9c:71:57"
   public_key = file("${path.module}/data/aws_key_pair_kubernetes.sharedsubnet.example.com-c4a6ed9aa889b9e2c39cd663eb9c7157_public_key")
@@ -316,7 +405,7 @@ resource "aws_launch_template" "master-us-test-1a-masters-sharedsubnet-example-c
     http_endpoint               = "enabled"
     http_protocol_ipv6          = "disabled"
     http_put_response_hop_limit = 1
-    http_tokens                 = "optional"
+    http_tokens                 = "required"
   }
   monitoring {
     enabled = false
@@ -333,11 +422,11 @@ resource "aws_launch_template" "master-us-test-1a-masters-sharedsubnet-example-c
     tags = {
       "KubernetesCluster"                                                                                     = "sharedsubnet.example.com"
       "Name"                                                                                                  = "master-us-test-1a.masters.sharedsubnet.example.com"
+      "aws-node-termination-handler/managed"                                                                  = ""
       "k8s.io/cluster-autoscaler/node-template/label/kops.k8s.io/kops-controller-pki"                         = ""
-      "k8s.io/cluster-autoscaler/node-template/label/kubernetes.io/role"                                      = "master"
       "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/control-plane"                   = ""
-      "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/master"                          = ""
       "k8s.io/cluster-autoscaler/node-template/label/node.kubernetes.io/exclude-from-external-load-balancers" = ""
+      "k8s.io/role/control-plane"                                                                             = "1"
       "k8s.io/role/master"                                                                                    = "1"
       "kops.k8s.io/instancegroup"                                                                             = "master-us-test-1a"
       "kubernetes.io/cluster/sharedsubnet.example.com"                                                        = "owned"
@@ -348,11 +437,26 @@ resource "aws_launch_template" "master-us-test-1a-masters-sharedsubnet-example-c
     tags = {
       "KubernetesCluster"                                                                                     = "sharedsubnet.example.com"
       "Name"                                                                                                  = "master-us-test-1a.masters.sharedsubnet.example.com"
+      "aws-node-termination-handler/managed"                                                                  = ""
       "k8s.io/cluster-autoscaler/node-template/label/kops.k8s.io/kops-controller-pki"                         = ""
-      "k8s.io/cluster-autoscaler/node-template/label/kubernetes.io/role"                                      = "master"
       "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/control-plane"                   = ""
-      "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/master"                          = ""
       "k8s.io/cluster-autoscaler/node-template/label/node.kubernetes.io/exclude-from-external-load-balancers" = ""
+      "k8s.io/role/control-plane"                                                                             = "1"
+      "k8s.io/role/master"                                                                                    = "1"
+      "kops.k8s.io/instancegroup"                                                                             = "master-us-test-1a"
+      "kubernetes.io/cluster/sharedsubnet.example.com"                                                        = "owned"
+    }
+  }
+  tag_specifications {
+    resource_type = "network-interface"
+    tags = {
+      "KubernetesCluster"                                                                                     = "sharedsubnet.example.com"
+      "Name"                                                                                                  = "master-us-test-1a.masters.sharedsubnet.example.com"
+      "aws-node-termination-handler/managed"                                                                  = ""
+      "k8s.io/cluster-autoscaler/node-template/label/kops.k8s.io/kops-controller-pki"                         = ""
+      "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/control-plane"                   = ""
+      "k8s.io/cluster-autoscaler/node-template/label/node.kubernetes.io/exclude-from-external-load-balancers" = ""
+      "k8s.io/role/control-plane"                                                                             = "1"
       "k8s.io/role/master"                                                                                    = "1"
       "kops.k8s.io/instancegroup"                                                                             = "master-us-test-1a"
       "kubernetes.io/cluster/sharedsubnet.example.com"                                                        = "owned"
@@ -361,11 +465,11 @@ resource "aws_launch_template" "master-us-test-1a-masters-sharedsubnet-example-c
   tags = {
     "KubernetesCluster"                                                                                     = "sharedsubnet.example.com"
     "Name"                                                                                                  = "master-us-test-1a.masters.sharedsubnet.example.com"
+    "aws-node-termination-handler/managed"                                                                  = ""
     "k8s.io/cluster-autoscaler/node-template/label/kops.k8s.io/kops-controller-pki"                         = ""
-    "k8s.io/cluster-autoscaler/node-template/label/kubernetes.io/role"                                      = "master"
     "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/control-plane"                   = ""
-    "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/master"                          = ""
     "k8s.io/cluster-autoscaler/node-template/label/node.kubernetes.io/exclude-from-external-load-balancers" = ""
+    "k8s.io/role/control-plane"                                                                             = "1"
     "k8s.io/role/master"                                                                                    = "1"
     "kops.k8s.io/instancegroup"                                                                             = "master-us-test-1a"
     "kubernetes.io/cluster/sharedsubnet.example.com"                                                        = "owned"
@@ -398,7 +502,7 @@ resource "aws_launch_template" "nodes-sharedsubnet-example-com" {
     http_endpoint               = "enabled"
     http_protocol_ipv6          = "disabled"
     http_put_response_hop_limit = 1
-    http_tokens                 = "optional"
+    http_tokens                 = "required"
   }
   monitoring {
     enabled = false
@@ -415,7 +519,7 @@ resource "aws_launch_template" "nodes-sharedsubnet-example-com" {
     tags = {
       "KubernetesCluster"                                                          = "sharedsubnet.example.com"
       "Name"                                                                       = "nodes.sharedsubnet.example.com"
-      "k8s.io/cluster-autoscaler/node-template/label/kubernetes.io/role"           = "node"
+      "aws-node-termination-handler/managed"                                       = ""
       "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/node" = ""
       "k8s.io/role/node"                                                           = "1"
       "kops.k8s.io/instancegroup"                                                  = "nodes"
@@ -427,7 +531,19 @@ resource "aws_launch_template" "nodes-sharedsubnet-example-com" {
     tags = {
       "KubernetesCluster"                                                          = "sharedsubnet.example.com"
       "Name"                                                                       = "nodes.sharedsubnet.example.com"
-      "k8s.io/cluster-autoscaler/node-template/label/kubernetes.io/role"           = "node"
+      "aws-node-termination-handler/managed"                                       = ""
+      "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/node" = ""
+      "k8s.io/role/node"                                                           = "1"
+      "kops.k8s.io/instancegroup"                                                  = "nodes"
+      "kubernetes.io/cluster/sharedsubnet.example.com"                             = "owned"
+    }
+  }
+  tag_specifications {
+    resource_type = "network-interface"
+    tags = {
+      "KubernetesCluster"                                                          = "sharedsubnet.example.com"
+      "Name"                                                                       = "nodes.sharedsubnet.example.com"
+      "aws-node-termination-handler/managed"                                       = ""
       "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/node" = ""
       "k8s.io/role/node"                                                           = "1"
       "kops.k8s.io/instancegroup"                                                  = "nodes"
@@ -437,7 +553,7 @@ resource "aws_launch_template" "nodes-sharedsubnet-example-com" {
   tags = {
     "KubernetesCluster"                                                          = "sharedsubnet.example.com"
     "Name"                                                                       = "nodes.sharedsubnet.example.com"
-    "k8s.io/cluster-autoscaler/node-template/label/kubernetes.io/role"           = "node"
+    "aws-node-termination-handler/managed"                                       = ""
     "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/node" = ""
     "k8s.io/role/node"                                                           = "1"
     "kops.k8s.io/instancegroup"                                                  = "nodes"
@@ -446,137 +562,161 @@ resource "aws_launch_template" "nodes-sharedsubnet-example-com" {
   user_data = filebase64("${path.module}/data/aws_launch_template_nodes.sharedsubnet.example.com_user_data")
 }
 
-resource "aws_s3_bucket_object" "cluster-completed-spec" {
+resource "aws_s3_object" "cluster-completed-spec" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_cluster-completed.spec_content")
+  content                = file("${path.module}/data/aws_s3_object_cluster-completed.spec_content")
   key                    = "clusters.example.com/sharedsubnet.example.com/cluster-completed.spec"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "etcd-cluster-spec-events" {
+resource "aws_s3_object" "etcd-cluster-spec-events" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_etcd-cluster-spec-events_content")
+  content                = file("${path.module}/data/aws_s3_object_etcd-cluster-spec-events_content")
   key                    = "clusters.example.com/sharedsubnet.example.com/backups/etcd/events/control/etcd-cluster-spec"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "etcd-cluster-spec-main" {
+resource "aws_s3_object" "etcd-cluster-spec-main" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_etcd-cluster-spec-main_content")
+  content                = file("${path.module}/data/aws_s3_object_etcd-cluster-spec-main_content")
   key                    = "clusters.example.com/sharedsubnet.example.com/backups/etcd/main/control/etcd-cluster-spec"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "kops-version-txt" {
+resource "aws_s3_object" "kops-version-txt" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_kops-version.txt_content")
+  content                = file("${path.module}/data/aws_s3_object_kops-version.txt_content")
   key                    = "clusters.example.com/sharedsubnet.example.com/kops-version.txt"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "manifests-etcdmanager-events" {
+resource "aws_s3_object" "manifests-channels-kops-channels" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_manifests-etcdmanager-events_content")
-  key                    = "clusters.example.com/sharedsubnet.example.com/manifests/etcd/events.yaml"
+  content                = file("${path.module}/data/aws_s3_object_manifests-channels-kops-channels_content")
+  key                    = "clusters.example.com/sharedsubnet.example.com/manifests/channels/kops-channels.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "manifests-etcdmanager-main" {
+resource "aws_s3_object" "manifests-etcdmanager-events-master-us-test-1a" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_manifests-etcdmanager-main_content")
-  key                    = "clusters.example.com/sharedsubnet.example.com/manifests/etcd/main.yaml"
+  content                = file("${path.module}/data/aws_s3_object_manifests-etcdmanager-events-master-us-test-1a_content")
+  key                    = "clusters.example.com/sharedsubnet.example.com/manifests/etcd/events-master-us-test-1a.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "manifests-static-kube-apiserver-healthcheck" {
+resource "aws_s3_object" "manifests-etcdmanager-main-master-us-test-1a" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_manifests-static-kube-apiserver-healthcheck_content")
+  content                = file("${path.module}/data/aws_s3_object_manifests-etcdmanager-main-master-us-test-1a_content")
+  key                    = "clusters.example.com/sharedsubnet.example.com/manifests/etcd/main-master-us-test-1a.yaml"
+  provider               = aws.files
+  server_side_encryption = "AES256"
+}
+
+resource "aws_s3_object" "manifests-static-kube-apiserver-healthcheck" {
+  bucket                 = "testingBucket"
+  content                = file("${path.module}/data/aws_s3_object_manifests-static-kube-apiserver-healthcheck_content")
   key                    = "clusters.example.com/sharedsubnet.example.com/manifests/static/kube-apiserver-healthcheck.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "nodeupconfig-master-us-test-1a" {
+resource "aws_s3_object" "nodeupconfig-master-us-test-1a" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_nodeupconfig-master-us-test-1a_content")
-  key                    = "clusters.example.com/sharedsubnet.example.com/igconfig/master/master-us-test-1a/nodeupconfig.yaml"
+  content                = file("${path.module}/data/aws_s3_object_nodeupconfig-master-us-test-1a_content")
+  key                    = "clusters.example.com/sharedsubnet.example.com/igconfig/control-plane/master-us-test-1a/nodeupconfig.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "nodeupconfig-nodes" {
+resource "aws_s3_object" "nodeupconfig-nodes" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_nodeupconfig-nodes_content")
+  content                = file("${path.module}/data/aws_s3_object_nodeupconfig-nodes_content")
   key                    = "clusters.example.com/sharedsubnet.example.com/igconfig/node/nodes/nodeupconfig.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "sharedsubnet-example-com-addons-bootstrap" {
+resource "aws_s3_object" "sharedsubnet-example-com-addons-aws-cloud-controller-addons-k8s-io-k8s-1-18" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_sharedsubnet.example.com-addons-bootstrap_content")
+  content                = file("${path.module}/data/aws_s3_object_sharedsubnet.example.com-addons-aws-cloud-controller.addons.k8s.io-k8s-1.18_content")
+  key                    = "clusters.example.com/sharedsubnet.example.com/addons/aws-cloud-controller.addons.k8s.io/k8s-1.18.yaml"
+  provider               = aws.files
+  server_side_encryption = "AES256"
+}
+
+resource "aws_s3_object" "sharedsubnet-example-com-addons-aws-ebs-csi-driver-addons-k8s-io-k8s-1-17" {
+  bucket                 = "testingBucket"
+  content                = file("${path.module}/data/aws_s3_object_sharedsubnet.example.com-addons-aws-ebs-csi-driver.addons.k8s.io-k8s-1.17_content")
+  key                    = "clusters.example.com/sharedsubnet.example.com/addons/aws-ebs-csi-driver.addons.k8s.io/k8s-1.17.yaml"
+  provider               = aws.files
+  server_side_encryption = "AES256"
+}
+
+resource "aws_s3_object" "sharedsubnet-example-com-addons-bootstrap" {
+  bucket                 = "testingBucket"
+  content                = file("${path.module}/data/aws_s3_object_sharedsubnet.example.com-addons-bootstrap_content")
   key                    = "clusters.example.com/sharedsubnet.example.com/addons/bootstrap-channel.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "sharedsubnet-example-com-addons-core-addons-k8s-io" {
+resource "aws_s3_object" "sharedsubnet-example-com-addons-coredns-addons-k8s-io-k8s-1-12" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_sharedsubnet.example.com-addons-core.addons.k8s.io_content")
-  key                    = "clusters.example.com/sharedsubnet.example.com/addons/core.addons.k8s.io/v1.4.0.yaml"
-  provider               = aws.files
-  server_side_encryption = "AES256"
-}
-
-resource "aws_s3_bucket_object" "sharedsubnet-example-com-addons-coredns-addons-k8s-io-k8s-1-12" {
-  bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_sharedsubnet.example.com-addons-coredns.addons.k8s.io-k8s-1.12_content")
+  content                = file("${path.module}/data/aws_s3_object_sharedsubnet.example.com-addons-coredns.addons.k8s.io-k8s-1.12_content")
   key                    = "clusters.example.com/sharedsubnet.example.com/addons/coredns.addons.k8s.io/k8s-1.12.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "sharedsubnet-example-com-addons-dns-controller-addons-k8s-io-k8s-1-12" {
+resource "aws_s3_object" "sharedsubnet-example-com-addons-dns-controller-addons-k8s-io-k8s-1-12" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_sharedsubnet.example.com-addons-dns-controller.addons.k8s.io-k8s-1.12_content")
+  content                = file("${path.module}/data/aws_s3_object_sharedsubnet.example.com-addons-dns-controller.addons.k8s.io-k8s-1.12_content")
   key                    = "clusters.example.com/sharedsubnet.example.com/addons/dns-controller.addons.k8s.io/k8s-1.12.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "sharedsubnet-example-com-addons-kops-controller-addons-k8s-io-k8s-1-16" {
+resource "aws_s3_object" "sharedsubnet-example-com-addons-kops-controller-addons-k8s-io-k8s-1-16" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_sharedsubnet.example.com-addons-kops-controller.addons.k8s.io-k8s-1.16_content")
+  content                = file("${path.module}/data/aws_s3_object_sharedsubnet.example.com-addons-kops-controller.addons.k8s.io-k8s-1.16_content")
   key                    = "clusters.example.com/sharedsubnet.example.com/addons/kops-controller.addons.k8s.io/k8s-1.16.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "sharedsubnet-example-com-addons-kubelet-api-rbac-addons-k8s-io-k8s-1-9" {
+resource "aws_s3_object" "sharedsubnet-example-com-addons-kubelet-api-rbac-addons-k8s-io-k8s-1-9" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_sharedsubnet.example.com-addons-kubelet-api.rbac.addons.k8s.io-k8s-1.9_content")
+  content                = file("${path.module}/data/aws_s3_object_sharedsubnet.example.com-addons-kubelet-api.rbac.addons.k8s.io-k8s-1.9_content")
   key                    = "clusters.example.com/sharedsubnet.example.com/addons/kubelet-api.rbac.addons.k8s.io/k8s-1.9.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "sharedsubnet-example-com-addons-limit-range-addons-k8s-io" {
+resource "aws_s3_object" "sharedsubnet-example-com-addons-limit-range-addons-k8s-io" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_sharedsubnet.example.com-addons-limit-range.addons.k8s.io_content")
+  content                = file("${path.module}/data/aws_s3_object_sharedsubnet.example.com-addons-limit-range.addons.k8s.io_content")
   key                    = "clusters.example.com/sharedsubnet.example.com/addons/limit-range.addons.k8s.io/v1.5.0.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "sharedsubnet-example-com-addons-storage-aws-addons-k8s-io-v1-15-0" {
+resource "aws_s3_object" "sharedsubnet-example-com-addons-node-termination-handler-aws-k8s-1-11" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_sharedsubnet.example.com-addons-storage-aws.addons.k8s.io-v1.15.0_content")
+  content                = file("${path.module}/data/aws_s3_object_sharedsubnet.example.com-addons-node-termination-handler.aws-k8s-1.11_content")
+  key                    = "clusters.example.com/sharedsubnet.example.com/addons/node-termination-handler.aws/k8s-1.11.yaml"
+  provider               = aws.files
+  server_side_encryption = "AES256"
+}
+
+resource "aws_s3_object" "sharedsubnet-example-com-addons-storage-aws-addons-k8s-io-v1-15-0" {
+  bucket                 = "testingBucket"
+  content                = file("${path.module}/data/aws_s3_object_sharedsubnet.example.com-addons-storage-aws.addons.k8s.io-v1.15.0_content")
   key                    = "clusters.example.com/sharedsubnet.example.com/addons/storage-aws.addons.k8s.io/v1.15.0.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
@@ -730,13 +870,28 @@ resource "aws_security_group_rule" "from-nodes-sharedsubnet-example-com-ingress-
   type                     = "ingress"
 }
 
+resource "aws_sqs_queue" "sharedsubnet-example-com-nth" {
+  message_retention_seconds = 300
+  name                      = "sharedsubnet-example-com-nth"
+  policy                    = file("${path.module}/data/aws_sqs_queue_sharedsubnet-example-com-nth_policy")
+  tags = {
+    "KubernetesCluster"                              = "sharedsubnet.example.com"
+    "Name"                                           = "sharedsubnet-example-com-nth"
+    "kubernetes.io/cluster/sharedsubnet.example.com" = "owned"
+  }
+}
+
+data "aws_vpc" "sharedsubnet-example-com" {
+  id = "vpc-12345678"
+}
+
 terraform {
   required_version = ">= 0.15.0"
   required_providers {
     aws = {
       "configuration_aliases" = [aws.files]
       "source"                = "hashicorp/aws"
-      "version"               = ">= 3.59.0"
+      "version"               = ">= 6.57.1"
     }
   }
 }

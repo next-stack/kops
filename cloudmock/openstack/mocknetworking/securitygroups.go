@@ -24,7 +24,7 @@ import (
 	"regexp"
 
 	"github.com/google/uuid"
-	"github.com/gophercloud/gophercloud/openstack/networking/v2/extensions/security/groups"
+	"github.com/gophercloud/gophercloud/v2/openstack/networking/v2/extensions/security/groups"
 )
 
 type groupListResponse struct {
@@ -70,7 +70,6 @@ func (m *MockClient) mockSecurityGroups() {
 }
 
 func (m *MockClient) listSecurityGroups(w http.ResponseWriter, vals url.Values) {
-
 	w.WriteHeader(http.StatusOK)
 
 	sgs := make([]groups.SecGroup, 0)

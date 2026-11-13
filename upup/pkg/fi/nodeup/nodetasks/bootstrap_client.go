@@ -17,26 +17,17 @@ limitations under the License.
 package nodetasks
 
 import (
-	"bufio"
-	"bytes"
-	"context"
-	"crypto/tls"
 	"crypto/x509"
-	"encoding/json"
 	"encoding/pem"
 	"fmt"
-	"io/ioutil"
-	"net"
-	"net/http"
-	"net/url"
-	"path"
-	"time"
+	"strconv"
 
 	"k8s.io/kops/pkg/apis/nodeup"
 	"k8s.io/kops/pkg/bootstrap"
+	"k8s.io/kops/pkg/kopscontrollerclient"
 	"k8s.io/kops/pkg/pki"
+	"k8s.io/kops/pkg/wellknownports"
 	"k8s.io/kops/upup/pkg/fi"
-	"k8s.io/kops/upup/pkg/fi/cloudup"
 )
 
 type BootstrapClientTask struct {
@@ -46,29 +37,30 @@ type BootstrapClientTask struct {
 	KeypairIDs map[string]string
 
 	// Client holds the client wrapper for the kops-bootstrap protocol
-	Client *KopsBootstrapClient
+	Client *kopscontrollerclient.Client
+
+	// UseChallengeCallback is true if we should run a challenge responder during the request.
+	UseChallengeCallback bool
+
+	// ClusterName is the name of the cluster
+	ClusterName string
 
 	keys map[string]*pki.PrivateKey
 }
 
 type BootstrapCert struct {
-	Cert *fi.TaskDependentResource
-	Key  *fi.TaskDependentResource
+	Cert *fi.NodeupTaskDependentResource
+	Key  *fi.NodeupTaskDependentResource
 }
 
-var _ fi.Task = &BootstrapClientTask{}
-var _ fi.HasName = &BootstrapClientTask{}
-var _ fi.HasDependencies = &BootstrapClientTask{}
+var (
+	_ fi.NodeupTask            = &BootstrapClientTask{}
+	_ fi.HasName               = &BootstrapClientTask{}
+	_ fi.NodeupHasDependencies = &BootstrapClientTask{}
+)
 
-func (b *BootstrapClientTask) GetDependencies(tasks map[string]fi.Task) []fi.Task {
-	// BootstrapClient depends on the protokube service to ensure gossip DNS
-	var deps []fi.Task
-	for _, v := range tasks {
-		if svc, ok := v.(*Service); ok && svc.Name == protokubeService {
-			deps = append(deps, v)
-		}
-	}
-	return deps
+func (b *BootstrapClientTask) GetDependencies(tasks map[string]fi.NodeupTask) []fi.NodeupTask {
+	return nil
 }
 
 func (b *BootstrapClientTask) GetName() *string {
@@ -80,13 +72,31 @@ func (b *BootstrapClientTask) String() string {
 	return "BootstrapClientTask"
 }
 
-func (b *BootstrapClientTask) Run(c *fi.Context) error {
-	ctx := context.TODO()
+func (b *BootstrapClientTask) Run(c *fi.NodeupContext) error {
+	ctx := c.Context()
 
 	req := nodeup.BootstrapRequest{
 		APIVersion: nodeup.BootstrapAPIVersion,
 		Certs:      map[string]string{},
 		KeypairIDs: b.KeypairIDs,
+	}
+
+	var challengeServer *bootstrap.ChallengeServer
+	if b.UseChallengeCallback {
+		s, err := bootstrap.NewChallengeServer(b.ClusterName, b.Client.CAs)
+		if err != nil {
+			return err
+		}
+		challengeServer = s
+		listen := ":" + strconv.Itoa(wellknownports.NodeupChallenge)
+
+		listener, err := challengeServer.NewListener(ctx, listen)
+		if err != nil {
+			return fmt.Errorf("error starting challenge listener: %w", err)
+		}
+		defer listener.Stop()
+
+		req.Challenge = listener.CreateChallenge()
 	}
 
 	if b.keys == nil {
@@ -114,7 +124,8 @@ func (b *BootstrapClientTask) Run(c *fi.Context) error {
 		req.Certs[name] = string(pem.EncodeToMemory(&pem.Block{Type: "RSA PUBLIC KEY", Bytes: pkData}))
 	}
 
-	resp, err := b.Client.QueryBootstrap(ctx, &req)
+	var resp nodeup.BootstrapResponse
+	err := b.Client.Query(ctx, &req, &resp)
 	if err != nil {
 		return err
 	}
@@ -132,93 +143,4 @@ func (b *BootstrapClientTask) Run(c *fi.Context) error {
 	}
 
 	return nil
-}
-
-type KopsBootstrapClient struct {
-	// Authenticator generates authentication credentials for requests.
-	Authenticator bootstrap.Authenticator
-	// CAs are the CA certificates for kops-controller.
-	CAs []byte
-
-	// BaseURL is the base URL for the server
-	BaseURL url.URL
-
-	httpClient *http.Client
-}
-
-func (b *KopsBootstrapClient) QueryBootstrap(ctx context.Context, req *nodeup.BootstrapRequest) (*nodeup.BootstrapResponse, error) {
-	if b.httpClient == nil {
-		certPool := x509.NewCertPool()
-		certPool.AppendCertsFromPEM(b.CAs)
-
-		b.httpClient = &http.Client{
-			Timeout: time.Duration(15) * time.Second,
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{
-					RootCAs:    certPool,
-					MinVersion: tls.VersionTLS12,
-				},
-			},
-		}
-	}
-
-	if ips, err := net.LookupIP(b.BaseURL.Hostname()); err != nil {
-		if dnsErr, ok := err.(*net.DNSError); ok && dnsErr.IsNotFound {
-			return nil, fi.NewTryAgainLaterError(fmt.Sprintf("kops-controller DNS not setup yet (not found: %v)", dnsErr))
-		}
-		return nil, err
-	} else if len(ips) == 1 && ips[0].String() == cloudup.PlaceholderIP {
-		return nil, fi.NewTryAgainLaterError(fmt.Sprintf("kops-controller DNS not setup yet (placeholder IP found: %v)", ips))
-	}
-
-	reqBytes, err := json.Marshal(req)
-	if err != nil {
-		return nil, err
-	}
-
-	bootstrapURL := b.BaseURL
-	bootstrapURL.Path = path.Join(bootstrapURL.Path, "/bootstrap")
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", bootstrapURL.String(), bytes.NewReader(reqBytes))
-	if err != nil {
-		return nil, err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	token, err := b.Authenticator.CreateToken(reqBytes)
-	if err != nil {
-		return nil, err
-	}
-	httpReq.Header.Set("Authorization", token)
-
-	resp, err := b.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, err
-	}
-	if resp.Body != nil {
-		defer resp.Body.Close()
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		detail := ""
-		if resp.Body != nil {
-			scanner := bufio.NewScanner(resp.Body)
-			if scanner.Scan() {
-				detail = scanner.Text()
-			}
-		}
-		return nil, fmt.Errorf("bootstrap returned status code %d: %s", resp.StatusCode, detail)
-	}
-
-	var bootstrapResp nodeup.BootstrapResponse
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	err = json.Unmarshal(body, &bootstrapResp)
-	if err != nil {
-		return nil, err
-	}
-
-	return &bootstrapResp, nil
 }

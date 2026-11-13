@@ -27,7 +27,7 @@ import (
 
 // IAMRole
 
-var _ fi.HasLifecycle = &IAMRole{}
+var _ fi.HasLifecycle = (*IAMRole)(nil)
 
 // GetLifecycle returns the Lifecycle of the object, implementing fi.HasLifecycle
 func (o *IAMRole) GetLifecycle() fi.Lifecycle {
@@ -39,7 +39,7 @@ func (o *IAMRole) SetLifecycle(lifecycle fi.Lifecycle) {
 	o.Lifecycle = lifecycle
 }
 
-var _ fi.HasName = &IAMRole{}
+var _ fi.HasName = (*IAMRole)(nil)
 
 // GetName returns the Name of the object, implementing fi.HasName
 func (o *IAMRole) GetName() *string {
@@ -48,5 +48,5 @@ func (o *IAMRole) GetName() *string {
 
 // String is the stringer function for the task, producing readable output using fi.TaskAsString
 func (o *IAMRole) String() string {
-	return fi.TaskAsString(o)
+	return fi.CloudupTaskAsString(o)
 }

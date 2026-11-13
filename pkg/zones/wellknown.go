@@ -17,147 +17,14 @@ limitations under the License.
 package zones
 
 import (
-	"k8s.io/klog/v2"
+	"sort"
+
+	"github.com/scaleway/scaleway-sdk-go/scw"
 	"k8s.io/kops/pkg/apis/kops"
-	"k8s.io/kops/pkg/clouds"
 )
 
-// These lists allows us to infer from certain well-known zones to a cloud
+// These lists allow us to infer from certain well-known zones to a cloud
 // Note it is safe to "overmap" zones that don't exist: we'll check later if the zones actually exist
-
-var awsZones = []string{
-	"us-east-1a",
-	"us-east-1b",
-	"us-east-1c",
-	"us-east-1d",
-	"us-east-1e",
-	"us-east-1f",
-
-	"us-east-2a",
-	"us-east-2b",
-	"us-east-2c",
-	"us-east-2d",
-	"us-east-2e",
-	"us-east-2f",
-
-	"us-west-1a",
-	"us-west-1b",
-	"us-west-1c",
-	"us-west-1d",
-	"us-west-1e",
-	"us-west-1f",
-
-	"us-west-2a",
-	"us-west-2b",
-	"us-west-2c",
-	"us-west-2d",
-	"us-west-2e",
-	"us-west-2f",
-
-	"ca-central-1a",
-	"ca-central-1b",
-	"ca-central-1c",
-	"ca-central-1d",
-
-	"eu-north-1a",
-	"eu-north-1b",
-	"eu-north-1c",
-
-	"eu-west-1a",
-	"eu-west-1b",
-	"eu-west-1c",
-	"eu-west-1d",
-	"eu-west-1e",
-
-	"eu-west-2a",
-	"eu-west-2b",
-	"eu-west-2c",
-
-	"eu-west-3a",
-	"eu-west-3b",
-	"eu-west-3c",
-
-	"eu-central-1a",
-	"eu-central-1b",
-	"eu-central-1c",
-	"eu-central-1d",
-	"eu-central-1e",
-
-	"ap-south-1a",
-	"ap-south-1b",
-	"ap-south-1c",
-	"ap-south-1d",
-	"ap-south-1e",
-
-	"ap-southeast-1a",
-	"ap-southeast-1b",
-	"ap-southeast-1c",
-	"ap-southeast-1d",
-	"ap-southeast-1e",
-
-	"ap-southeast-2a",
-	"ap-southeast-2b",
-	"ap-southeast-2c",
-	"ap-southeast-2d",
-	"ap-southeast-2e",
-
-	"ap-northeast-1a",
-	"ap-northeast-1b",
-	"ap-northeast-1c",
-	"ap-northeast-1d",
-	"ap-northeast-1e",
-
-	"ap-northeast-2a",
-	"ap-northeast-2b",
-	"ap-northeast-2c",
-	"ap-northeast-2d",
-	"ap-northeast-2e",
-
-	"ap-northeast-3a",
-	"ap-northeast-3b",
-	"ap-northeast-3c",
-	"ap-northeast-3d",
-	"ap-northeast-3e",
-
-	"ap-east-1a",
-	"ap-east-1b",
-	"ap-east-1c",
-	"ap-east-1d",
-	"ap-east-1e",
-
-	"sa-east-1a",
-	"sa-east-1b",
-	"sa-east-1c",
-	"sa-east-1d",
-	"sa-east-1e",
-
-	"cn-north-1a",
-	"cn-north-1b",
-
-	"cn-northwest-1a",
-	"cn-northwest-1b",
-	"cn-northwest-1c",
-
-	"me-south-1a",
-	"me-south-1b",
-	"me-south-1c",
-
-	"us-gov-east-1a",
-	"us-gov-east-1b",
-	"us-gov-east-1c",
-
-	"us-gov-west-1a",
-	"us-gov-west-1b",
-	"us-gov-west-1c",
-
-	"af-south-1a",
-	"af-south-1b",
-	"af-south-1c",
-
-	"eu-south-1a",
-	"eu-south-1b",
-	"eu-south-1c",
-}
 
 var gceZones = []string{
 	"asia-east1-a",
@@ -269,14 +136,10 @@ var gceZones = []string{
 
 var doZones = []string{
 	"nyc1",
-	"nyc2",
 	"nyc3",
 
-	"sfo1",
-	"sfo2",
 	"sfo3",
 
-	"ams2",
 	"ams3",
 
 	"tor1",
@@ -290,39 +153,140 @@ var doZones = []string{
 	"blr1",
 }
 
-var aliZones = []string{
-	"cn-qingdao-b",
-	"cn-qingdao-c",
+var hetznerZones = []string{
+	// eu-central
+	"fsn1",
+	"nbg1",
+	"hel1",
+	// us-east
+	"ash",
+	// us-west
+	"hil",
+}
 
-	"cn-beijing-a",
-	"cn-beijing-b",
-	"cn-beijing-c",
-	"cn-beijing-d",
-	"cn-beijing-e",
+var awsZones = []string{
+	"af-south-1a",
+	"af-south-1b",
+	"af-south-1c",
+	"ap-east-1a",
+	"ap-east-1b",
+	"ap-east-1c",
+	"ap-east-2a",
+	"ap-east-2b",
+	"ap-east-2c",
+	"ap-northeast-1a",
+	"ap-northeast-1b",
+	"ap-northeast-1c",
+	"ap-northeast-1d",
+	"ap-northeast-2a",
+	"ap-northeast-2b",
+	"ap-northeast-2c",
+	"ap-northeast-2d",
+	"ap-northeast-3a",
+	"ap-northeast-3b",
+	"ap-northeast-3c",
+	"ap-south-1a",
+	"ap-south-1b",
+	"ap-south-1c",
+	"ap-south-2a",
+	"ap-south-2b",
+	"ap-south-2c",
+	"ap-southeast-1a",
+	"ap-southeast-1b",
+	"ap-southeast-1c",
+	"ap-southeast-2a",
+	"ap-southeast-2b",
+	"ap-southeast-2c",
+	"ap-southeast-3a",
+	"ap-southeast-3b",
+	"ap-southeast-3c",
+	"ap-southeast-4a",
+	"ap-southeast-4b",
+	"ap-southeast-4c",
+	"ap-southeast-5a",
+	"ap-southeast-5b",
+	"ap-southeast-5c",
+	"ap-southeast-6a",
+	"ap-southeast-6b",
+	"ap-southeast-6c",
+	"ap-southeast-7a",
+	"ap-southeast-7b",
+	"ap-southeast-7c",
+	"ca-central-1a",
+	"ca-central-1b",
+	"ca-central-1c",
+	"ca-west-1a",
+	"ca-west-1b",
+	"ca-west-1c",
+	"eu-central-1a",
+	"eu-central-1b",
+	"eu-central-1c",
+	"eu-central-2a",
+	"eu-central-2b",
+	"eu-central-2c",
+	"eu-north-1a",
+	"eu-north-1b",
+	"eu-north-1c",
+	"eu-south-1a",
+	"eu-south-1b",
+	"eu-south-1c",
+	"eu-south-2a",
+	"eu-south-2b",
+	"eu-south-2c",
+	"eu-west-1a",
+	"eu-west-1b",
+	"eu-west-1c",
+	"eu-west-2a",
+	"eu-west-2b",
+	"eu-west-2c",
+	"eu-west-3a",
+	"eu-west-3b",
+	"eu-west-3c",
+	"il-central-1a",
+	"il-central-1b",
+	"il-central-1c",
+	"me-central-1a",
+	"me-central-1b",
+	"me-central-1c",
+	"me-south-1a",
+	"me-south-1b",
+	"me-south-1c",
+	"mx-central-1a",
+	"mx-central-1b",
+	"mx-central-1c",
+	"sa-east-1a",
+	"sa-east-1b",
+	"sa-east-1c",
+	"us-east-1a",
+	"us-east-1b",
+	"us-east-1c",
+	"us-east-1d",
+	"us-east-1e",
+	"us-east-1f",
+	"us-east-2a",
+	"us-east-2b",
+	"us-east-2c",
+	"us-west-1a",
+	"us-west-1b",
+	"us-west-1c",
+	"us-west-2a",
+	"us-west-2b",
+	"us-west-2c",
+	"us-west-2d",
 
-	"cn-zhangjiakou-a",
+	"us-gov-east-1a",
+	"us-gov-east-1b",
+	"us-gov-east-1c",
+	"us-gov-west-1a",
+	"us-gov-west-1b",
+	"us-gov-west-1c",
 
-	"cn-huhehaote-a",
-
-	"cn-hangzhou-b",
-	"cn-hangzhou-c",
-	"cn-hangzhou-d",
-	"cn-hangzhou-e",
-	"cn-hangzhou-f",
-	"cn-hangzhou-g",
-
-	"cn-shanghai-a",
-	"cn-shanghai-b",
-	"cn-shanghai-c",
-	"cn-shanghai-d",
-
-	"cn-shenzhen-a",
-	"cn-shenzhen-b",
-	"cn-shenzhen-c",
-
-	"cn-hongkong-a",
-	"cn-hongkong-b",
-	"cn-hongkong-c",
+	"cn-north-1a",
+	"cn-north-1b",
+	"cn-north-1c",
+	"cn-northwest-1a",
+	"cn-northwest-1b",
+	"cn-northwest-1c",
 }
 
 var azureZones = []string{
@@ -391,45 +355,33 @@ var azureZones = []string{
 	"westusstage",
 }
 
-// GuessCloudForZone tries to infer the cloudprovider from the zone name
-// Ali has the same zoneNames as AWS in the regions outside China, so if use AliCloud to install k8s in the regions outside China,
-// the users need to provide parameter "--cloud". But the regions inside China can be easily identified.
-func GuessCloudForZone(zone string) (kops.CloudProviderID, bool) {
-	providers := clouds.SupportedClouds()
-	var matches []kops.CloudProviderID
-	for _, provider := range providers {
-		zones := WellKnownZonesForCloud(provider)
-		for _, z := range zones {
-			if z == zone {
-				matches = append(matches, provider)
-			}
-		}
+func scwZones() []string {
+	var scwZones []string
+	for _, zone := range scw.AllZones {
+		scwZones = append(scwZones, string(zone))
 	}
-
-	if len(matches) == 0 {
-		return "", false
-	}
-	if len(matches) > 1 {
-		klog.Warningf("found multiple providers for zone %q, must pass --cloud", zone)
-		return "", false
-	}
-	return matches[0], true
+	return scwZones
 }
 
-func WellKnownZonesForCloud(matchCloud kops.CloudProviderID) []string {
+func WellKnownZonesForCloud(matchCloud kops.CloudProviderID, prefix string) []string {
+	var found []string
 	switch matchCloud {
-	case kops.CloudProviderALI:
-		return aliZones
 	case kops.CloudProviderAWS:
-		return awsZones
+		found = awsZones
 	case kops.CloudProviderAzure:
-		return azureZones
+		found = azureZones
 	case kops.CloudProviderDO:
-		return doZones
+		found = doZones
 	case kops.CloudProviderGCE:
-		return gceZones
-
+		found = gceZones
+	case kops.CloudProviderHetzner:
+		found = hetznerZones
+	case kops.CloudProviderScaleway:
+		found = scwZones()
 	default:
 		return nil
 	}
+
+	sort.Strings(found)
+	return found
 }

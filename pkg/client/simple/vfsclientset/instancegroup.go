@@ -34,7 +34,7 @@ import (
 )
 
 type InstanceGroupVFS struct {
-	commonVFS
+	VFSClientBase
 
 	clusterName string
 	cluster     *kopsapi.Cluster
@@ -52,9 +52,9 @@ func newInstanceGroupVFS(c *VFSClientset, cluster *kopsapi.Cluster) *InstanceGro
 		cluster:     cluster,
 		clusterName: clusterName,
 	}
-	r.init(kind, c.basePath.Join(clusterName, "instancegroup"), StoreVersion)
+	r.Init(kind, c.VFSContext(), c.basePath.Join(clusterName, "instancegroup"), StoreVersion)
 	r.validate = func(o runtime.Object) error {
-		return validation.ValidateInstanceGroup(o.(*kopsapi.InstanceGroup), nil).ToAggregate()
+		return validation.ValidateInstanceGroup(o.(*kopsapi.InstanceGroup), nil, false).ToAggregate()
 	}
 	return r
 }
@@ -66,7 +66,7 @@ func (c *InstanceGroupVFS) Get(ctx context.Context, name string, options metav1.
 		return nil, fmt.Errorf("ResourceVersion not supported in InstanceGroupVFS::Get")
 	}
 
-	o, err := c.find(ctx, name)
+	o, err := c.Find(ctx, name)
 	if err != nil {
 		return nil, err
 	}
@@ -88,7 +88,7 @@ func (c *InstanceGroupVFS) addLabels(ig *kopsapi.InstanceGroup) {
 
 func (c *InstanceGroupVFS) List(ctx context.Context, options metav1.ListOptions) (*kopsapi.InstanceGroupList, error) {
 	list := &kopsapi.InstanceGroupList{}
-	items, err := c.list(ctx, list.Items, options)
+	items, err := c.VFSClientBase.List(ctx, list.Items, options)
 	if err != nil {
 		return nil, err
 	}
@@ -100,6 +100,7 @@ func (c *InstanceGroupVFS) List(ctx context.Context, options metav1.ListOptions)
 }
 
 func (c *InstanceGroupVFS) Create(ctx context.Context, g *kopsapi.InstanceGroup, opts metav1.CreateOptions) (*kopsapi.InstanceGroup, error) {
+	validation.ValidateInstanceGroup(g, nil, true)
 	err := c.create(ctx, c.cluster, g)
 	if err != nil {
 		return nil, err
@@ -108,9 +109,12 @@ func (c *InstanceGroupVFS) Create(ctx context.Context, g *kopsapi.InstanceGroup,
 }
 
 func (c *InstanceGroupVFS) Update(ctx context.Context, g *kopsapi.InstanceGroup, opts metav1.UpdateOptions) (*kopsapi.InstanceGroup, error) {
-
 	old, err := c.Get(ctx, g.Name, metav1.GetOptions{})
 	if err != nil {
+		return nil, err
+	}
+
+	if err := validation.ValidateInstanceGroupUpdate(g, old).ToAggregate(); err != nil {
 		return nil, err
 	}
 
@@ -118,6 +122,7 @@ func (c *InstanceGroupVFS) Update(ctx context.Context, g *kopsapi.InstanceGroup,
 		g.SetGeneration(old.GetGeneration() + 1)
 	}
 
+	validation.ValidateInstanceGroup(g, nil, true)
 	err = c.update(ctx, c.cluster, g)
 	if err != nil {
 		return nil, err

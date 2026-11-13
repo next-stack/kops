@@ -1,6 +1,7 @@
 # Getting Started with kOps on DigitalOcean
 
-**WARNING**: digitalocean support on kOps promoted to **beta** currently meaning it is subject to change, so please use with caution.
+**WARNING**: digitalocean support on kOps promoted to **beta**, which means it is in good shape and could be used for production.
+However, it is not as rigorously tested as the stable cloud providers and there are some features that might be missing.
 
 ## Requirements
 
@@ -28,15 +29,15 @@ export S3_SECRET_ACCESS_KEY=<secret-key>  # where <secret-key> is the Spaces API
 ## Creating a Single Master Cluster
 
 In the following examples, `example.com` should be replaced with the DigitalOcean domain you created when going through the [Requirements](#requirements).
-Note that you kOps will only be able to successfully provision clusters in regions that support block storage (AMS3, BLR1, FRA1, LON1, NYC1, NYC3, SFO2, SFO3, SGP1 and TOR1).
+Note that you kOps will only be able to successfully provision clusters in regions that support block storage (AMS3, BLR1, FRA1, LON1, NYC1, NYC3, SFO3, SGP1 and TOR1).
 
 ```bash
 # debian (the default) + flannel overlay cluster in tor1
 kops create cluster --cloud=digitalocean --name=my-cluster.example.com --networking=flannel --zones=tor1 --ssh-public-key=~/.ssh/id_rsa.pub
 kops update cluster my-cluster.example.com --yes
 
-# ubuntu + weave overlay cluster in nyc1 using larger droplets
-kops create cluster --cloud=digitalocean --name=my-cluster.example.com --image=ubuntu-16-04-x64 --networking=weave --zones=nyc1 --ssh-public-key=~/.ssh/id_rsa.pub --node-size=s-8vcpu-32gb
+# ubuntu + calico overlay cluster in nyc1 using larger droplets
+kops create cluster --cloud=digitalocean --name=my-cluster.example.com --image=ubuntu-16-04-x64 --networking=calico --zones=nyc1 --ssh-public-key=~/.ssh/id_rsa.pub --node-size=s-8vcpu-32gb
 kops update cluster my-cluster.example.com --yes
 
 # debian + flannel overlay cluster in ams3 using optimized droplets
@@ -62,16 +63,31 @@ kops delete cluster my-cluster.example.com --yes
 
 ## Creating a Multi-Master HA Cluster
 
-In the below example, `dev5.k8s.local` should be replaced with any cluster name that ends with `.k8s.local` such that a gossip based cluster is created.
+In the below example, `dev5.k8s.local` should be replaced with any cluster name, as a None-DNS cluster is created.
 Ensure the master-count is odd-numbered. A load balancer is created dynamically front-facing the master instances.
 
 ```bash
 # debian (the default) + flannel overlay cluster in tor1 with 3 master setup and a public load balancer.
-kops create cluster --cloud=digitalocean --name=dev5.k8s.local --networking=cilium --api-loadbalancer-type=public --master-count=3 --zones=tor1 --ssh-public-key=~/.ssh/id_rsa.pub --yes
+kops create cluster --cloud=digitalocean --name=dev5.k8s.local --networking=cilium --api-loadbalancer-type=public --control-plane-count=3 --zones=tor1 --dns none --ssh-public-key=~/.ssh/id_rsa.pub --yes
 
 # to delete a cluster - this will also delete the load balancer associated with the cluster.
 kops delete cluster dev5.k8s.local --yes
 ```
+
+## VPC Support
+
+If you already have a VPC created and want to run kops cluster in this vpc, specify the vpc uuid as below.
+
+```bash
+/kops create cluster --cloud=digitalocean --name=dev1.example.com --vpc=af287488-862e-46c7-a783-5e5fa89cb200 --networking=cilium --zones=tor1 --ssh-public-key=~/.ssh/id_rsa.pub
+```
+
+If you want to create a new VPC for running your kops cluster, specify the network-cidr as below.
+
+```bash
+./kops create cluster --cloud=digitalocean --name=dev1.example.com --networking=calico --network-cidr=192.168.11.0/24 --zones=nyc1 --ssh-public-key=~/.ssh/id_rsa.pub --yes
+```
+
 
 ## Features Still in Development
 
@@ -79,6 +95,6 @@ kOps for DigitalOcean currently does not support these features:
 
 * kops terraform support for DO
 
-# Next steps
+## Next steps
 
 Now that you have a working kOps cluster, read through the [recommendations for production setups guide](production.md) to learn more about how to configure kOps for production workloads.

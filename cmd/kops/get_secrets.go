@@ -69,7 +69,7 @@ func NewCmdGetSecrets(f *util.Factory, out io.Writer, getOptions *GetOptions) *c
 		},
 		ValidArgsFunction: completeSecretNames(f),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return RunGetSecrets(context.TODO(), f, out, &options)
+			return RunGetSecrets(cmd.Context(), f, out, &options)
 		},
 	}
 
@@ -110,7 +110,7 @@ func RunGetSecrets(ctx context.Context, f *util.Factory, out io.Writer, options 
 		return fmt.Errorf("unknown secret type %q", options.Type)
 	}
 
-	clientset, err := f.Clientset()
+	clientset, err := f.KopsClient()
 	if err != nil {
 		return err
 	}
@@ -130,7 +130,7 @@ func RunGetSecrets(ctx context.Context, f *util.Factory, out io.Writer, options 
 	}
 
 	if len(items) == 0 {
-		return fmt.Errorf("No secrets found")
+		return fmt.Errorf("no secrets found")
 	}
 	switch options.Output {
 

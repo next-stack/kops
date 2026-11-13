@@ -20,7 +20,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
+	"os"
 
 	"github.com/spf13/cobra"
 	"k8s.io/kops/cmd/kops/util"
@@ -71,7 +71,7 @@ func NewCmdCreateSecretCiliumPassword(f *util.Factory, out io.Writer) *cobra.Com
 		Args:              rootCommand.clusterNameArgs(&options.ClusterName),
 		ValidArgsFunction: commandutils.CompleteClusterName(f, true, false),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return RunCreateSecretCiliumEncryptionConfig(context.TODO(), f, out, options)
+			return RunCreateSecretCiliumEncryptionConfig(cmd.Context(), f, out, options)
 		},
 	}
 
@@ -85,13 +85,13 @@ func NewCmdCreateSecretCiliumPassword(f *util.Factory, out io.Writer) *cobra.Com
 	return cmd
 }
 
-func RunCreateSecretCiliumEncryptionConfig(ctx context.Context, f *util.Factory, out io.Writer, options *CreateSecretCiliumPasswordOptions) error {
+func RunCreateSecretCiliumEncryptionConfig(ctx context.Context, f commandutils.Factory, out io.Writer, options *CreateSecretCiliumPasswordOptions) error {
 	cluster, err := GetCluster(ctx, f, options.ClusterName)
 	if err != nil {
 		return err
 	}
 
-	clientset, err := f.Clientset()
+	clientset, err := f.KopsClient()
 	if err != nil {
 		return err
 	}
@@ -108,7 +108,7 @@ func RunCreateSecretCiliumEncryptionConfig(ctx context.Context, f *util.Factory,
 			return fmt.Errorf("reading Cilium IPSec config from stdin: %v", err)
 		}
 	} else {
-		data, err = ioutil.ReadFile(options.CiliumPasswordFilePath)
+		data, err = os.ReadFile(options.CiliumPasswordFilePath)
 		if err != nil {
 			return fmt.Errorf("reading Cilium IPSec config %v: %v", options.CiliumPasswordFilePath, err)
 		}
@@ -125,7 +125,7 @@ func RunCreateSecretCiliumEncryptionConfig(ctx context.Context, f *util.Factory,
 	}
 
 	if !options.Force {
-		_, created, err := secretStore.GetOrCreateSecret("ciliumpassword", secret)
+		_, created, err := secretStore.GetOrCreateSecret(ctx, "ciliumpassword", secret)
 		if err != nil {
 			return fmt.Errorf("error adding Cilium IPSec secret: %v", err)
 		}

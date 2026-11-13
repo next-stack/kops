@@ -24,7 +24,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
+	"math/big"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -42,9 +42,7 @@ import (
 	"k8s.io/kubectl/pkg/util/i18n"
 )
 
-var (
-	kubectlAuthShort = i18n.T(`kubectl authentication plugin`)
-)
+var kubectlAuthShort = i18n.T(`kubectl authentication plugin`)
 
 // HelperKubectlAuthOptions holds the options for generating an authentication token
 type HelperKubectlAuthOptions struct {
@@ -73,7 +71,7 @@ func NewCmdHelperKubectlAuth(f *util.Factory, out io.Writer) *cobra.Command {
 		Use:   "kubectl-auth",
 		Short: kubectlAuthShort,
 		Run: func(cmd *cobra.Command, args []string) {
-			ctx := context.TODO()
+			ctx := cmd.Context()
 
 			err := RunKubectlAuthHelper(ctx, f, out, options)
 			if err != nil {
@@ -145,10 +143,10 @@ func RunKubectlAuthHelper(ctx context.Context, f *util.Factory, out io.Writer, o
 	}
 
 	if !isCached {
-		if err := os.MkdirAll(filepath.Dir(cacheFilePath), 0755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(cacheFilePath), 0o755); err != nil {
 			klog.Warningf("failed to make cache directory for %q: %v", cacheFilePath, err)
 		}
-		if err := ioutil.WriteFile(cacheFilePath, b, 0600); err != nil {
+		if err := os.WriteFile(cacheFilePath, b, 0o600); err != nil {
 			klog.Warningf("failed to write cache file %q: %v", cacheFilePath, err)
 		}
 	}
@@ -177,7 +175,11 @@ func cacheFilePath(kopsStateStore string, clusterName string) string {
 	b.WriteString(clusterName)
 	b.WriteByte(0)
 
-	hash := fmt.Sprintf("%x", sha256.New().Sum(b.Bytes()))
+	var i big.Int
+	hb := sha256.Sum224(b.Bytes())
+	i.SetBytes(hb[:])
+	hash := i.Text(62)
+
 	sanitizedName := strings.Map(func(r rune) rune {
 		switch {
 		case r >= 'a' && r <= 'z':
@@ -190,11 +192,14 @@ func cacheFilePath(kopsStateStore string, clusterName string) string {
 			return '_'
 		}
 	}, clusterName)
+	if len(sanitizedName) > 32 {
+		sanitizedName = sanitizedName[:32]
+	}
 	return filepath.Join(homedir.HomeDir(), ".kube", "cache", "kops-authentication", sanitizedName+"_"+hash)
 }
 
 func loadCachedExecCredential(cacheFilePath string) (*ExecCredential, error) {
-	b, err := ioutil.ReadFile(cacheFilePath)
+	b, err := os.ReadFile(cacheFilePath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			// expected - a cache miss
@@ -221,7 +226,7 @@ func loadCachedExecCredential(cacheFilePath string) (*ExecCredential, error) {
 }
 
 func buildCredentials(ctx context.Context, f *util.Factory, options *HelperKubectlAuthOptions) (*ExecCredentialStatus, error) {
-	clientset, err := f.Clientset()
+	clientset, err := f.KopsClient()
 	if err != nil {
 		return nil, err
 	}
@@ -258,7 +263,7 @@ func buildCredentials(ctx context.Context, f *util.Factory, options *HelperKubec
 		},
 		Validity: options.Lifetime,
 	}
-	cert, privateKey, _, err := pki.IssueCert(&req, keyStore)
+	cert, privateKey, _, err := pki.IssueCert(ctx, &req, fi.NewPKIKeystoreAdapter(keyStore))
 	if err != nil {
 		return nil, fmt.Errorf("unable to issue certificate: %v", err)
 	}

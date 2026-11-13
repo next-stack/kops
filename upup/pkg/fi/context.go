@@ -18,103 +18,125 @@ package fi
 
 import (
 	"bytes"
+	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"reflect"
 	"strings"
 
 	"k8s.io/klog/v2"
-	"k8s.io/kops/dnsprovider/pkg/dnsprovider"
 	"k8s.io/kops/pkg/apis/kops"
+	"k8s.io/kops/pkg/apis/nodeup"
 	"k8s.io/kops/util/pkg/vfs"
 )
 
-type Context struct {
-	Tmpdir string
+type Context[T SubContext] struct {
+	ctx context.Context
 
-	Target            Target
-	DNS               dnsprovider.Interface
-	Cloud             Cloud
-	Cluster           *kops.Cluster
+	Target Target[T]
+
+	tasks    map[string]Task[T]
+	warnings []*Warning[T]
+
+	deletionProcessingMode DeletionProcessingMode
+
+	T T
+}
+
+type CloudupContext = Context[CloudupSubContext]
+type InstallContext = Context[InstallSubContext]
+type NodeupContext = Context[NodeupSubContext]
+
+type SubContext interface {
+	CloudupSubContext | InstallSubContext | NodeupSubContext
+}
+
+type CloudupSubContext struct {
+	Cloud   Cloud
+	Cluster *kops.Cluster
+	// TODO: Few places use this. They could instead get it from the cluster spec.
+	ClusterConfigBase vfs.Path
 	Keystore          Keystore
 	SecretStore       SecretStore
-	ClusterConfigBase vfs.Path
+}
+type InstallSubContext struct{}
+type NodeupSubContext struct {
+	BootConfig   *nodeup.BootConfig
+	NodeupConfig *nodeup.Config
+	Keystore     KeystoreReader
+}
 
-	CheckExisting bool
-
-	tasks map[string]Task
-
-	warnings []*Warning
+func (c *Context[T]) Context() context.Context {
+	return c.ctx
 }
 
 // Warning holds the details of a warning encountered during validation/creation
-type Warning struct {
-	Task    Task
+type Warning[T SubContext] struct {
+	Task    Task[T]
 	Message string
 }
 
-func NewContext(target Target, cluster *kops.Cluster, cloud Cloud, keystore Keystore, secretStore SecretStore, clusterConfigBase vfs.Path, checkExisting bool, tasks map[string]Task) (*Context, error) {
-	c := &Context{
-		Cloud:             cloud,
-		Cluster:           cluster,
-		Target:            target,
-		Keystore:          keystore,
-		SecretStore:       secretStore,
-		ClusterConfigBase: clusterConfigBase,
-		CheckExisting:     checkExisting,
-		tasks:             tasks,
-	}
+func newContext[T SubContext](ctx context.Context, deletionProcessingMode DeletionProcessingMode, target Target[T], sub T, tasks map[string]Task[T]) (*Context[T], error) {
+	c := &Context[T]{
+		ctx:    ctx,
+		Target: target,
+		tasks:  tasks,
+		T:      sub,
 
-	t, err := ioutil.TempDir("", "deploy")
-	if err != nil {
-		return nil, fmt.Errorf("error creating temporary directory: %v", err)
+		deletionProcessingMode: deletionProcessingMode,
 	}
-	c.Tmpdir = t
 
 	return c, nil
 }
 
-func (c *Context) AllTasks() map[string]Task {
+func NewInstallContext(ctx context.Context, target InstallTarget, tasks map[string]InstallTask) (*InstallContext, error) {
+	// We don't expect deletions, but we would be the one to handle them.
+	deletionProcessingMode := DeletionProcessingModeDeleteIncludingDeferred
+
+	sub := InstallSubContext{}
+	return newContext[InstallSubContext](ctx, deletionProcessingMode, target, sub, tasks)
+}
+
+func NewNodeupContext(ctx context.Context, target NodeupTarget, keystore KeystoreReader, bootConfig *nodeup.BootConfig, nodeupConfig *nodeup.Config, tasks map[string]NodeupTask) (*NodeupContext, error) {
+	// We don't expect deletions, but we would be the one to handle them.
+	deletionProcessingMode := DeletionProcessingModeDeleteIncludingDeferred
+
+	sub := NodeupSubContext{
+		BootConfig:   bootConfig,
+		NodeupConfig: nodeupConfig,
+		Keystore:     keystore,
+	}
+	return newContext[NodeupSubContext](ctx, deletionProcessingMode, target, sub, tasks)
+}
+
+func NewCloudupContext(ctx context.Context, deletionProcessingMode DeletionProcessingMode, target CloudupTarget, cluster *kops.Cluster, cloud Cloud, keystore Keystore, secretStore SecretStore, clusterConfigBase vfs.Path, tasks map[string]CloudupTask) (*CloudupContext, error) {
+	sub := CloudupSubContext{
+		Cloud:             cloud,
+		Cluster:           cluster,
+		ClusterConfigBase: clusterConfigBase,
+		Keystore:          keystore,
+		SecretStore:       secretStore,
+	}
+	return newContext[CloudupSubContext](ctx, deletionProcessingMode, target, sub, tasks)
+}
+
+func (c *Context[T]) AllTasks() map[string]Task[T] {
 	return c.tasks
 }
 
-func (c *Context) RunTasks(options RunTasksOptions) error {
-	e := &executor{
+func (c *Context[T]) RunTasks(options RunTasksOptions) error {
+	e := &executor[T]{
 		context: c,
 		options: options,
 	}
-	return e.RunTasks(c.tasks)
+	return e.RunTasks(c.ctx, c.tasks)
 }
-
-func (c *Context) Close() {
-	klog.V(2).Infof("deleting temp dir: %q", c.Tmpdir)
-	if c.Tmpdir != "" {
-		err := os.RemoveAll(c.Tmpdir)
-		if err != nil {
-			klog.Warningf("unable to delete temporary directory %q: %v", c.Tmpdir, err)
-		}
-	}
-}
-
-//func (c *Context) MergeOptions(options Options) error {
-//	return c.Options.Merge(options)
-//}
-
-func (c *Context) NewTempDir(prefix string) (string, error) {
-	t, err := ioutil.TempDir(c.Tmpdir, prefix)
-	if err != nil {
-		return "", fmt.Errorf("error creating temporary directory: %v", err)
-	}
-	return t, nil
-}
-
-var typeContextPtr = reflect.TypeOf((*Context)(nil))
 
 // Render dispatches the creation of an object to the appropriate handler defined on the Task,
 // it is typically called after we have checked the existing state of the Task and determined that is different
 // from the desired state.
-func (c *Context) Render(a, e, changes Task) error {
+func (c *Context[T]) Render(a, e, changes Task[T]) error {
+	typeContextPtr := reflect.TypeOf((*Context[T])(nil))
 	var lifecycle Lifecycle
 	if hl, ok := e.(HasLifecycle); ok {
 		lifecycle = hl.GetLifecycle()
@@ -122,7 +144,6 @@ func (c *Context) Render(a, e, changes Task) error {
 
 	if lifecycle != "" {
 		if reflect.ValueOf(a).IsNil() {
-
 			switch lifecycle {
 			case LifecycleExistsAndValidates:
 				return fmt.Errorf("lifecycle set to ExistsAndValidates, but object was not found")
@@ -166,8 +187,8 @@ func (c *Context) Render(a, e, changes Task) error {
 		}
 	}
 
-	if _, ok := c.Target.(*DryRunTarget); ok {
-		return c.Target.(*DryRunTarget).Render(a, e, changes)
+	if _, ok := c.Target.(*DryRunTarget[T]); ok {
+		return c.Target.(*DryRunTarget[T]).Render(a, e, changes)
 	}
 
 	v := reflect.ValueOf(e)
@@ -175,27 +196,49 @@ func (c *Context) Render(a, e, changes Task) error {
 
 	targetType := reflect.ValueOf(c.Target).Type()
 
-	var renderer *reflect.Method
+	// Probe renderers with literal method names only: enumerating the method set or passing a
+	// variable name to MethodByName would disable linker pruning of every unused exported method.
+	candidates := []struct {
+		name   string
+		method reflect.Value
+	}{
+		{"Render", v.MethodByName("Render")},
+		{"RenderAWS", v.MethodByName("RenderAWS")},
+		{"RenderAzure", v.MethodByName("RenderAzure")},
+		{"RenderDO", v.MethodByName("RenderDO")},
+		{"RenderGCE", v.MethodByName("RenderGCE")},
+		{"RenderHetzner", v.MethodByName("RenderHetzner")},
+		{"RenderInstall", v.MethodByName("RenderInstall")},
+		{"RenderLinode", v.MethodByName("RenderLinode")},
+		{"RenderLocal", v.MethodByName("RenderLocal")},
+		{"RenderOpenstack", v.MethodByName("RenderOpenstack")},
+		{"RenderScw", v.MethodByName("RenderScw")},
+		{"RenderSubnet", v.MethodByName("RenderSubnet")},
+		{"RenderTerraform", v.MethodByName("RenderTerraform")},
+	}
+
+	var rendererName string
+	var renderer reflect.Value
 	var rendererArgs []reflect.Value
 
-	for i := 0; i < vType.NumMethod(); i++ {
-		method := vType.Method(i)
-		if !strings.HasPrefix(method.Name, "Render") {
+	for _, candidate := range candidates {
+		if !candidate.method.IsValid() {
 			continue
 		}
+		mType := candidate.method.Type()
 		match := true
 
 		var args []reflect.Value
-		for j := 0; j < method.Type.NumIn(); j++ {
-			arg := method.Type.In(j)
-			if arg.ConvertibleTo(vType) {
+		for j := 0; j < mType.NumIn(); j++ {
+			arg := mType.In(j)
+			if vType.ConvertibleTo(arg) {
 				continue
 			}
-			if arg.ConvertibleTo(typeContextPtr) {
+			if typeContextPtr.ConvertibleTo(arg) {
 				args = append(args, reflect.ValueOf(c))
 				continue
 			}
-			if arg.ConvertibleTo(targetType) {
+			if targetType.ConvertibleTo(arg) {
 				args = append(args, reflect.ValueOf(c.Target))
 				continue
 			}
@@ -203,28 +246,28 @@ func (c *Context) Render(a, e, changes Task) error {
 			break
 		}
 		if match {
-			if renderer != nil {
-				if method.Name == "Render" {
+			if renderer.IsValid() {
+				if candidate.name == "Render" {
 					continue
 				}
-				if renderer.Name != "Render" {
+				if rendererName != "Render" {
 					return fmt.Errorf("found multiple Render methods that could be involved on %T", e)
 				}
 			}
-			renderer = &method
+			rendererName = candidate.name
+			renderer = candidate.method
 			rendererArgs = args
 		}
 
 	}
-	if renderer == nil {
+	if !renderer.IsValid() {
 		return fmt.Errorf("could not find Render method on type %T (target %T)", e, c.Target)
 	}
 	rendererArgs = append(rendererArgs, reflect.ValueOf(a))
 	rendererArgs = append(rendererArgs, reflect.ValueOf(e))
 	rendererArgs = append(rendererArgs, reflect.ValueOf(changes))
-	klog.V(11).Infof("Calling method %s on %T", renderer.Name, e)
-	m := v.MethodByName(renderer.Name)
-	rv := m.Call(rendererArgs)
+	klog.V(11).Infof("Calling method %s on %T", rendererName, e)
+	rv := renderer.Call(rendererArgs)
 	var rvErr error
 	if !rv[0].IsNil() {
 		rvErr = rv[0].Interface().(error)
@@ -234,8 +277,8 @@ func (c *Context) Render(a, e, changes Task) error {
 
 // AddWarning records a warning encountered during validation / creation.
 // Typically this will be an error that we choose to ignore because of Lifecycle.
-func (c *Context) AddWarning(task Task, message string) {
-	warning := &Warning{
+func (c *Context[T]) AddWarning(task Task[T], message string) {
+	warning := &Warning[T]{
 		Task:    task,
 		Message: message,
 	}
@@ -263,7 +306,8 @@ func (e *ExistsAndWarnIfChangesError) Error() string { return e.msg }
 
 // TryAgainLaterError is the custom used when a task needs to fail validation with a message and try again later
 type TryAgainLaterError struct {
-	msg string
+	msg   string
+	inner error
 }
 
 // NewTryAgainLaterError is a builder for TryAgainLaterError.
@@ -273,5 +317,17 @@ func NewTryAgainLaterError(message string) *TryAgainLaterError {
 	}
 }
 
+func (e *TryAgainLaterError) WithError(err error) *TryAgainLaterError {
+	e.inner = err
+	return e
+}
+
 // TryAgainLaterError implementation of the error interface.
-func (e *TryAgainLaterError) Error() string { return e.msg }
+func (e *TryAgainLaterError) Error() string {
+	if e.inner != nil {
+		return fmt.Sprintf("%v: %v", e.msg, e.inner)
+	}
+	return e.msg
+}
+
+func (e *TryAgainLaterError) Unwrap() error { return e.inner }

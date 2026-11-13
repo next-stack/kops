@@ -27,9 +27,9 @@ type SSHKeyModelBuilder struct {
 	Lifecycle fi.Lifecycle
 }
 
-var _ fi.ModelBuilder = &SSHKeyModelBuilder{}
+var _ fi.CloudupModelBuilder = &SSHKeyModelBuilder{}
 
-func (b *SSHKeyModelBuilder) Build(c *fi.ModelBuilderContext) error {
+func (b *SSHKeyModelBuilder) Build(c *fi.CloudupModelBuilderContext) error {
 	if !b.UseSSHKey() {
 		return nil
 	}
@@ -39,10 +39,10 @@ func (b *SSHKeyModelBuilder) Build(c *fi.ModelBuilderContext) error {
 		return err
 	}
 	t := &awstasks.SSHKey{
-		Name:      fi.String(name),
+		Name:      new(name),
 		Lifecycle: b.Lifecycle,
 		Tags:      b.CloudTags(b.ClusterName(), false),
-		Shared:    fi.StringValue(b.Cluster.Spec.SSHKeyName) != "",
+		Shared:    fi.ValueOf(b.Cluster.Spec.SSHKeyName) != "",
 	}
 	if len(b.SSHPublicKeys) >= 1 {
 		t.PublicKey = fi.NewStringResource(string(b.SSHPublicKeys[0]))

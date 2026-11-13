@@ -4,6 +4,8 @@ metadata:
   creationTimestamp: "2016-12-10T22:42:27Z"
   name: minimal-warmpool.example.com
 spec:
+  assets:
+    containerProxy: kops.k8s.io/remapped-image
   kubernetesApiAccess:
   - 0.0.0.0/0
   channel: stable
@@ -24,8 +26,7 @@ spec:
   iam: {}
   kubelet:
     anonymousAuth: false
-  kubernetesVersion: v1.21.0
-  masterInternalName: api.internal.minimal-warmpool.example.com
+  kubernetesVersion: v1.32.0
   masterPublicName: api.minimal-warmpool.example.com
   networkCIDR: 172.20.0.0/16
   networking:
@@ -33,15 +34,14 @@ spec:
   nonMasqueradeCIDR: 100.64.0.0/10
   sshAccess:
     - 0.0.0.0/0
-  topology:
-    masters: public
-    nodes: public
   subnets:
   - cidr: 172.20.32.0/19
     name: us-test-1a
     type: Public
     zone: us-test-1a
-  warmPool: {}
+  warmPool:
+    enableLifecycleHook: true
+    maxSize: 1
 
 ---
 
@@ -54,7 +54,7 @@ metadata:
     kops.k8s.io/cluster: minimal-warmpool.example.com
 spec:
   associatePublicIp: true
-  image: kope.io/k8s-1.4-debian-jessie-amd64-hvm-ebs-2016-10-21
+  image: ubuntu/images/hvm-ssd-gp3/ubuntu-resolute-26.04-amd64-server-20220404
   machineType: t2.medium
   maxSize: 2
   minSize: 2
@@ -73,7 +73,7 @@ metadata:
     kops.k8s.io/cluster: minimal-warmpool.example.com
 spec:
   associatePublicIp: true
-  image: kope.io/k8s-1.4-debian-jessie-amd64-hvm-ebs-2016-10-21
+  image: ubuntu/images/hvm-ssd-gp3/ubuntu-resolute-26.04-amd64-server-20220404
   machineType: m3.medium
   maxSize: 1
   minSize: 1

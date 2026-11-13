@@ -18,10 +18,13 @@ package kubemanifest
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/klog/v2"
 	"k8s.io/kops/util/pkg/text"
 	"sigs.k8s.io/yaml"
@@ -42,6 +45,20 @@ func (o *Object) ToUnstructured() *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: o.data}
 }
 
+// GroupVersionKind returns the group/version/kind information for the object
+func (o *Object) GroupVersionKind() schema.GroupVersionKind {
+	return o.ToUnstructured().GroupVersionKind()
+}
+
+// FromRuntimeObject converts from a runtime.Object.
+func FromRuntimeObject(obj runtime.Object) (*Object, error) {
+	data, err := runtime.DefaultUnstructuredConverter.ToUnstructured(obj)
+	if err != nil {
+		return nil, fmt.Errorf("unable to convert %T to unstructured: %w", obj, err)
+	}
+	return NewObject(data), nil
+}
+
 // ObjectList describes a list of objects, allowing us to add bulk-methods
 type ObjectList []*Object
 
@@ -60,11 +77,12 @@ func LoadObjectsFrom(contents []byte) (ObjectList, error) {
 		data := make(map[string]interface{})
 		err := yaml.Unmarshal(section, &data)
 		if err != nil {
+			klog.Infof("invalid YAML section: %s", string(section))
 			return nil, fmt.Errorf("error parsing yaml: %v", err)
 		}
 
 		obj := &Object{
-			//bytes: section,
+			// bytes: section,
 			data: data,
 		}
 		objects = append(objects, obj)
@@ -88,7 +106,7 @@ func hasYAMLContent(yamlData []byte) bool {
 
 // ToYAML serializes a list of objects back to bytes; it is the opposite of LoadObjectsFrom
 func (l ObjectList) ToYAML() ([]byte, error) {
-	var yamlSeparator = []byte("\n---\n\n")
+	yamlSeparator := []byte("\n---\n\n")
 	var yamls [][]byte
 	for _, object := range l {
 		// Don't serialize empty objects - they confuse yaml parsers
@@ -110,7 +128,15 @@ func (l ObjectList) ToYAML() ([]byte, error) {
 func (m *Object) ToYAML() ([]byte, error) {
 	b, err := yaml.Marshal(m.data)
 	if err != nil {
-		return nil, fmt.Errorf("error marshaling manifest to yaml: %v", err)
+		return nil, fmt.Errorf("error marshaling manifest to yaml: %w", err)
+	}
+	return b, nil
+}
+
+func (m *Object) MarshalJSON() ([]byte, error) {
+	b, err := json.Marshal(m.data)
+	if err != nil {
+		return nil, fmt.Errorf("error marshaling manifest to json: %w", err)
 	}
 	return b, nil
 }

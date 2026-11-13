@@ -27,7 +27,7 @@ import (
 
 // EventBridgeRule
 
-var _ fi.HasLifecycle = &EventBridgeRule{}
+var _ fi.HasLifecycle = (*EventBridgeRule)(nil)
 
 // GetLifecycle returns the Lifecycle of the object, implementing fi.HasLifecycle
 func (o *EventBridgeRule) GetLifecycle() fi.Lifecycle {
@@ -39,7 +39,7 @@ func (o *EventBridgeRule) SetLifecycle(lifecycle fi.Lifecycle) {
 	o.Lifecycle = lifecycle
 }
 
-var _ fi.HasName = &EventBridgeRule{}
+var _ fi.HasName = (*EventBridgeRule)(nil)
 
 // GetName returns the Name of the object, implementing fi.HasName
 func (o *EventBridgeRule) GetName() *string {
@@ -48,5 +48,5 @@ func (o *EventBridgeRule) GetName() *string {
 
 // String is the stringer function for the task, producing readable output using fi.TaskAsString
 func (o *EventBridgeRule) String() string {
-	return fi.TaskAsString(o)
+	return fi.CloudupTaskAsString(o)
 }

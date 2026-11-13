@@ -18,8 +18,12 @@ package azuretasks
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"path"
 
-	"github.com/Azure/azure-sdk-for-go/services/network/mgmt/2020-06-01/network"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	network "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork/v7"
 	"k8s.io/klog/v2"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/azure"
@@ -31,31 +35,49 @@ type Subnet struct {
 	Name      *string
 	Lifecycle fi.Lifecycle
 
-	ResourceGroup  *ResourceGroup
-	VirtualNetwork *VirtualNetwork
-	CIDR           *string
-	Shared         *bool
+	ID                   *string
+	ResourceGroup        *ResourceGroup
+	VirtualNetwork       *VirtualNetwork
+	NatGateway           *NatGateway
+	NetworkSecurityGroup *NetworkSecurityGroup
+	RouteTable           *RouteTable
+
+	CIDR   *string
+	Shared *bool
 }
 
-var _ fi.Task = &Subnet{}
-var _ fi.CompareWithID = &Subnet{}
+var (
+	_ fi.CloudupTask   = &Subnet{}
+	_ fi.CompareWithID = &Subnet{}
+	// Subnet does not implement CloudupTaskNormalize because Azure subnets do not support tags.
+)
 
 // CompareWithID returns the Name of the VM Scale Set.
 func (s *Subnet) CompareWithID() *string {
-	return s.Name
+	return s.ID
 }
 
 // Find discovers the Subnet in the cloud provider.
-func (s *Subnet) Find(c *fi.Context) (*Subnet, error) {
-	cloud := c.Cloud.(azure.AzureCloud)
+func (s *Subnet) Find(c *fi.CloudupContext) (*Subnet, error) {
+	cloud := c.T.Cloud.(azure.AzureCloud)
 	l, err := cloud.Subnet().List(context.TODO(), *s.ResourceGroup.Name, *s.VirtualNetwork.Name)
 	if err != nil {
-		return nil, err
+		var azErr *azcore.ResponseError
+		if errors.As(err, &azErr) {
+			if azErr.ErrorCode == "ResourceNotFound" || azErr.ErrorCode == "ResourceGroupNotFound" {
+				return nil, nil
+			} else {
+				return nil, azErr
+			}
+		} else {
+			return nil, err
+		}
 	}
+
 	var found *network.Subnet
 	for _, v := range l {
 		if *v.Name == *s.Name {
-			found = &v
+			found = v
 			break
 		}
 	}
@@ -63,22 +85,55 @@ func (s *Subnet) Find(c *fi.Context) (*Subnet, error) {
 		return nil, nil
 	}
 
-	return &Subnet{
+	if found.ID == nil {
+		return nil, fmt.Errorf("found subnet without ID")
+	}
+	if found.Properties == nil {
+		return nil, fmt.Errorf("found subnet without properties")
+	}
+	if found.Properties.ProvisioningState != nil && *found.Properties.ProvisioningState == network.ProvisioningStateFailed {
+		klog.Warningf("found subnet %q in failed provisioning state", *s.Name)
+		return nil, nil
+	}
+
+	s.ID = found.ID
+
+	fs := &Subnet{
 		Name:      s.Name,
 		Lifecycle: s.Lifecycle,
+		Shared:    s.Shared,
 		ResourceGroup: &ResourceGroup{
 			Name: s.ResourceGroup.Name,
 		},
 		VirtualNetwork: &VirtualNetwork{
 			Name: s.VirtualNetwork.Name,
 		},
-		CIDR: found.AddressPrefix,
-	}, nil
+		ID:   found.ID,
+		CIDR: found.Properties.AddressPrefix,
+	}
+	if found.Properties.NatGateway != nil {
+		fs.NatGateway = &NatGateway{
+			ID: found.Properties.NatGateway.ID,
+		}
+	}
+	if found.Properties.NetworkSecurityGroup != nil {
+		fs.NetworkSecurityGroup = &NetworkSecurityGroup{
+			ID: found.Properties.NetworkSecurityGroup.ID,
+		}
+	}
+	if found.Properties.RouteTable != nil {
+		fs.RouteTable = &RouteTable{
+			Name: new(path.Base(fi.ValueOf(found.Properties.RouteTable.ID))),
+			ID:   found.Properties.RouteTable.ID,
+		}
+	}
+
+	return fs, nil
 }
 
 // Run implements fi.Task.Run.
-func (s *Subnet) Run(c *fi.Context) error {
-	return fi.DefaultDeltaRunMethod(s, c)
+func (s *Subnet) Run(c *fi.CloudupContext) error {
+	return fi.CloudupDefaultDeltaRunMethod(s, c)
 }
 
 // CheckChanges returns an error if a change is not allowed.
@@ -95,27 +150,52 @@ func (*Subnet) CheckChanges(a, e, changes *Subnet) error {
 	if changes.Name != nil {
 		return fi.CannotChangeField("Name")
 	}
+	if changes.CIDR != nil {
+		return fi.CannotChangeField("CIDR")
+	}
 	return nil
 }
 
 // RenderAzure creates or updates a subnet.
 func (*Subnet) RenderAzure(t *azure.AzureAPITarget, a, e, changes *Subnet) error {
 	if a == nil {
-		klog.Infof("Creating a new Subnet with name: %s", fi.StringValue(e.Name))
+		klog.Infof("Creating a new Subnet with name: %s", fi.ValueOf(e.Name))
 	} else {
-		klog.Infof("Updating a Subnet with name: %s", fi.StringValue(e.Name))
+		klog.Infof("Updating a Subnet with name: %s", fi.ValueOf(e.Name))
 	}
 
-	// TODO(kenji): Be able to specify security groups.
 	subnet := network.Subnet{
-		SubnetPropertiesFormat: &network.SubnetPropertiesFormat{
+		Properties: &network.SubnetPropertiesFormat{
 			AddressPrefix: e.CIDR,
 		},
 	}
-	return t.Cloud.Subnet().CreateOrUpdate(
+	if e.NatGateway != nil {
+		subnet.Properties.NatGateway = &network.SubResource{
+			ID: e.NatGateway.ID,
+		}
+	}
+	if e.NetworkSecurityGroup != nil {
+		subnet.Properties.NetworkSecurityGroup = &network.SecurityGroup{
+			ID: e.NetworkSecurityGroup.ID,
+		}
+	}
+	if e.RouteTable != nil {
+		subnet.Properties.RouteTable = &network.RouteTable{
+			ID: e.RouteTable.ID,
+		}
+	}
+
+	sn, err := t.Cloud.Subnet().CreateOrUpdate(
 		context.TODO(),
 		*e.ResourceGroup.Name,
 		*e.VirtualNetwork.Name,
 		*e.Name,
 		subnet)
+	if err != nil {
+		return err
+	}
+
+	e.ID = sn.ID
+
+	return nil
 }

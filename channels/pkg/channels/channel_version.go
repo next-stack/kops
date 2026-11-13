@@ -23,7 +23,7 @@ import (
 	"strconv"
 	"strings"
 
-	certmanager "github.com/jetstack/cert-manager/pkg/client/clientset/versioned"
+	certmanager "github.com/cert-manager/cert-manager/pkg/client/clientset/versioned"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -41,8 +41,9 @@ type Channel struct {
 
 // CurrentSystemGeneration holds our current SystemGeneration value.
 // Version history:
-//   0  Pre-history (and the default value); versions prior to prune.
-//   1  Prune functionality introduced.
+//
+//	0  Pre-history (and the default value); versions prior to prune.
+//	1  Prune functionality introduced.
 const CurrentSystemGeneration = 1
 
 type ChannelVersion struct {
@@ -83,7 +84,7 @@ func ParseChannelVersion(s string) (*ChannelVersion, error) {
 	return v, nil
 }
 
-func FindAddons(ns *v1.Namespace) map[string]*ChannelVersion {
+func FindChannelVersions(ns *v1.Namespace) map[string]*ChannelVersion {
 	addons := make(map[string]*ChannelVersion)
 	for k, v := range ns.Annotations {
 		if !strings.HasPrefix(k, AnnotationPrefix) {
@@ -156,7 +157,6 @@ func (c *Channel) GetInstalledVersion(ctx context.Context, k8sClient kubernetes.
 }
 
 func (c *Channel) IsPKIInstalled(ctx context.Context, k8sClient kubernetes.Interface, cmClient certmanager.Interface) (bool, error) {
-
 	_, err := k8sClient.CoreV1().Secrets("kube-system").Get(ctx, c.Name+"-ca", metav1.GetOptions{})
 	if errors.IsNotFound(err) {
 		return false, nil
@@ -174,12 +174,12 @@ func (c *Channel) IsPKIInstalled(ctx context.Context, k8sClient kubernetes.Inter
 	}
 
 	return true, nil
-
 }
 
 type annotationPatch struct {
 	Metadata annotationPatchMetadata `json:"metadata,omitempty"`
 }
+
 type annotationPatchMetadata struct {
 	Annotations map[string]string `json:"annotations,omitempty"`
 }

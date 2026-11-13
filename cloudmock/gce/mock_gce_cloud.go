@@ -17,15 +17,18 @@ limitations under the License.
 package gce
 
 import (
+	"context"
 	"fmt"
 
+	"cloud.google.com/go/storage"
+	"google.golang.org/api/cloudresourcemanager/v1"
 	compute "google.golang.org/api/compute/v1"
-	"google.golang.org/api/iam/v1"
-	"google.golang.org/api/storage/v1"
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/klog/v2"
+	"k8s.io/kops/cloudmock/gce/mockcloudresourcemanager"
 	mockcompute "k8s.io/kops/cloudmock/gce/mockcompute"
 	"k8s.io/kops/cloudmock/gce/mockdns"
+	"k8s.io/kops/cloudmock/gce/mockiam"
+	"k8s.io/kops/cloudmock/gce/mockstorage"
 	"k8s.io/kops/dnsprovider/pkg/dnsprovider"
 	dnsproviderclouddns "k8s.io/kops/dnsprovider/pkg/dnsprovider/providers/google/clouddns"
 	"k8s.io/kops/pkg/apis/kops"
@@ -40,22 +43,38 @@ type MockGCECloud struct {
 	region  string
 	labels  map[string]string
 
-	computeClient *mockcompute.MockClient
-	dnsClient     *mockdns.MockClient
+	computeClient              *mockcompute.MockClient
+	dnsClient                  *mockdns.MockClient
+	iamClient                  *mockiam.MockClient
+	storageClient              *storage.Client
+	cloudResourceManagerClient *cloudresourcemanager.Service
 }
 
-var _ gce.GCECloud = &MockGCECloud{}
+var (
+	_ gce.GCECloud                               = &MockGCECloud{}
+	_ cloudinstances.GroupFailureReporter        = &MockGCECloud{}
+	_ cloudinstances.GroupInstanceStatusReporter = &MockGCECloud{}
+)
 
 // InstallMockGCECloud registers a MockGCECloud implementation for the specified region & project
 func InstallMockGCECloud(region string, project string) *MockGCECloud {
 	c := &MockGCECloud{
-		project:       project,
-		region:        region,
-		computeClient: mockcompute.NewMockClient(project),
-		dnsClient:     mockdns.NewMockClient(),
+		project:                    project,
+		region:                     region,
+		computeClient:              mockcompute.NewMockClient(project),
+		dnsClient:                  mockdns.NewMockClient(),
+		iamClient:                  mockiam.NewMockClient(project),
+		storageClient:              mockstorage.New(),
+		cloudResourceManagerClient: mockcloudresourcemanager.New(),
 	}
 	gce.CacheGCECloudInstance(region, project, c)
 	return c
+}
+
+// ComputeClient exposes the mock compute client so tests can install canned
+// responses that are not reachable through the gce.ComputeClient interface.
+func (c *MockGCECloud) ComputeClient() *mockcompute.MockClient {
+	return c.computeClient
 }
 
 func (c *MockGCECloud) AllResources() map[string]interface{} {
@@ -64,13 +83,20 @@ func (c *MockGCECloud) AllResources() map[string]interface{} {
 
 // GetCloudGroups is not implemented yet
 func (c *MockGCECloud) GetCloudGroups(cluster *kops.Cluster, instancegroups []*kops.InstanceGroup, warnUnmatched bool, nodes []v1.Node) (map[string]*cloudinstances.CloudInstanceGroup, error) {
-	klog.V(8).Infof("MockGCECloud cloud provider GetCloudGroups not implemented yet")
-	return nil, fmt.Errorf("MockGCECloud cloud provider does not support getting cloud groups at this time")
+	return gce.GetCloudGroups(c, cluster, instancegroups, warnUnmatched, nodes)
+}
+
+func (c *MockGCECloud) GetGroupFailures(ctx context.Context, group *cloudinstances.CloudInstanceGroup) ([]cloudinstances.GroupFailure, error) {
+	return gce.GetGroupFailures(ctx, c, group)
+}
+
+func (c *MockGCECloud) GetGroupInstanceStatuses(ctx context.Context, group *cloudinstances.CloudInstanceGroup) ([]cloudinstances.GroupInstanceStatus, error) {
+	return gce.GetGroupInstanceStatuses(ctx, c, group)
 }
 
 // Zones is not implemented yet
 func (c *MockGCECloud) Zones() ([]string, error) {
-	return nil, fmt.Errorf("not yet implemented")
+	return gce.GetZones(c)
 }
 
 // WithLabels returns a copy of the MockGCECloud bound to the specified labels
@@ -102,15 +128,18 @@ func (c *MockGCECloud) Compute() gce.ComputeClient {
 }
 
 // Storage implements GCECloud::Storage
-func (c *MockGCECloud) Storage() *storage.Service {
-	klog.Fatalf("MockGCECloud::Storage not implemented")
-	return nil
+func (c *MockGCECloud) Storage() *storage.Client {
+	return c.storageClient
 }
 
 // IAM returns the IAM client
-func (c *MockGCECloud) IAM() *iam.Service {
-	klog.Fatalf("MockGCECloud::IAM not implemented")
-	return nil
+func (c *MockGCECloud) IAM() gce.IamClient {
+	return c.iamClient
+}
+
+// CloudResourceManager returns the client for the cloudresourcemanager API
+func (c *MockGCECloud) CloudResourceManager() *cloudresourcemanager.Service {
+	return c.cloudResourceManagerClient
 }
 
 // CloudDNS returns the DNS client
@@ -158,14 +187,17 @@ func (c *MockGCECloud) Labels() map[string]string {
 
 // DeleteGroup implements fi.Cloud::DeleteGroup
 func (c *MockGCECloud) DeleteGroup(g *cloudinstances.CloudInstanceGroup) error {
-	return nil
-	//	return deleteCloudInstanceGroup(c, g)
+	return gce.DeleteCloudInstanceGroup(c, g)
 }
 
 // DeleteInstance deletes a GCE instance
 func (c *MockGCECloud) DeleteInstance(i *cloudinstances.CloudInstance) error {
 	return nil
 	//	return recreateCloudInstance(c, i)
+}
+
+func (c *MockGCECloud) DeregisterInstance(i *cloudinstances.CloudInstance) error {
+	return nil
 }
 
 // DetachInstance is not implemented yet. It needs to cause a cloud instance to no longer be counted against the group's size limits.

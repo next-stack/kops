@@ -21,6 +21,11 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"time"
+
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 func SetString(target interface{}, targetPath string, newValue string) error {
@@ -31,7 +36,7 @@ func SetString(target interface{}, targetPath string, newValue string) error {
 		return fmt.Errorf("cannot parse field path %q: %w", targetPath, err)
 	}
 
-	var fieldSet = false
+	fieldSet := false
 
 	visitor := func(path *FieldPath, field *reflect.StructField, v reflect.Value) error {
 		if !targetFieldPath.HasPrefixMatch(path) {
@@ -43,12 +48,29 @@ func SetString(target interface{}, targetPath string, newValue string) error {
 				return fmt.Errorf("cannot set field %q (marked immutable)", path)
 			}
 
-			if err := setPrimitive(v, newValue); err != nil {
+			if err := setType(v, newValue); err != nil {
 				return fmt.Errorf("cannot set field %q: %v", path, err)
 			}
 
 			fieldSet = true
 			return nil
+		}
+
+		// Partial match, append the next explicitly indexed slice element.
+		if v.Kind() == reflect.Slice {
+			if len(targetFieldPath.elements) > len(path.elements) {
+				next := targetFieldPath.elements[len(path.elements)]
+				if next.Type == FieldPathElementTypeArrayIndex && next.number == v.Len() {
+					if !v.CanSet() {
+						return fmt.Errorf("cannot set field %q (marked immutable)", path)
+					}
+
+					newLen := v.Len() + 1
+					grown := reflect.MakeSlice(v.Type(), newLen, newLen)
+					reflect.Copy(grown, v)
+					v.Set(grown)
+				}
+			}
 		}
 
 		// Partial match, check for nil struct and auto-populate
@@ -89,7 +111,7 @@ func SetString(target interface{}, targetPath string, newValue string) error {
 	return nil
 }
 
-func setPrimitive(v reflect.Value, newValue string) error {
+func setType(v reflect.Value, newValue string) error {
 	if !v.CanSet() {
 		return fmt.Errorf("cannot set value")
 	}
@@ -103,7 +125,7 @@ func setPrimitive(v reflect.Value, newValue string) error {
 		valueArray = reflect.AppendSlice(valueArray, v)
 		for _, s := range tokens {
 			valueItem := reflect.New(v.Type().Elem())
-			if err := setPrimitive(valueItem.Elem(), s); err != nil {
+			if err := setType(valueItem.Elem(), s); err != nil {
 				return err
 			}
 			valueArray = reflect.Append(valueArray, valueItem.Elem())
@@ -113,9 +135,13 @@ func setPrimitive(v reflect.Value, newValue string) error {
 		return nil
 	}
 
+	if newValue == "" && (v.Type().Kind() == reflect.Map || v.Type().Kind() == reflect.Struct) {
+		return nil
+	}
+
 	if v.Type().Kind() == reflect.Ptr {
 		val := reflect.New(v.Type().Elem())
-		if err := setPrimitive(val.Elem(), newValue); err != nil {
+		if err := setType(val.Elem(), newValue); err != nil {
 			return err
 		}
 		v.Set(val)
@@ -123,6 +149,40 @@ func setPrimitive(v reflect.Value, newValue string) error {
 	}
 
 	t := v.Type().String()
+
+	if v.Type().Kind() == reflect.Map {
+		if v.IsNil() {
+			v.Set(reflect.MakeMap(v.Type()))
+		}
+
+		switch t {
+		case "map[string]string":
+			name, value, _ := strings.Cut(newValue, "=")
+			v.SetMapIndex(reflect.ValueOf(name), reflect.ValueOf(value))
+
+		case "map[string]intstr.IntOrString":
+			name, value, _ := strings.Cut(newValue, "=")
+			v.SetMapIndex(reflect.ValueOf(name), reflect.ValueOf(intstr.Parse(value)))
+
+		case "map[string][]string":
+			name, value, _ := strings.Cut(newValue, "=")
+			tokens := strings.Split(value, ",")
+			valueArray := reflect.MakeSlice(reflect.TypeOf(tokens), 0, v.Len()+len(tokens))
+			for _, s := range tokens {
+				valueItem := reflect.New(reflect.TypeOf(s))
+				if err := setType(valueItem.Elem(), s); err != nil {
+					return err
+				}
+				valueArray = reflect.Append(valueArray, valueItem.Elem())
+			}
+			v.SetMapIndex(reflect.ValueOf(name), valueArray)
+
+		default:
+			return fmt.Errorf("unhandled type %q", t)
+		}
+
+		return nil
+	}
 
 	var newV reflect.Value
 
@@ -137,24 +197,97 @@ func setPrimitive(v reflect.Value, newValue string) error {
 		}
 		newV = reflect.ValueOf(b)
 
-	case "int64", "int32", "int":
-		v, err := strconv.Atoi(newValue)
-		if err != nil {
-			return fmt.Errorf("cannot interpret %q value as integer", newValue)
-		}
-
+	case "int64", "int32", "int16", "int":
 		switch t {
 		case "int":
+			v, err := strconv.Atoi(newValue)
+			if err != nil {
+				return fmt.Errorf("cannot interpret %q value as integer", newValue)
+			}
 			newV = reflect.ValueOf(v)
+		case "int16":
+			v, err := strconv.ParseInt(newValue, 10, 16)
+			if err != nil {
+				return fmt.Errorf("cannot interpret %q value as int16", newValue)
+			}
+			v16 := int16(v)
+			newV = reflect.ValueOf(v16)
 		case "int32":
+			v, err := strconv.ParseInt(newValue, 10, 32)
+			if err != nil {
+				return fmt.Errorf("cannot interpret %q value as int32", newValue)
+			}
 			v32 := int32(v)
 			newV = reflect.ValueOf(v32)
 		case "int64":
+			v, err := strconv.ParseInt(newValue, 10, 64)
+			if err != nil {
+				return fmt.Errorf("cannot interpret %q value as int64", newValue)
+			}
 			v64 := int64(v)
 			newV = reflect.ValueOf(v64)
 		default:
-			panic("missing case in switch")
+			panic("missing case in int switch")
 		}
+
+	case "uint64", "uint32", "uint16", "uint":
+		v, err := strconv.Atoi(newValue)
+		if err != nil {
+			return fmt.Errorf("cannot interpret %q value as unsigned integer", newValue)
+		}
+
+		switch t {
+		case "uint":
+			newV = reflect.ValueOf(v)
+		case "uint16":
+			v16 := uint16(v)
+			newV = reflect.ValueOf(v16)
+		case "uint32":
+			v32 := uint32(v)
+			newV = reflect.ValueOf(v32)
+		case "uint64":
+			v64 := uint64(v)
+			newV = reflect.ValueOf(v64)
+		default:
+			panic("missing case in uint switch")
+		}
+
+	case "intstr.IntOrString":
+		newV = reflect.ValueOf(intstr.Parse(newValue))
+
+	case "kops.EnvVar":
+		newV = reflect.New(v.Type()).Elem()
+
+		envVarType := newV.Type()
+
+		fdName, found := envVarType.FieldByName("Name")
+		if !found {
+			return fmt.Errorf("field Name not found in %T", newV.Interface())
+		}
+		fdValue, found := envVarType.FieldByName("Value")
+		if !found {
+			return fmt.Errorf("field Value not found in %T", newV.Interface())
+		}
+
+		name, value, hasValue := strings.Cut(newValue, "=")
+		newV.FieldByIndex(fdName.Index).SetString(name)
+		if hasValue {
+			newV.FieldByIndex(fdValue.Index).SetString(value)
+		}
+
+	case "v1.Duration":
+		duration, err := time.ParseDuration(newValue)
+		if err != nil {
+			return fmt.Errorf("cannot interpret %q value as v1.Duration", newValue)
+		}
+		newV = reflect.ValueOf(metav1.Duration{Duration: duration})
+
+	case "resource.Quantity":
+		quantity, err := resource.ParseQuantity(newValue)
+		if err != nil {
+			return fmt.Errorf("cannot interpret %q value as resource.Quantity", newValue)
+		}
+		newV = reflect.ValueOf(quantity)
 
 	default:
 		// This handles enums and other simple conversions
@@ -178,7 +311,7 @@ func Unset(target interface{}, targetPath string) error {
 		return fmt.Errorf("cannot parse field path %q: %w", targetPath, err)
 	}
 
-	var fieldUnset = false
+	fieldUnset := false
 
 	visitor := func(path *FieldPath, field *reflect.StructField, v reflect.Value) error {
 		if !targetFieldPath.HasPrefixMatch(path) {

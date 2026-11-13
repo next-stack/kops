@@ -25,14 +25,14 @@ import (
 
 func TestKeypairDeps(t *testing.T) {
 	ca := &Keypair{
-		Name: fi.String("ca"),
+		Name: new("ca"),
 	}
 	cert := &Keypair{
-		Name:   fi.String("cert"),
+		Name:   new("cert"),
 		Signer: ca,
 	}
 
-	tasks := make(map[string]fi.Task)
+	tasks := make(map[string]fi.CloudupTask)
 	tasks["ca"] = ca
 	tasks["cert"] = cert
 

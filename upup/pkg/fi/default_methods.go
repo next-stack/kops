@@ -20,13 +20,32 @@ import (
 	"fmt"
 	"reflect"
 
+	"k8s.io/klog/v2"
 	"k8s.io/kops/util/pkg/reflectutils"
 )
 
-// DefaultDeltaRunMethod implements the standard change-based run procedure:
+// InstallDefaultDeltaRunMethod implements the standard change-based run procedure:
 // find the existing item; compare properties; call render with (actual, expected, changes)
-func DefaultDeltaRunMethod(e Task, c *Context) error {
-	var a Task
+func InstallDefaultDeltaRunMethod(e InstallTask, c *InstallContext) error {
+	return defaultDeltaRunMethod[InstallSubContext](e, c)
+}
+
+// NodeupDefaultDeltaRunMethod implements the standard change-based run procedure:
+// find the existing item; compare properties; call render with (actual, expected, changes)
+func NodeupDefaultDeltaRunMethod(e NodeupTask, c *NodeupContext) error {
+	return defaultDeltaRunMethod[NodeupSubContext](e, c)
+}
+
+// CloudupDefaultDeltaRunMethod implements the standard change-based run procedure:
+// find the existing item; compare properties; call render with (actual, expected, changes)
+func CloudupDefaultDeltaRunMethod(e CloudupTask, c *CloudupContext) error {
+	return defaultDeltaRunMethod[CloudupSubContext](e, c)
+}
+
+// defaultDeltaRunMethod implements the standard change-based run procedure:
+// find the existing item; compare properties; call render with (actual, expected, changes)
+func defaultDeltaRunMethod[T SubContext](e Task[T], c *Context[T]) error {
+	var a Task[T]
 	var err error
 
 	lifecycle := LifecycleSync
@@ -41,8 +60,8 @@ func DefaultDeltaRunMethod(e Task, c *Context) error {
 		return nil
 	}
 
-	checkExisting := c.CheckExisting
-	if hce, ok := e.(HasCheckExisting); ok {
+	checkExisting := c.Target.DefaultCheckExisting()
+	if hce, ok := e.(HasCheckExisting[T]); ok {
 		checkExisting = hce.CheckExisting(c)
 	}
 
@@ -61,10 +80,10 @@ func DefaultDeltaRunMethod(e Task, c *Context) error {
 
 	if a == nil {
 		// This is kind of subtle.  We want an interface pointer to a struct of the correct type...
-		a = reflect.New(reflect.TypeOf(e)).Elem().Interface().(Task)
+		a = reflect.New(reflect.TypeOf(e)).Elem().Interface().(Task[T])
 	}
 
-	changes := reflect.New(reflect.TypeOf(e).Elem()).Interface().(Task)
+	changes := reflect.New(reflect.TypeOf(e).Elem()).Interface().(Task[T])
 	changed := BuildChanges(a, e, changes)
 
 	if changed {
@@ -86,22 +105,31 @@ func DefaultDeltaRunMethod(e Task, c *Context) error {
 		}
 	}
 
-	if producesDeletions, ok := e.(ProducesDeletions); ok && c.Target.ProcessDeletions() {
-		var deletions []Deletion
-		deletions, err = producesDeletions.FindDeletions(c)
+	if producesDeletions, ok := e.(ProducesDeletions[T]); ok && c.deletionProcessingMode != DeletionProcessingModeIgnore {
+		deletions, err := producesDeletions.FindDeletions(c)
 		if err != nil {
 			return err
 		}
 		for _, deletion := range deletions {
-			if _, ok := c.Target.(*DryRunTarget); ok {
-				err = c.Target.(*DryRunTarget).Delete(deletion)
-			} else if _, ok := c.Target.(*DryRunTarget); ok {
-				err = c.Target.(*DryRunTarget).Delete(deletion)
+			if _, ok := c.Target.(*DryRunTarget[T]); ok {
+				if err := c.Target.(*DryRunTarget[T]).RecordDeletion(deletion); err != nil {
+					return err
+				}
 			} else {
-				err = deletion.Delete(c.Target)
-			}
-			if err != nil {
-				return err
+				if deletion.DeferDeletion() {
+					switch c.deletionProcessingMode {
+					case DeletionProcessingModeDeleteIfNotDeferrred:
+						klog.Infof("not deleting %s/%s because it is marked for deferred-deletion", deletion.TaskName(), deletion.Item())
+						continue
+					case DeletionProcessingModeDeleteIncludingDeferred:
+						klog.V(2).Infof("processing deferred deletion of %s/%s", deletion.TaskName(), deletion.Item())
+					default:
+						klog.Fatalf("unhandled deletionProcessingMode %v", c.deletionProcessingMode)
+					}
+				}
+				if err := deletion.Delete(c.Target); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -109,27 +137,32 @@ func DefaultDeltaRunMethod(e Task, c *Context) error {
 	return nil
 }
 
-// invokeCheckChanges calls the checkChanges method by reflection
-func invokeCheckChanges(a, e, changes Task) error {
-	rv, err := reflectutils.InvokeMethod(e, "CheckChanges", a, e, changes)
-	if err != nil {
-		return err
+// invokeCheckChanges calls the CheckChanges method by reflection. Here and below, MethodByName
+// must be called with literal names to keep linker method pruning working (see Context.Render).
+func invokeCheckChanges[T SubContext](a, e, changes Task[T]) error {
+	m := reflect.ValueOf(e).MethodByName("CheckChanges")
+	if !m.IsValid() {
+		return &reflectutils.MethodNotFoundError{Name: "CheckChanges", Target: e}
 	}
+	rv := m.Call([]reflect.Value{reflect.ValueOf(a), reflect.ValueOf(e), reflect.ValueOf(changes)})
+	var err error
 	if !rv[0].IsNil() {
 		err = rv[0].Interface().(error)
 	}
 	return err
 }
 
-// invokeFind calls the find method by reflection
-func invokeFind(e Task, c *Context) (Task, error) {
-	rv, err := reflectutils.InvokeMethod(e, "Find", c)
-	if err != nil {
-		return nil, err
+// invokeFind calls the Find method by reflection.
+func invokeFind[T SubContext](e Task[T], c *Context[T]) (Task[T], error) {
+	m := reflect.ValueOf(e).MethodByName("Find")
+	if !m.IsValid() {
+		return nil, &reflectutils.MethodNotFoundError{Name: "Find", Target: e}
 	}
-	var task Task
+	rv := m.Call([]reflect.Value{reflect.ValueOf(c)})
+	var task Task[T]
+	var err error
 	if !rv[0].IsNil() {
-		task = rv[0].Interface().(Task)
+		task = rv[0].Interface().(Task[T])
 	}
 	if !rv[1].IsNil() {
 		err = rv[1].Interface().(error)
@@ -137,16 +170,16 @@ func invokeFind(e Task, c *Context) (Task, error) {
 	return task, err
 }
 
-// invokeShouldCreate calls the ShouldCreate method by reflection, if it exists
-func invokeShouldCreate(a, e, changes Task) (bool, error) {
-	rv, err := reflectutils.InvokeMethod(e, "ShouldCreate", a, e, changes)
-	if err != nil {
-		if reflectutils.IsMethodNotFound(err) {
-			return true, nil
-		}
-		return false, err
+// invokeShouldCreate calls the ShouldCreate method by reflection; tasks without it are created
+// by default.
+func invokeShouldCreate[T SubContext](a, e, changes Task[T]) (bool, error) {
+	m := reflect.ValueOf(e).MethodByName("ShouldCreate")
+	if !m.IsValid() {
+		return true, nil
 	}
+	rv := m.Call([]reflect.Value{reflect.ValueOf(a), reflect.ValueOf(e), reflect.ValueOf(changes)})
 	shouldCreate := rv[0].Interface().(bool)
+	var err error
 	if !rv[1].IsNil() {
 		err = rv[1].Interface().(error)
 	}

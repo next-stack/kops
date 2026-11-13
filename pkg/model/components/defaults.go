@@ -26,30 +26,14 @@ type DefaultsOptionsBuilder struct {
 	Context *OptionsContext
 }
 
-var _ loader.OptionsBuilder = &DefaultsOptionsBuilder{}
+var _ loader.ClusterOptionsBuilder = &DefaultsOptionsBuilder{}
 
 // BuildOptions is responsible for cluster options
-func (b *DefaultsOptionsBuilder) BuildOptions(o interface{}) error {
-	options := o.(*kops.ClusterSpec)
+func (b *DefaultsOptionsBuilder) BuildOptions(o *kops.Cluster) error {
+	options := &o.Spec
 
 	if options.ClusterDNSDomain == "" {
 		options.ClusterDNSDomain = "cluster.local"
-	}
-
-	if options.ContainerRuntime == "" {
-		if b.Context.IsKubernetesLT("1.20") || options.Docker != nil {
-			options.ContainerRuntime = "docker"
-		} else {
-			options.ContainerRuntime = "containerd"
-		}
-	}
-
-	if options.ExternalDNS == nil {
-		options.ExternalDNS = &kops.ExternalDNSConfig{}
-	}
-
-	if options.ExternalDNS.Provider == "" {
-		options.ExternalDNS.Provider = kops.ExternalDNSProviderDNSController
 	}
 
 	return nil

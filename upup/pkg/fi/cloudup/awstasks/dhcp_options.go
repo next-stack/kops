@@ -17,16 +17,16 @@ limitations under the License.
 package awstasks
 
 import (
+	"context"
 	"fmt"
-
 	"strings"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"k8s.io/klog/v2"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
-	"k8s.io/kops/upup/pkg/fi/cloudup/cloudformation"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraform"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraformWriter"
 )
@@ -47,23 +47,23 @@ type DHCPOptions struct {
 	Tags map[string]string
 }
 
-var _ fi.CompareWithID = &DHCPOptions{}
+var _ fi.CompareWithID = (*DHCPOptions)(nil)
 
 func (e *DHCPOptions) CompareWithID() *string {
 	return e.ID
 }
 
-func (e *DHCPOptions) Find(c *fi.Context) (*DHCPOptions, error) {
-	cloud := c.Cloud.(awsup.AWSCloud)
+func (e *DHCPOptions) Find(c *fi.CloudupContext) (*DHCPOptions, error) {
+	cloud := awsup.GetCloud(c)
 
 	request := &ec2.DescribeDhcpOptionsInput{}
 	if e.ID != nil {
-		request.DhcpOptionsIds = []*string{e.ID}
+		request.DhcpOptionsIds = []string{aws.ToString(e.ID)}
 	} else {
 		request.Filters = cloud.BuildFilters(e.Name)
 	}
 
-	response, err := cloud.EC2().DescribeDhcpOptions(request)
+	response, err := cloud.EC2().DescribeDhcpOptions(c.Context(), request)
 	if err != nil {
 		return nil, fmt.Errorf("error listing DHCPOptions: %v", err)
 	}
@@ -84,7 +84,7 @@ func (e *DHCPOptions) Find(c *fi.Context) (*DHCPOptions, error) {
 	}
 
 	for _, s := range o.DhcpConfigurations {
-		k := aws.StringValue(s.Key)
+		k := aws.ToString(s.Key)
 		v := ""
 		for _, av := range s.Values {
 			if v != "" {
@@ -111,8 +111,8 @@ func (e *DHCPOptions) Find(c *fi.Context) (*DHCPOptions, error) {
 	return actual, nil
 }
 
-func (e *DHCPOptions) Run(c *fi.Context) error {
-	return fi.DefaultDeltaRunMethod(e, c)
+func (e *DHCPOptions) Run(c *fi.CloudupContext) error {
+	return fi.CloudupDefaultDeltaRunMethod(e, c)
 }
 
 func (s *DHCPOptions) CheckChanges(a, e, changes *DHCPOptions) error {
@@ -139,28 +139,29 @@ func (s *DHCPOptions) CheckChanges(a, e, changes *DHCPOptions) error {
 }
 
 func (_ *DHCPOptions) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *DHCPOptions) error {
+	ctx := context.TODO()
 	if a == nil {
 		klog.V(2).Infof("Creating DHCPOptions with Name:%q", *e.Name)
 
 		request := &ec2.CreateDhcpOptionsInput{
-			TagSpecifications: awsup.EC2TagSpecification(ec2.ResourceTypeDhcpOptions, e.Tags),
+			TagSpecifications: awsup.EC2TagSpecification(ec2types.ResourceTypeDhcpOptions, e.Tags),
 		}
 		if e.DomainNameServers != nil {
-			o := &ec2.NewDhcpConfiguration{
+			o := ec2types.NewDhcpConfiguration{
 				Key:    aws.String("domain-name-servers"),
-				Values: []*string{e.DomainNameServers},
+				Values: []string{aws.ToString(e.DomainNameServers)},
 			}
 			request.DhcpConfigurations = append(request.DhcpConfigurations, o)
 		}
 		if e.DomainName != nil {
-			o := &ec2.NewDhcpConfiguration{
+			o := ec2types.NewDhcpConfiguration{
 				Key:    aws.String("domain-name"),
-				Values: []*string{e.DomainName},
+				Values: []string{aws.ToString(e.DomainName)},
 			}
 			request.DhcpConfigurations = append(request.DhcpConfigurations, o)
 		}
 
-		response, err := t.Cloud.EC2().CreateDhcpOptions(request)
+		response, err := t.Cloud.EC2().CreateDhcpOptions(ctx, request)
 		if err != nil {
 			return fmt.Errorf("error creating DHCPOptions: %v", err)
 		}
@@ -172,9 +173,9 @@ func (_ *DHCPOptions) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *DHCPOption
 }
 
 type terraformDHCPOptions struct {
-	DomainName        *string           `json:"domain_name,omitempty" cty:"domain_name"`
-	DomainNameServers []string          `json:"domain_name_servers,omitempty" cty:"domain_name_servers"`
-	Tags              map[string]string `json:"tags,omitempty" cty:"tags"`
+	DomainName        *string           `cty:"domain_name"`
+	DomainNameServers []string          `cty:"domain_name_servers"`
+	Tags              map[string]string `cty:"tags"`
 }
 
 func (_ *DHCPOptions) RenderTerraform(t *terraform.TerraformTarget, a, e, changes *DHCPOptions) error {
@@ -192,27 +193,4 @@ func (_ *DHCPOptions) RenderTerraform(t *terraform.TerraformTarget, a, e, change
 
 func (e *DHCPOptions) TerraformLink() *terraformWriter.Literal {
 	return terraformWriter.LiteralProperty("aws_vpc_dhcp_options", *e.Name, "id")
-}
-
-type cloudformationDHCPOptions struct {
-	DomainName        *string             `json:"DomainName,omitempty"`
-	DomainNameServers []string            `json:"DomainNameServers,omitempty"`
-	Tags              []cloudformationTag `json:"Tags,omitempty"`
-}
-
-func (_ *DHCPOptions) RenderCloudformation(t *cloudformation.CloudformationTarget, a, e, changes *DHCPOptions) error {
-	cf := &cloudformationDHCPOptions{
-		DomainName: e.DomainName,
-		Tags:       buildCloudformationTags(e.Tags),
-	}
-
-	if e.DomainNameServers != nil {
-		cf.DomainNameServers = strings.Split(*e.DomainNameServers, ",")
-	}
-
-	return t.RenderResource("AWS::EC2::DHCPOptions", *e.Name, cf)
-}
-
-func (e *DHCPOptions) CloudformationLink() *cloudformation.Literal {
-	return cloudformation.Ref("AWS::EC2::DHCPOptions", *e.Name)
 }

@@ -32,8 +32,7 @@ spec:
     legacy: false
   kubernetesApiAccess:
   - 0.0.0.0/0
-  kubernetesVersion: v1.14.0
-  masterInternalName: api.internal.minimal.example.com
+  kubernetesVersion: v1.35.0
   masterPublicName: api.minimal.example.com
   networkCIDR: 172.20.0.0/16
   networking:
@@ -48,9 +47,7 @@ spec:
     zone: us-test-1a
   topology:
     dns:
-      type: Public
-    masters: public
-    nodes: public
+      type: None
 
 ---
 
@@ -63,7 +60,7 @@ metadata:
   name: nodes
 spec:
   associatePublicIp: true
-  image: kope.io/k8s-1.4-debian-jessie-amd64-hvm-ebs-2016-10-21
+  image: ubuntu/images/hvm-ssd-gp3/ubuntu-resolute-26.04-amd64-server-20220404
   machineType: t2.medium
   maxSize: 2
   minSize: 2
@@ -82,7 +79,7 @@ metadata:
   name: master-us-test-1a
 spec:
   associatePublicIp: true
-  image: kope.io/k8s-1.4-debian-jessie-amd64-hvm-ebs-2016-10-21
+  image: ubuntu/images/hvm-ssd-gp3/ubuntu-resolute-26.04-amd64-server-20220404
   machineType: m3.medium
   maxSize: 1
   minSize: 1

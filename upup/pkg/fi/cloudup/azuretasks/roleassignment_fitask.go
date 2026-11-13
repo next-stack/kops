@@ -27,7 +27,7 @@ import (
 
 // RoleAssignment
 
-var _ fi.HasLifecycle = &RoleAssignment{}
+var _ fi.HasLifecycle = (*RoleAssignment)(nil)
 
 // GetLifecycle returns the Lifecycle of the object, implementing fi.HasLifecycle
 func (o *RoleAssignment) GetLifecycle() fi.Lifecycle {
@@ -39,7 +39,7 @@ func (o *RoleAssignment) SetLifecycle(lifecycle fi.Lifecycle) {
 	o.Lifecycle = lifecycle
 }
 
-var _ fi.HasName = &RoleAssignment{}
+var _ fi.HasName = (*RoleAssignment)(nil)
 
 // GetName returns the Name of the object, implementing fi.HasName
 func (o *RoleAssignment) GetName() *string {
@@ -48,5 +48,5 @@ func (o *RoleAssignment) GetName() *string {
 
 // String is the stringer function for the task, producing readable output using fi.TaskAsString
 func (o *RoleAssignment) String() string {
-	return fi.TaskAsString(o)
+	return fi.CloudupTaskAsString(o)
 }

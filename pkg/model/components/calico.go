@@ -26,16 +26,24 @@ type CalicoOptionsBuilder struct {
 	Context *OptionsContext
 }
 
-var _ loader.OptionsBuilder = &CalicoOptionsBuilder{}
+var _ loader.ClusterOptionsBuilder = &CalicoOptionsBuilder{}
 
-func (b *CalicoOptionsBuilder) BuildOptions(o interface{}) error {
-	clusterSpec := o.(*kops.ClusterSpec)
+func (b *CalicoOptionsBuilder) BuildOptions(o *kops.Cluster) error {
+	clusterSpec := &o.Spec
 	c := clusterSpec.Networking.Calico
 	if c == nil {
 		return nil
 	}
 
 	c.EncapsulationMode = "ipip"
+	if clusterSpec.IsIPv6Only() {
+		c.EncapsulationMode = "none"
+	}
+
+	if o.GetCloudProvider() == kops.CloudProviderAzure {
+		c.EncapsulationMode = "vxlan"
+		c.VXLANMode = "Always"
+	}
 
 	return nil
 }

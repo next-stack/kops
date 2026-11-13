@@ -22,7 +22,6 @@ import (
 
 	"k8s.io/klog/v2"
 	"k8s.io/kops/upup/pkg/fi"
-	"k8s.io/kops/upup/pkg/fi/nodeup/cloudinit"
 	"k8s.io/kops/upup/pkg/fi/nodeup/local"
 )
 
@@ -31,35 +30,35 @@ type Chattr struct {
 	File string `json:"file"`
 	Mode string `json:"mode"`
 
-	Deps []fi.Task `json:"-"`
+	Deps []fi.NodeupTask `json:"-"`
 }
 
-var _ fi.Task = &Chattr{}
+var _ fi.NodeupTask = (*Chattr)(nil)
 
 func (s *Chattr) String() string {
 	return fmt.Sprintf("Chattr: chattr %s %s", s.Mode, s.File)
 }
 
-var _ fi.HasName = &Archive{}
+var _ fi.HasName = (*Chattr)(nil)
 
 func (e *Chattr) GetName() *string {
-	return fi.String("Chattr-" + e.File)
+	return new("Chattr-" + e.File)
 }
 
-var _ fi.HasDependencies = &Chattr{}
+var _ fi.NodeupHasDependencies = (*Chattr)(nil)
 
 // GetDependencies implements HasDependencies::GetDependencies
-func (e *Chattr) GetDependencies(tasks map[string]fi.Task) []fi.Task {
+func (e *Chattr) GetDependencies(tasks map[string]fi.NodeupTask) []fi.NodeupTask {
 	return e.Deps
 }
 
-func (e *Chattr) Find(c *fi.Context) (*Chattr, error) {
+func (e *Chattr) Find(c *fi.NodeupContext) (*Chattr, error) {
 	// We always re-run the chattr command
 	return nil, nil
 }
 
-func (e *Chattr) Run(c *fi.Context) error {
-	return fi.DefaultDeltaRunMethod(e, c)
+func (e *Chattr) Run(c *fi.NodeupContext) error {
+	return fi.NodeupDefaultDeltaRunMethod(e, c)
 }
 
 func (s *Chattr) CheckChanges(a, e, changes *Chattr) error {
@@ -79,8 +78,4 @@ func (e *Chattr) execute(t Executor) error {
 	}
 
 	return nil
-}
-
-func (_ *Chattr) RenderCloudInit(t *cloudinit.CloudInitTarget, a, e, changes *Chattr) error {
-	return fmt.Errorf("Chattr::RenderCloudInit not implemented")
 }

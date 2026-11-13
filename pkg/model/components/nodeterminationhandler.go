@@ -28,40 +28,67 @@ type NodeTerminationHandlerOptionsBuilder struct {
 	*OptionsContext
 }
 
-var _ loader.OptionsBuilder = &NodeTerminationHandlerOptionsBuilder{}
+var _ loader.ClusterOptionsBuilder = &NodeTerminationHandlerOptionsBuilder{}
 
-func (b *NodeTerminationHandlerOptionsBuilder) BuildOptions(o interface{}) error {
-	clusterSpec := o.(*kops.ClusterSpec)
-	if clusterSpec.NodeTerminationHandler == nil {
+func (b *NodeTerminationHandlerOptionsBuilder) BuildOptions(o *kops.Cluster) error {
+	clusterSpec := &o.Spec
+	if clusterSpec.CloudProvider.AWS == nil {
 		return nil
 	}
-	nth := clusterSpec.NodeTerminationHandler
+	if clusterSpec.Karpenter.IsEnabled() {
+		// Karpenter handles interruptions itself, consuming the queue that NodeTerminationHandlerBuilder
+		// provisions, so the NTH addon stays off.
+		// https://karpenter.sh/docs/troubleshooting/#aws-node-termination-handler-nth-interactions
+		return nil
+	}
+	if clusterSpec.CloudProvider.AWS.NodeTerminationHandler == nil {
+		clusterSpec.CloudProvider.AWS.NodeTerminationHandler = &kops.NodeTerminationHandlerSpec{}
+	}
+	nth := clusterSpec.CloudProvider.AWS.NodeTerminationHandler
 	if nth.Enabled == nil {
-		nth.Enabled = fi.Bool(true)
+		nth.Enabled = new(true)
+	}
+	if !fi.ValueOf(nth.Enabled) {
+		return nil
+	}
+	if nth.DeleteSQSMsgIfNodeNotFound == nil {
+		nth.DeleteSQSMsgIfNodeNotFound = new(false)
 	}
 	if nth.EnableSpotInterruptionDraining == nil {
-		nth.EnableSpotInterruptionDraining = fi.Bool(true)
+		nth.EnableSpotInterruptionDraining = new(true)
 	}
 	if nth.EnableScheduledEventDraining == nil {
-		nth.EnableScheduledEventDraining = fi.Bool(false)
+		nth.EnableScheduledEventDraining = new(true)
 	}
 	if nth.EnableRebalanceMonitoring == nil {
-		nth.EnableRebalanceMonitoring = fi.Bool(false)
+		nth.EnableRebalanceMonitoring = new(false)
 	}
 	if nth.EnableRebalanceDraining == nil {
-		nth.EnableRebalanceDraining = fi.Bool(false)
+		nth.EnableRebalanceDraining = new(false)
+	}
+
+	if nth.EnableOutOfServiceTaint == nil {
+		nth.EnableOutOfServiceTaint = new(false)
 	}
 
 	if nth.EnablePrometheusMetrics == nil {
-		nth.EnablePrometheusMetrics = fi.Bool(false)
+		nth.EnablePrometheusMetrics = new(false)
 	}
 
-	if nth.EnableSQSTerminationDraining == nil {
-		nth.EnableSQSTerminationDraining = fi.Bool(false)
+	if nth.ExcludeFromLoadBalancers == nil {
+		nth.ExcludeFromLoadBalancers = new(true)
 	}
 
 	if nth.ManagedASGTag == nil {
-		nth.ManagedASGTag = fi.String("aws-node-termination-handler/managed")
+		nth.ManagedASGTag = new("aws-node-termination-handler/managed")
+	}
+
+	if nth.PodTerminationGracePeriod == nil {
+		nth.PodTerminationGracePeriod = new(int32(-1))
+	}
+
+	if nth.TaintNode == nil {
+		nth.TaintNode = new(false)
 	}
 
 	if nth.CPURequest == nil {
@@ -72,6 +99,10 @@ func (b *NodeTerminationHandlerOptionsBuilder) BuildOptions(o interface{}) error
 	if nth.MemoryRequest == nil {
 		defaultMemoryRequest := resource.MustParse("64Mi")
 		nth.MemoryRequest = &defaultMemoryRequest
+	}
+
+	if nth.Version == nil {
+		nth.Version = new("v1.25.5")
 	}
 
 	return nil

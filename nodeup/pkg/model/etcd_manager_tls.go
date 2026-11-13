@@ -17,7 +17,10 @@ limitations under the License.
 package model
 
 import (
+	"path/filepath"
+
 	"k8s.io/kops/upup/pkg/fi"
+	"k8s.io/kops/upup/pkg/fi/nodeup/nodetasks"
 )
 
 // EtcdManagerTLSBuilder configures TLS support for etcd-manager
@@ -25,34 +28,46 @@ type EtcdManagerTLSBuilder struct {
 	*NodeupModelContext
 }
 
-var _ fi.ModelBuilder = &EtcdManagerTLSBuilder{}
+var _ fi.NodeupModelBuilder = &EtcdManagerTLSBuilder{}
+
+func (b *EtcdManagerTLSBuilder) runsEtcd() bool {
+	if b.IsMaster || b.BootConfig.InstanceGroupRole.HasEtcd() {
+		return true
+	}
+	return false
+}
 
 // Build is responsible for TLS configuration for etcd-manager
-func (b *EtcdManagerTLSBuilder) Build(ctx *fi.ModelBuilderContext) error {
-	if !b.IsMaster {
+func (b *EtcdManagerTLSBuilder) Build(ctx *fi.NodeupModelBuilderContext) error {
+	if !b.runsEtcd() {
 		return nil
 	}
 
-	for _, etcdCluster := range b.Cluster.Spec.EtcdClusters {
-		k := etcdCluster.Name
-
-		d := "/etc/kubernetes/pki/etcd-manager-" + k
+	for _, etcdClusterName := range b.NodeupConfig.EtcdClusterNames {
+		d := "/etc/kubernetes/pki/etcd-manager-" + etcdClusterName
 
 		keys := make(map[string]string)
 
-		keys["etcd-manager-ca"] = "etcd-manager-ca-" + k
-		keys["etcd-peers-ca"] = "etcd-peers-ca-" + k
-		keys["etcd-clients-ca"] = "etcd-clients-ca-" + k
+		keys["etcd-manager-ca"] = "etcd-manager-ca-" + etcdClusterName
+		keys["etcd-peers-ca"] = "etcd-peers-ca-" + etcdClusterName
+		keys["etcd-clients-ca"] = "etcd-clients-ca-" + etcdClusterName
 
 		// Because API server can only have a single client certificate for etcd, we need to share a client CA
-		if k == "main" || k == "events" {
+		if etcdClusterName == "main" || etcdClusterName == "events" || etcdClusterName == "leases" {
 			keys["etcd-clients-ca"] = "etcd-clients-ca"
 		}
 
 		for fileName, keystoreName := range keys {
-			if err := b.buildCertificatePairTask(ctx, keystoreName, d, fileName, nil, nil, true); err != nil {
+			if err := b.buildCertificatePairTask(ctx, keystoreName, d, fileName, nil, nil, false); err != nil {
 				return err
 			}
+			ctx.AddTask(&nodetasks.File{
+				Path:     filepath.Join(d, fileName+".crt"),
+				Contents: fi.NewStringResource(b.NodeupConfig.CAs[keystoreName]),
+				Type:     nodetasks.FileType_File,
+				Mode:     new("0644"),
+			})
+
 		}
 	}
 

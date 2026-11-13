@@ -29,14 +29,19 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	compute "google.golang.org/api/compute/v1"
 	"google.golang.org/api/googleapi"
 	"k8s.io/kops/pkg/bootstrap"
+	"k8s.io/kops/pkg/nodeidentity/clusterapi"
+	"k8s.io/kops/pkg/nodeidentity/clusterapi/capimanager"
 	"k8s.io/kops/pkg/nodeidentity/gce"
+	"k8s.io/kops/pkg/wellknownports"
 	"k8s.io/kops/upup/pkg/fi"
+	"k8s.io/kops/upup/pkg/fi/cloudup/gce/gcemetadata"
 	gcetpm "k8s.io/kops/upup/pkg/fi/cloudup/gce/tpm"
 )
 
@@ -44,10 +49,12 @@ type tpmVerifier struct {
 	opt gcetpm.TPMVerifierOptions
 
 	computeClient *compute.Service
+
+	capiManager *capimanager.Manager
 }
 
 // NewTPMVerifier constructs a new TPM verifier for GCE.
-func NewTPMVerifier(opt *gcetpm.TPMVerifierOptions) (bootstrap.Verifier, error) {
+func NewTPMVerifier(opt *gcetpm.TPMVerifierOptions, capiManager *capimanager.Manager) (bootstrap.Verifier, error) {
 	ctx := context.Background()
 
 	computeClient, err := compute.NewService(ctx)
@@ -58,17 +65,18 @@ func NewTPMVerifier(opt *gcetpm.TPMVerifierOptions) (bootstrap.Verifier, error) 
 	return &tpmVerifier{
 		opt:           *opt,
 		computeClient: computeClient,
+		capiManager:   capiManager,
 	}, nil
 }
 
-var _ bootstrap.Verifier = &tpmVerifier{}
+var _ bootstrap.Verifier = (*tpmVerifier)(nil)
 
-func (v *tpmVerifier) VerifyToken(ctx context.Context, authToken string, body []byte) (*bootstrap.VerifyResult, error) {
+func (v *tpmVerifier) VerifyToken(ctx context.Context, rawRequest *http.Request, authToken string, body []byte) (*bootstrap.VerifyResult, error) {
 	// Reminder: we shouldn't trust any data we get from the client until we've checked the signature (and even then...)
 	// Thankfully the GCE SDK does seem to escape the parameters correctly, for example.
 
 	if !strings.HasPrefix(authToken, gcetpm.GCETPMAuthenticationTokenPrefix) {
-		return nil, fmt.Errorf("incorrect authorization type")
+		return nil, bootstrap.ErrNotThisVerifier
 	}
 	authToken = strings.TrimPrefix(authToken, gcetpm.GCETPMAuthenticationTokenPrefix)
 
@@ -118,7 +126,7 @@ func (v *tpmVerifier) VerifyToken(ctx context.Context, authToken string, body []
 		return nil, fmt.Errorf("projectID does not match expected: got %q, want %q", tokenData.GCPProjectID, v.opt.ProjectID)
 	}
 
-	instance, err := v.computeClient.Instances.Get(tokenData.GCPProjectID, tokenData.Zone, tokenData.Instance).Do()
+	instance, err := v.computeClient.Instances.Get(tokenData.GCPProjectID, tokenData.Zone, tokenData.Instance).Context(ctx).Do()
 	if err != nil {
 		if isNotFound(err) {
 			return nil, fmt.Errorf("unable to find instance in compute API: %w", err)
@@ -135,11 +143,13 @@ func (v *tpmVerifier) VerifyToken(ctx context.Context, authToken string, body []
 	for _, item := range instance.Metadata.Items {
 		switch item.Key {
 		case gce.MetadataKeyInstanceGroupName:
-			instanceGroupName = fi.StringValue(item.Value)
-		case "cluster-name":
-			clusterName = fi.StringValue(item.Value)
+			instanceGroupName = fi.ValueOf(item.Value)
+		case gcemetadata.MetadataKeyClusterName:
+			clusterName = fi.ValueOf(item.Value)
 		}
 	}
+
+	capgRole := instance.Labels[gce.LabelKeyCAPIRoleName]
 
 	if clusterName == "" {
 		return nil, fmt.Errorf("could not determine cluster for instance %s", instance.SelfLink)
@@ -148,8 +158,22 @@ func (v *tpmVerifier) VerifyToken(ctx context.Context, authToken string, body []
 	if clusterName != v.opt.ClusterName {
 		return nil, fmt.Errorf("clusterName does not match expected: got %q, want %q", clusterName, v.opt.ClusterName)
 	}
-	if instanceGroupName == "" {
-		return nil, fmt.Errorf("could not determine instance group for instance %s", instance.SelfLink)
+
+	var capiMachine *clusterapi.Machine
+
+	if v.capiManager != nil && capgRole != "" {
+		providerID := "gce://" + tokenData.GCPProjectID + "/" + tokenData.Zone + "/" + tokenData.Instance
+
+		m, err := v.capiManager.FindMachineByProviderID(ctx, providerID)
+		if err != nil {
+			return nil, fmt.Errorf("error finding Machine with providerID %q: %w", providerID, err)
+		}
+		capiMachine = m
+	}
+
+	// Check if this is a CAPG managed instance
+	if instanceGroupName == "" && capiMachine == nil {
+		return nil, fmt.Errorf("could not determine ownership for instance %s", instance.SelfLink)
 	}
 
 	// Verify the token has a valid GCE TPM signature.
@@ -170,10 +194,14 @@ func (v *tpmVerifier) VerifyToken(ctx context.Context, authToken string, body []
 		return nil, err
 	}
 
+	challengeEndpoint := instance.NetworkInterfaces[0].NetworkIP + ":" + strconv.Itoa(wellknownports.NodeupChallenge)
+
 	result := &bootstrap.VerifyResult{
 		NodeName:          instance.Name,
 		InstanceGroupName: instanceGroupName,
+		CAPIMachine:       capiMachine,
 		CertificateNames:  sans,
+		ChallengeEndpoint: challengeEndpoint,
 	}
 
 	return result, nil

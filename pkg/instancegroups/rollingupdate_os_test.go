@@ -18,13 +18,12 @@ package instancegroups
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 
-	"github.com/gophercloud/gophercloud/openstack/compute/v2/extensions/servergroups"
-	"github.com/gophercloud/gophercloud/openstack/compute/v2/servers"
-	"github.com/gophercloud/gophercloud/openstack/networking/v2/ports"
+	"github.com/gophercloud/gophercloud/v2/openstack/compute/v2/servergroups"
+	"github.com/gophercloud/gophercloud/v2/openstack/compute/v2/servers"
+	"github.com/gophercloud/gophercloud/v2/openstack/networking/v2/ports"
 	"github.com/stretchr/testify/assert"
 	v1 "k8s.io/api/core/v1"
 	v1meta "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -39,31 +38,27 @@ import (
 	"k8s.io/kops/util/pkg/vfs"
 )
 
-func getTestSetupOS(t *testing.T) (*RollingUpdateCluster, *openstack.MockCloud) {
+func getTestSetupOS(t *testing.T, ctx context.Context) (*RollingUpdateCluster, *openstack.MockCloud) {
 	vfs.Context.ResetMemfsContext(true)
 
-	k8sClient := fake.NewSimpleClientset()
+	k8sClient := fake.NewClientset()
 
 	mockcloud := testutils.SetupMockOpenstack()
 
-	inCluster := testutils.BuildMinimalCluster("test.k8s.local")
+	inCluster := testutils.BuildMinimalClusterAWS("test.k8s.local")
 
-	inCluster.Spec.CloudProvider = "openstack"
+	inCluster.Spec.CloudProvider.Openstack = &kopsapi.OpenstackSpec{}
 	inCluster.Name = "test.k8s.local"
 
-	inCluster.Spec.Topology.Masters = kopsapi.TopologyPrivate
-	inCluster.Spec.Topology.Nodes = kopsapi.TopologyPrivate
-
-	err := cloudup.PerformAssignments(inCluster, mockcloud)
+	err := cloudup.PerformAssignments(inCluster, vfs.Context, mockcloud)
 	if err != nil {
 		t.Fatalf("Failed to perform assignments: %v", err)
 	}
 
-	assetBuilder := assets.NewAssetBuilder(inCluster, false)
-	basePath, _ := vfs.Context.BuildVfsPath(inCluster.Spec.ConfigBase)
-	clientset := vfsclientset.NewVFSClientset(basePath)
-	cluster, err := cloudup.PopulateClusterSpec(clientset, inCluster, mockcloud, assetBuilder)
-
+	assetBuilder := assets.NewAssetBuilder(vfs.Context, inCluster.Spec.Assets, false)
+	basePath, _ := vfs.Context.BuildVfsPath(inCluster.Spec.ConfigStore.Base)
+	clientset := vfsclientset.NewVFSClientset(vfs.Context, basePath)
+	cluster, err := cloudup.PopulateClusterSpec(ctx, clientset, inCluster, nil, mockcloud, assetBuilder)
 	if err != nil {
 		t.Fatalf("Failed to populate cluster spec: %v", err)
 	}
@@ -74,7 +69,7 @@ func getTestSetupOS(t *testing.T) (*RollingUpdateCluster, *openstack.MockCloud) 
 		t.Fatalf("Failed to get credential store: %v", err)
 	}
 
-	sshCredentialStore.AddSSHPublicKey(sshPublicKey)
+	sshCredentialStore.AddSSHPublicKey(ctx, sshPublicKey)
 
 	c := &RollingUpdateCluster{
 		Cloud:                   mockcloud,
@@ -88,7 +83,6 @@ func getTestSetupOS(t *testing.T) (*RollingUpdateCluster, *openstack.MockCloud) 
 		ValidateTickDuration:    1 * time.Millisecond,
 		ValidateSuccessDuration: 5 * time.Millisecond,
 		ValidateCount:           2,
-		Ctx:                     context.Background(),
 		Cluster:                 cluster,
 		Clientset:               clientset,
 	}
@@ -102,18 +96,16 @@ var TempTestSkip = func(t *testing.T, message string) {
 }
 
 func TestRollingUpdateDisabledSurgeOS(t *testing.T) {
+	ctx := context.TODO()
+
 	TempTestSkip(t, "Failing in new release PR when build is not yet published")
 
-	origRegion := os.Getenv("OS_REGION_NAME")
-	os.Setenv("OS_REGION_NAME", "us-test1")
-	defer func() {
-		os.Setenv("OS_REGION_NAME", origRegion)
-	}()
+	t.Setenv("OS_REGION_NAME", "us-test1")
 
-	c, cloud := getTestSetupOS(t)
+	c, cloud := getTestSetupOS(t, ctx)
 
 	groups, igList := getGroupsAllNeedUpdateOS(t, c)
-	err := c.RollingUpdate(groups, igList)
+	err := c.RollingUpdate(ctx, groups, igList)
 	assert.NoError(t, err, "rolling update")
 
 	assertGroupInstanceCountOS(t, cloud, "node-1", 3)
@@ -124,6 +116,8 @@ func TestRollingUpdateDisabledSurgeOS(t *testing.T) {
 
 func makeGroupOS(t *testing.T, groups map[string]*cloudinstances.CloudInstanceGroup, igList *kopsapi.InstanceGroupList,
 	c *RollingUpdateCluster, subnet string, role kopsapi.InstanceGroupRole, count int, needUpdate int) {
+	ctx := context.TODO()
+
 	cloud := c.Cloud.(*openstack.MockCloud)
 	igif := c.Clientset.InstanceGroupsFor(c.Cluster)
 	fakeClient := c.K8sClient.(*fake.Clientset)
@@ -132,18 +126,18 @@ func makeGroupOS(t *testing.T, groups map[string]*cloudinstances.CloudInstanceGr
 	switch role {
 	case kopsapi.InstanceGroupRoleNode:
 		newIg = testutils.BuildMinimalNodeInstanceGroup("nodes-"+subnet, subnet)
-	case kopsapi.InstanceGroupRoleMaster:
+	case kopsapi.InstanceGroupRoleControlPlane:
 		newIg = testutils.BuildMinimalMasterInstanceGroup(subnet)
 	case kopsapi.InstanceGroupRoleBastion:
 		newIg = testutils.BuildMinimalBastionInstanceGroup("bastion-"+subnet, subnet)
 	}
 
 	newIg.Spec.MachineType = "n1-standard-2"
-	newIg.Spec.Image = "Ubuntu-20.04"
+	newIg.Spec.Image = "Ubuntu-26.04"
 
 	igList.Items = append(igList.Items, newIg)
 
-	ig, err := igif.Create(c.Ctx, &newIg, v1meta.CreateOptions{})
+	ig, err := igif.Create(ctx, &newIg, v1meta.CreateOptions{})
 	if err != nil {
 		t.Fatalf("Failed to create ig %v: %v", subnet, err)
 	}
@@ -168,13 +162,13 @@ func makeGroupOS(t *testing.T, groups map[string]*cloudinstances.CloudInstanceGr
 					Port: port.ID,
 				},
 			},
-		}, "")
+		}, nil, "")
 		if err != nil {
 			t.Fatalf("Failed to make group: %v", err)
 		}
 		id := server.ID
 		var node *v1.Node
-		if role != kopsapi.InstanceGroupRoleBastion {
+		if !role.HasBastion() {
 			node = &v1.Node{
 				ObjectMeta: v1meta.ObjectMeta{Name: id + ".local"},
 			}
@@ -196,17 +190,16 @@ func makeGroupOS(t *testing.T, groups map[string]*cloudinstances.CloudInstanceGr
 func getGroupsAllNeedUpdateOS(t *testing.T, c *RollingUpdateCluster) (map[string]*cloudinstances.CloudInstanceGroup, *kopsapi.InstanceGroupList) {
 	groups := make(map[string]*cloudinstances.CloudInstanceGroup)
 	igList := &kopsapi.InstanceGroupList{}
-	makeGroupOS(t, groups, igList, c, c.Cluster.Spec.Subnets[0].Name, kopsapi.InstanceGroupRoleNode, 3, 3)
-	makeGroupOS(t, groups, igList, c, c.Cluster.Spec.Subnets[1].Name, kopsapi.InstanceGroupRoleNode, 3, 3)
-	makeGroupOS(t, groups, igList, c, c.Cluster.Spec.Subnets[0].Name, kopsapi.InstanceGroupRoleMaster, 1, 1)
-	makeGroupOS(t, groups, igList, c, c.Cluster.Spec.Subnets[1].Name, kopsapi.InstanceGroupRoleMaster, 1, 1)
-	makeGroupOS(t, groups, igList, c, c.Cluster.Spec.Subnets[2].Name, kopsapi.InstanceGroupRoleMaster, 1, 1)
-	makeGroupOS(t, groups, igList, c, c.Cluster.Spec.Subnets[0].Name, kopsapi.InstanceGroupRoleBastion, 1, 1)
+	makeGroupOS(t, groups, igList, c, c.Cluster.Spec.Networking.Subnets[0].Name, kopsapi.InstanceGroupRoleNode, 3, 3)
+	makeGroupOS(t, groups, igList, c, c.Cluster.Spec.Networking.Subnets[1].Name, kopsapi.InstanceGroupRoleNode, 3, 3)
+	makeGroupOS(t, groups, igList, c, c.Cluster.Spec.Networking.Subnets[0].Name, kopsapi.InstanceGroupRoleControlPlane, 1, 1)
+	makeGroupOS(t, groups, igList, c, c.Cluster.Spec.Networking.Subnets[1].Name, kopsapi.InstanceGroupRoleControlPlane, 1, 1)
+	makeGroupOS(t, groups, igList, c, c.Cluster.Spec.Networking.Subnets[2].Name, kopsapi.InstanceGroupRoleControlPlane, 1, 1)
+	makeGroupOS(t, groups, igList, c, c.Cluster.Spec.Networking.Subnets[0].Name, kopsapi.InstanceGroupRoleBastion, 1, 1)
 	return groups, igList
 }
 
 func assertGroupInstanceCountOS(t *testing.T, cloud *openstack.MockCloud, groupName string, expected int) {
-
 	groups, _ := cloud.ListServerGroups(servergroups.ListOpts{})
 	for _, g := range groups {
 		if g.Name == groupName {

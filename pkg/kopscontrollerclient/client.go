@@ -1,0 +1,188 @@
+/*
+Copyright 2020 The Kubernetes Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package kopscontrollerclient
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/json"
+	"fmt"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"path"
+	"time"
+
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/klog/v2"
+	"k8s.io/kops/pkg/bootstrap"
+	"k8s.io/kops/pkg/dns"
+	"k8s.io/kops/upup/pkg/fi"
+	"k8s.io/kops/util/pkg/vfs"
+)
+
+type Client struct {
+	// Authenticator generates authentication credentials for requests.
+	Authenticator bootstrap.Authenticator
+	// CAs are the CA certificates for kops-controller.
+	CAs []byte
+
+	// BaseURL is the base URL for the server
+	BaseURL url.URL
+
+	// Backoff controls how long a single Query keeps retrying BaseURL before giving up.
+	// If unset, DefaultBackoff is used. Callers that have more than one server to try
+	// should set a shorter backoff, so that one unreachable server does not consume the
+	// whole budget.
+	Backoff wait.Backoff
+
+	httpClient *http.Client
+}
+
+// DefaultBackoff is the retry behaviour of a Query whose caller has not set Client.Backoff.
+// The interval is capped so a control plane that takes a long time to become reachable does not
+// push the next attempt tens of minutes out. Without a cap, doubling from 1s reaches a 17
+// minute wait by attempt 11, so a node that has been failing for 17 minutes then sits idle
+// for another 17 even once kops-controller is serving.
+var DefaultBackoff = wait.Backoff{
+	Duration: 1 * time.Second,
+	Factor:   2,
+	Jitter:   0.1,
+	Cap:      30 * time.Second,
+	Steps:    100,
+}
+
+func New(authenticator bootstrap.Authenticator, cas []byte, baseURL url.URL) *Client {
+	return NewWithTLSServerName(authenticator, cas, baseURL, "")
+}
+
+func NewWithTLSServerName(authenticator bootstrap.Authenticator, cas []byte, baseURL url.URL, tlsServerName string) *Client {
+	client := &Client{
+		Authenticator: authenticator,
+		CAs:           cas,
+		BaseURL:       baseURL,
+	}
+
+	certPool := x509.NewCertPool()
+	certPool.AppendCertsFromPEM(cas)
+	tlsConfig := &tls.Config{
+		RootCAs:    certPool,
+		MinVersion: tls.VersionTLS12,
+	}
+	if tlsServerName != "" {
+		tlsConfig.ServerName = tlsServerName
+	}
+	transport := &http.Transport{
+		TLSClientConfig: tlsConfig,
+	}
+	client.httpClient = &http.Client{
+		Timeout:   time.Duration(15) * time.Second,
+		Transport: transport,
+	}
+
+	return client
+}
+
+func (b *Client) Query(ctx context.Context, req any, resp any) error {
+	// Sanity-check DNS to provide clearer diagnostic messages.
+	if ips, err := net.LookupIP(b.BaseURL.Hostname()); err != nil {
+		if dnsErr, ok := err.(*net.DNSError); ok && dnsErr.IsNotFound {
+			return fi.NewTryAgainLaterError(fmt.Sprintf("kops-controller DNS not setup yet (not found: %v)", dnsErr))
+		}
+		return err
+	} else if len(ips) == 1 && (ips[0].String() == dns.PlaceholderIP || ips[0].String() == dns.PlaceholderIPv6) {
+		return fi.NewTryAgainLaterError(fmt.Sprintf("kops-controller DNS not setup yet (placeholder IP found: %v)", ips))
+	}
+
+	reqBytes, err := json.Marshal(req)
+	if err != nil {
+		return err
+	}
+
+	bootstrapURL := b.BaseURL
+	bootstrapURL.Path = path.Join(bootstrapURL.Path, "/bootstrap")
+
+	backoff := b.Backoff
+	if backoff.Steps == 0 {
+		backoff = DefaultBackoff
+	}
+
+	var response *http.Response
+	done, err := vfs.RetryWithBackoff(backoff, func() (bool, error) {
+		httpReq, reqErr := http.NewRequestWithContext(ctx, "POST", bootstrapURL.String(), bytes.NewReader(reqBytes))
+		if reqErr != nil {
+			return false, reqErr
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+
+		token, tokenErr := b.Authenticator.CreateToken(reqBytes)
+		if tokenErr != nil {
+			return false, tokenErr
+		}
+		httpReq.Header.Set("Authorization", token)
+
+		resp, doErr := b.httpClient.Do(httpReq)
+		if doErr != nil {
+			return false, fmt.Errorf("request to kops-controller failed: %w", doErr)
+		}
+
+		response = resp
+		return true, nil
+	})
+	if !done {
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("timed out waiting for a successful response from kops-controller")
+	}
+
+	// if we receive StatusConflict it means that we should exit gracefully
+	if response.StatusCode == http.StatusConflict {
+		klog.Infof("kops-controller returned status code %d", response.StatusCode)
+		if response.Body != nil {
+			response.Body.Close()
+		}
+		os.Exit(0)
+	}
+
+	if response.Body != nil {
+		defer response.Body.Close()
+	}
+
+	if response.StatusCode != http.StatusOK {
+		detail := ""
+		if response.Body != nil {
+			scanner := bufio.NewScanner(response.Body)
+			if scanner.Scan() {
+				detail = scanner.Text()
+			}
+		}
+		return fmt.Errorf("kops-controller returned status code %d: %s", response.StatusCode, detail)
+	}
+
+	return json.NewDecoder(response.Body).Decode(resp)
+}
+
+func (b *Client) Close() {
+	if b.httpClient != nil {
+		b.httpClient.CloseIdleConnections()
+	}
+}

@@ -32,22 +32,24 @@ type InstanceGroupManager struct {
 	Name      *string
 	Lifecycle fi.Lifecycle
 
-	Zone             *string
-	BaseInstanceName *string
-	InstanceTemplate *InstanceTemplate
-	TargetSize       *int64
+	Zone                        *string
+	BaseInstanceName            *string
+	InstanceTemplate            *InstanceTemplate
+	ListManagedInstancesResults string
+	TargetSize                  *int64
+	UpdatePolicy                *UpdatePolicy
 
 	TargetPools []*TargetPool
 }
 
-var _ fi.CompareWithID = &InstanceGroupManager{}
+var _ fi.CompareWithID = (*InstanceGroupManager)(nil)
 
 func (e *InstanceGroupManager) CompareWithID() *string {
 	return e.Name
 }
 
-func (e *InstanceGroupManager) Find(c *fi.Context) (*InstanceGroupManager, error) {
-	cloud := c.Cloud.(gce.GCECloud)
+func (e *InstanceGroupManager) Find(c *fi.CloudupContext) (*InstanceGroupManager, error) {
+	cloud := c.T.Cloud.(gce.GCECloud)
 
 	r, err := cloud.Compute().InstanceGroupManagers().Get(cloud.Project(), *e.Zone, *e.Name)
 	if err != nil {
@@ -59,14 +61,19 @@ func (e *InstanceGroupManager) Find(c *fi.Context) (*InstanceGroupManager, error
 
 	actual := &InstanceGroupManager{}
 	actual.Name = &r.Name
-	actual.Zone = fi.String(lastComponent(r.Zone))
+	actual.Zone = new(lastComponent(r.Zone))
 	actual.BaseInstanceName = &r.BaseInstanceName
-	actual.TargetSize = &r.TargetSize
-	actual.InstanceTemplate = &InstanceTemplate{ID: fi.String(lastComponent(r.InstanceTemplate))}
+	actual.TargetSize = e.TargetSize
+	actual.InstanceTemplate = &InstanceTemplate{ID: new(lastComponent(r.InstanceTemplate))}
+	actual.ListManagedInstancesResults = r.ListManagedInstancesResults
+
+	if policy := r.UpdatePolicy; policy != nil {
+		actual.UpdatePolicy = &UpdatePolicy{MinimalAction: policy.MinimalAction, Type: policy.Type}
+	}
 
 	for _, targetPool := range r.TargetPools {
 		actual.TargetPools = append(actual.TargetPools, &TargetPool{
-			Name: fi.String(lastComponent(targetPool)),
+			Name: new(lastComponent(targetPool)),
 		})
 	}
 	// TODO: Sort by name
@@ -77,8 +84,8 @@ func (e *InstanceGroupManager) Find(c *fi.Context) (*InstanceGroupManager, error
 	return actual, nil
 }
 
-func (e *InstanceGroupManager) Run(c *fi.Context) error {
-	return fi.DefaultDeltaRunMethod(e, c)
+func (e *InstanceGroupManager) Run(c *fi.CloudupContext) error {
+	return fi.CloudupDefaultDeltaRunMethod(e, c)
 }
 
 func (_ *InstanceGroupManager) CheckChanges(a, e, changes *InstanceGroupManager) error {
@@ -94,11 +101,19 @@ func (_ *InstanceGroupManager) RenderGCE(t *gce.GCEAPITarget, a, e, changes *Ins
 	}
 
 	i := &compute.InstanceGroupManager{
-		Name:             *e.Name,
-		Zone:             *e.Zone,
-		BaseInstanceName: *e.BaseInstanceName,
-		TargetSize:       *e.TargetSize,
-		InstanceTemplate: instanceTemplateURL,
+		Name:                        *e.Name,
+		Zone:                        *e.Zone,
+		BaseInstanceName:            *e.BaseInstanceName,
+		TargetSize:                  *e.TargetSize,
+		InstanceTemplate:            instanceTemplateURL,
+		ListManagedInstancesResults: e.ListManagedInstancesResults,
+	}
+
+	if policy := e.UpdatePolicy; policy != nil {
+		i.UpdatePolicy = &compute.InstanceGroupManagerUpdatePolicy{
+			MinimalAction: policy.MinimalAction,
+			Type:          policy.Type,
+		}
 	}
 
 	for _, targetPool := range e.TargetPools {
@@ -172,24 +187,42 @@ func (_ *InstanceGroupManager) RenderGCE(t *gce.GCEAPITarget, a, e, changes *Ins
 }
 
 type terraformInstanceGroupManager struct {
-	Name             *string                    `json:"name" cty:"name"`
-	Zone             *string                    `json:"zone" cty:"zone"`
-	BaseInstanceName *string                    `json:"base_instance_name" cty:"base_instance_name"`
-	Version          *terraformVersion          `json:"version" cty:"version"`
-	TargetSize       *int64                     `json:"target_size" cty:"target_size"`
-	TargetPools      []*terraformWriter.Literal `json:"target_pools,omitempty" cty:"target_pools"`
+	Lifecycle                   *terraform.Lifecycle       `cty:"lifecycle"`
+	Name                        *string                    `cty:"name"`
+	Zone                        *string                    `cty:"zone"`
+	BaseInstanceName            *string                    `cty:"base_instance_name"`
+	ListManagedInstancesResults string                     `cty:"list_managed_instances_results"`
+	Version                     *terraformVersion          `cty:"version"`
+	TargetSize                  *int64                     `cty:"target_size"`
+	UpdatePolicy                *terraformUpdatePolicy     `cty:"update_policy"`
+	TargetPools                 []*terraformWriter.Literal `cty:"target_pools"`
+}
+
+type terraformUpdatePolicy struct {
+	MinimalAction string `cty:"minimal_action"`
+	Type          string `cty:"type"`
 }
 
 type terraformVersion struct {
-	InstanceTemplate *terraformWriter.Literal `json:"instance_template" cty:"instance_template"`
+	InstanceTemplate *terraformWriter.Literal `cty:"instance_template"`
 }
 
 func (_ *InstanceGroupManager) RenderTerraform(t *terraform.TerraformTarget, a, e, changes *InstanceGroupManager) error {
 	tf := &terraformInstanceGroupManager{
-		Name:             e.Name,
-		Zone:             e.Zone,
-		BaseInstanceName: e.BaseInstanceName,
-		TargetSize:       e.TargetSize,
+		Name:                        e.Name,
+		Zone:                        e.Zone,
+		BaseInstanceName:            e.BaseInstanceName,
+		TargetSize:                  e.TargetSize,
+		ListManagedInstancesResults: e.ListManagedInstancesResults,
+	}
+	tf.Lifecycle = &terraform.Lifecycle{
+		IgnoreChanges: []*terraformWriter.Literal{{String: "target_size"}},
+	}
+	if policy := e.UpdatePolicy; policy != nil {
+		tf.UpdatePolicy = &terraformUpdatePolicy{
+			MinimalAction: policy.MinimalAction,
+			Type:          policy.Type,
+		}
 	}
 	tf.Version = &terraformVersion{
 		InstanceTemplate: e.InstanceTemplate.TerraformLink(),

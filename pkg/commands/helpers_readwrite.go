@@ -35,18 +35,18 @@ func UpdateCluster(ctx context.Context, clientset simple.Clientset, cluster *kop
 		return err
 	}
 
-	err = cloudup.PerformAssignments(cluster, cloud)
+	err = cloudup.PerformAssignments(cluster, clientset.VFSContext(), cloud)
 	if err != nil {
 		return fmt.Errorf("error populating configuration: %v", err)
 	}
 
-	assetBuilder := assets.NewAssetBuilder(cluster, false)
-	fullCluster, err := cloudup.PopulateClusterSpec(clientset, cluster, cloud, assetBuilder)
+	assetBuilder := assets.NewAssetBuilder(clientset.VFSContext(), cluster.Spec.Assets, false)
+	fullCluster, err := cloudup.PopulateClusterSpec(ctx, clientset, cluster, instanceGroups, cloud, assetBuilder)
 	if err != nil {
 		return err
 	}
 
-	err = validation.DeepValidate(fullCluster, instanceGroups, true, nil)
+	err = validation.DeepValidate(fullCluster, instanceGroups, true, clientset.VFSContext(), nil)
 	if err != nil {
 		return err
 	}
@@ -73,18 +73,18 @@ func UpdateInstanceGroup(ctx context.Context, clientset simple.Clientset, cluste
 		return err
 	}
 
-	err = cloudup.PerformAssignments(cluster, cloud)
+	err = cloudup.PerformAssignments(cluster, clientset.VFSContext(), cloud)
 	if err != nil {
 		return fmt.Errorf("error populating configuration: %v", err)
 	}
 
-	assetBuilder := assets.NewAssetBuilder(cluster, false)
-	fullCluster, err := cloudup.PopulateClusterSpec(clientset, cluster, cloud, assetBuilder)
+	assetBuilder := assets.NewAssetBuilder(clientset.VFSContext(), cluster.Spec.Assets, false)
+	fullCluster, err := cloudup.PopulateClusterSpec(ctx, clientset, cluster, allInstanceGroups, cloud, assetBuilder)
 	if err != nil {
 		return err
 	}
 
-	err = validation.CrossValidateInstanceGroup(instanceGroupToUpdate, fullCluster, cloud).ToAggregate()
+	err = validation.CrossValidateInstanceGroup(instanceGroupToUpdate, fullCluster, cloud, false).ToAggregate()
 	if err != nil {
 		return err
 	}

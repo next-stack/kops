@@ -20,11 +20,12 @@ import (
 	"regexp"
 	"strings"
 
-	"k8s.io/kops/upup/pkg/fi/utils"
+	"k8s.io/kops/pkg/apis/kops/util"
+	"k8s.io/kops/pkg/apis/kops/v1alpha2"
 )
 
 const (
-	skipRegexBase = "\\[Slow\\]|\\[Serial\\]|\\[Disruptive\\]|\\[Flaky\\]|\\[Feature:.+\\]|\\[HPA\\]|\\[Driver:.nfs\\]|Dashboard|Gluster|RuntimeClass|RuntimeHandler"
+	skipRegexBase = "\\[Slow\\]|\\[Serial\\]|\\[Disruptive\\]|\\[Flaky\\]|\\[Feature:.+\\]|nfs|NFS|In-tree.Volumes.\\[Driver:.(?:aws|gce|azure|cinder|vsphere)"
 )
 
 func (t *Tester) setSkipRegexFlag() error {
@@ -36,52 +37,172 @@ func (t *Tester) setSkipRegexFlag() error {
 	if err != nil {
 		return err
 	}
+	k8sVersion, err := util.ParseKubernetesVersion(cluster.Spec.KubernetesVersion)
+	if err != nil {
+		return err
+	}
 
 	skipRegex := skipRegexBase
 
-	networking := cluster.Spec.Networking
+	if k8sVersion.Minor < 35 {
+		// cpu.weight value changed in runc 1.3.2
+		// https://github.com/kubernetes/kubernetes/issues/135214
+		// https://github.com/opencontainers/runc/issues/4896
+		skipRegex += "|[Burstable|Guaranteed].QoS.pod"
+		skipRegex += "|Pod.InPlace.Resize.Container"
+	}
+
+	// Skip broken test, see https://github.com/kubernetes/kubernetes/pull/133262
+	skipRegex += "|blackbox.*should.not.be.able.to.pull.image.from.invalid.registry"
+	skipRegex += "|blackbox.*should.be.able.to.pull.from.private.registry.with.secret"
+
+	// K8s 1.28 promoted ProxyTerminatingEndpoints to GA, but it has limited CNI support
+	// https://github.com/kubernetes/kubernetes/pull/117718
+	// https://github.com/cilium/cilium/issues/27358
+	skipRegex += "|fallback.to.local.terminating.endpoints.when.there.are.no.ready.endpoints.with.externalTrafficPolicy.Local"
+
+	networking := cluster.Spec.LegacyNetworking
 	switch {
-	case networking.Kubenet != nil, networking.Canal != nil, networking.Weave != nil, networking.Cilium != nil:
+	case networking.Kubenet != nil, networking.Cilium != nil:
 		skipRegex += "|Services.*rejected.*endpoints"
 	}
 	if networking.Cilium != nil {
+		// Cilium upstream skip references: https://github.com/cilium/cilium/blob/main/.github/workflows/k8s-kind-network-e2e.yaml#L210
 		// https://github.com/cilium/cilium/issues/10002
 		skipRegex += "|TCP.CLOSE_WAIT"
 		// https://github.com/cilium/cilium/issues/15361
 		skipRegex += "|external.IP.is.not.assigned.to.a.node"
+
 		// https://github.com/cilium/cilium/issues/14287
-		skipRegex += "|same.port.number.but.different.protocols|same.hostPort.but.different.hostIP.and.protocol"
-		if strings.Contains(cluster.Spec.KubernetesVersion, "v1.23.0") {
-			// Reassess after https://github.com/kubernetes/kubernetes/pull/102643 is merged
-			// ref:
-			// https://github.com/kubernetes/kubernetes/issues/96717
-			// https://github.com/cilium/cilium/issues/5719
-			skipRegex += "|should.create.a.Pod.with.SCTP.HostPort"
+		skipRegex += "|same.hostPort.but.different.hostIP.and.protocol"
+
+		if networking.Cilium.Version < "v1.17" {
+			// https://github.com/cilium/cilium/issues/14287
+			skipRegex += "|same.port.number.but.different.protocols"
+			// https://github.com/cilium/cilium/issues/9207
+			skipRegex += "|serve.endpoints.on.same.port.and.different.protocols"
 		}
-	} else if networking.Calico != nil {
-		skipRegex += "|Services.*functioning.*NodePort"
-	} else if networking.Kuberouter != nil {
-		skipRegex += "|load-balancer|hairpin|affinity\\stimeout|service\\.kubernetes\\.io|CLOSE_WAIT"
+
+		// https://github.com/kubernetes/kubernetes/blob/418ae605ec1b788d43bff7ac44af66d8b669b833/test/e2e/network/networking.go#L135
+		skipRegex += "|should.check.kube-proxy.urls"
+
+		if k8sVersion.Minor < 39 {
+			// Cilium SNATs the client source IP to a pod IP instead of preserving it, so it fails the
+			// externalTrafficPolicy=Local for type=NodePort test. This test passes on every other CNI,
+			// so it stays gated to Cilium.
+			// < 39 so we look at this again
+			skipRegex += "|Services.should.support.externalTrafficPolicy.Local.for.type.NodePort"
+		}
+	} else if networking.KubeRouter != nil {
+		skipRegex += "|should set TCP CLOSE_WAIT timeout|should check kube-proxy urls"
 	} else if networking.Kubenet != nil {
 		skipRegex += "|Services.*affinity"
 	}
 
-	if cluster.Spec.CloudProvider == "gce" {
-		// Firewall tests expect a specific format for cluster and control plane host names
-		// which kOps does not match
-		// ref: https://github.com/kubernetes/kubernetes/blob/1bd00776b5d78828a065b5c21e7003accc308a06/test/e2e/framework/providers/gce/firewall.go#L92-L100
-		skipRegex += "|Firewall"
-		// kube-dns tests are not skipped automatically if a cluster uses CoreDNS instead
-		skipRegex += "|kube-dns"
+	// The "implement NodePort and HealthCheckNodePort correctly when ExternalTrafficPolicy changes"
+	// test requires externalTrafficPolicy=Local source-IP preservation, which is broken on these
+	// CNIs: the client IP is SNATed to a pod IP instead of being preserved (kube-router instead
+	// times out reaching the local endpoint). Confirmed failing on cilium, flannel and
+	// kube-router on all clouds, and on calico on GCE and Azure, where the underlay cannot route
+	// the pod CIDR so calico encapsulates inter-node pod traffic (IPIP tunl0 on GCE, VXLAN
+	// vxlan.calico on Azure) and the masquerade rewrites the source to the node's tunnel address.
+	// Calico preserves the source IP only on AWS, where kOps disables the source/dest check and
+	// routes pod traffic natively. amazon-vpc and kindnet preserve it and keep running the test.
+	// < 39 so we look at this again
+	if k8sVersion.Minor < 39 &&
+		(networking.Cilium != nil || networking.Flannel != nil || networking.KubeRouter != nil ||
+			(networking.Calico != nil && (cluster.Spec.LegacyCloudProvider == "gce" || cluster.Spec.LegacyCloudProvider == "azure"))) {
+		skipRegex += "|Services.should.implement.NodePort.and.HealthCheckNodePort.correctly.when.ExternalTrafficPolicy.changes"
+	}
+
+	if cluster.Spec.LegacyCloudProvider == "digitalocean" {
+		skipRegex += "|Services.should.respect.internalTrafficPolicy=Local.Pod.and.Node,.to.Pod"
+		// The metrics grabber scrapes one kube-controller-manager pod picked by name, so with
+		// several control planes it usually misses the leader and reads an empty metric set.
+		skipRegex += "|\\[sig-storage\\].Volume.metrics"
+	}
+
+	if cluster.Spec.LegacyCloudProvider == "azure" {
+		// Azure Disk CSI fsgroupchangepolicy tests are flaky due to SCSI device discovery
+		// latency during rapid attach/detach cycles on VMSS nodes.
+		skipRegex += "|fsgroupchangepolicy"
+		// Skipped upstream in azuredisk-csi-driver external E2E:
+		// https://github.com/kubernetes-sigs/azuredisk-csi-driver/blob/master/test/external-e2e/run.sh
+		skipRegex += "|should.resize.volume.when.PVC.is.edited.while.pod.is.using.it"
+		skipRegex += "|should.provision.storage.with.any.volume.data.source"
+		skipRegex += "|should.mount.multiple.PV.pointing.to.the.same.storage.on.the.same.node"
+		// Azure serializes disk attach/detach per VM in ARM, and under the suite's high
+		// parallelism a single detach can take minutes, so the attach-cycle-heavy azuredisk
+		// external-storage patterns time out on pod start or cleanup: data readback (detach +
+		// reattach mid-test), online/offline volume expansion, subPath pod restarts, and
+		// exec-after-attach. Skip only these families for the disk.csi.azure.com driver; the
+		// provisioning, topology, ephemeral, volumeMode and capacity specs still exercise
+		// attach/mount. Anchored to the driver so csi-hostpath/in-tree specs keep running.
+		// https://learn.microsoft.com/en-us/troubleshoot/azure/azure-kubernetes/storage/slow-attach-detach-operations-azure-disk
+		skipRegex += "|Driver:.disk.csi.azure.com.*(volumes.should.store.data|volume-expand|subPath|allow.exec)"
+	}
+
+	if cluster.Spec.LegacyCloudProvider == "gce" {
 		// this test assumes the cluster runs COS but kOps uses Ubuntu by default
 		// ref: https://github.com/kubernetes/test-infra/pull/22190
 		skipRegex += "|should.be.mountable.when.non-attachable"
 	}
 
-	if cluster.Spec.CloudProvider == "aws" && utils.IsIPv6CIDR(cluster.Spec.NonMasqueradeCIDR) {
-		// AWS VPC Classic ELBs are IPv4 only
-		// ref: https://docs.aws.amazon.com/elasticloadbalancing/latest/classic/elb-internet-facing-load-balancers.html#internet-facing-ip-addresses
-		skipRegex += "|should.not.disrupt.a.cloud.load-balancer.s.connectivity.during.rollout"
+	if k8sVersion.Minor < 37 {
+		// Services.should.function.for.service.endpoints.using.hostNetwork fails only on distros that
+		// return fully qualified hostnames (e.g. RHEL) where the k8s node name is not fully qualified;
+		// it already passes where the system hostname matches the node name. Fixed in k8s 1.37 by
+		// kubernetes/kubernetes#139819 (compares spec.nodeName instead of os.Hostname()); the
+		// dedicated reproduction jobs have been removed.
+		// refs: https://github.com/kubernetes/kops/issues/16349, https://github.com/kubernetes/kubernetes/issues/123255
+		skipRegex += "|Services.should.function.for.service.endpoints.using.hostNetwork"
+	}
+
+	for _, subnet := range cluster.Spec.Subnets {
+		if subnet.Type == v1alpha2.SubnetTypePrivate || subnet.Type == v1alpha2.SubnetTypeDualStack {
+			// The test SSHes from the pod running the test binary to every node address reported
+			// by the API. Nodes in private subnets are only reachable through the bastion, and
+			// nodes in dual-stack/IPv6 clusters only report IPv6 addresses, which the IPv4-only
+			// Prow pod cannot reach at all. The framework then finds zero SSH-able hosts and the
+			// test fails with `dial tcp: missing address`.
+			skipRegex += "|should.SSH.to.all.nodes.and.run.commands"
+			break
+		}
+	}
+
+	igs, err := t.getKopsInstanceGroups()
+	if err != nil {
+		return err
+	}
+
+	skipMap := make(map[string]any)
+	for _, ig := range igs {
+		if ig.Spec.Role != "Node" {
+			continue
+		}
+		if strings.Contains(ig.Spec.Image, "debian-11") {
+			// SupplementalGroupsPolicy requires containerd v2 but we're pinning these distros to container v1.7:
+			// https://kubernetes.io/docs/tasks/configure-pod-container/security-context/#implementations-supplementalgroupspolicy
+			// https://github.com/kubernetes/test-infra/blob/0fa3c1f53ee2b715469380f9e50200d6b7612dff/config/jobs/kubernetes/kops/helpers.py#L107-L109
+			skipMap["SupplementalGroupsPolicy"] = nil
+		}
+		if matchesAnySubstrings(ig.Spec.Image, []string{"debian-11", "cos-121", "cos-arm64-121"}) {
+			// ImageVolume requires containerd v2.1
+			// ref: https://github.com/containerd/containerd/releases/tag/v2.1.0
+			// https://docs.cloud.google.com/container-optimized-os/docs/release-notes/m121
+			skipMap["ImageVolume"] = nil
+		}
+		if matchesAnySubstrings(ig.Spec.Image, []string{
+			"rocky-9", "rocky-10", "rhel-9", "rhel-10", // aws
+			"rocky-linux-10", // gce
+		}) {
+			// This metric requires the nfacct sub-system, not present in these distros
+			// https://github.com/cri-o/cri-o/issues/8270
+			skipMap["KubeProxy.should.update.metric.for.tracking.accepted.packets.destined.for.localhost.nodeports"] = nil
+		}
+	}
+	for k := range skipMap {
+		skipRegex += "|" + k
 	}
 
 	// Ensure it is valid regex
@@ -90,4 +211,14 @@ func (t *Tester) setSkipRegexFlag() error {
 	}
 	t.SkipRegex = skipRegex
 	return nil
+}
+
+func matchesAnySubstrings(s string, substrings []string) bool {
+	s = strings.ToLower(s)
+	for _, substr := range substrings {
+		if strings.Contains(s, substr) {
+			return true
+		}
+	}
+	return false
 }

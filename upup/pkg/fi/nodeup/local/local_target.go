@@ -19,25 +19,23 @@ package local
 import (
 	"os/exec"
 
-	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/upup/pkg/fi"
+	"k8s.io/kops/upup/pkg/fi/nodeup/awsup"
 )
 
 type LocalTarget struct {
-	CacheDir   string
-	Cloud      fi.Cloud
-	InstanceID string
-	Cluster    *kops.Cluster
+	CacheDir string
+	// Cloud holds the AWS clients, on AWS only.
+	Cloud *awsup.Cloud
 }
 
-var _ fi.Target = &LocalTarget{}
+var _ fi.NodeupTarget = (*LocalTarget)(nil)
 
-func (t *LocalTarget) Finish(taskMap map[string]fi.Task) error {
+func (t *LocalTarget) Finish(taskMap map[string]fi.NodeupTask) error {
 	return nil
 }
 
-func (t *LocalTarget) ProcessDeletions() bool {
-	// We don't expect any, but it would be our job to process them
+func (t *LocalTarget) DefaultCheckExisting() bool {
 	return true
 }
 

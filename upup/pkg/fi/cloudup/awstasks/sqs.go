@@ -17,6 +17,7 @@ limitations under the License.
 package awstasks
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -24,13 +25,14 @@ import (
 
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/klog/v2"
+	"k8s.io/kops/pkg/jsonutils"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraformWriter"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/sqs"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
+	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
-	"k8s.io/kops/upup/pkg/fi/cloudup/cloudformation"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraform"
 )
 
@@ -39,6 +41,7 @@ type SQS struct {
 	Name      *string
 	Lifecycle fi.Lifecycle
 
+	ARN                    *string
 	URL                    *string
 	MessageRetentionPeriod int
 	Policy                 fi.Resource
@@ -46,21 +49,22 @@ type SQS struct {
 	Tags map[string]string
 }
 
-var _ fi.CompareWithID = &SQS{}
+var _ fi.CompareWithID = (*SQS)(nil)
 
 func (q *SQS) CompareWithID() *string {
-	return q.URL
+	return q.ARN
 }
 
-func (q *SQS) Find(c *fi.Context) (*SQS, error) {
-	cloud := c.Cloud.(awsup.AWSCloud)
+func (q *SQS) Find(c *fi.CloudupContext) (*SQS, error) {
+	ctx := c.Context()
+	cloud := awsup.GetCloud(c)
 
 	if q.Name == nil {
 		return nil, nil
 	}
 
-	response, err := cloud.SQS().ListQueues(&sqs.ListQueuesInput{
-		MaxResults:      aws.Int64(2),
+	response, err := cloud.SQS().ListQueues(ctx, &sqs.ListQueuesInput{
+		MaxResults:      aws.Int32(2),
 		QueueNamePrefix: q.Name,
 	})
 	if err != nil {
@@ -74,21 +78,22 @@ func (q *SQS) Find(c *fi.Context) (*SQS, error) {
 	}
 	url := response.QueueUrls[0]
 
-	attributes, err := cloud.SQS().GetQueueAttributes(&sqs.GetQueueAttributesInput{
-		AttributeNames: []*string{s("MessageRetentionPeriod"), s("Policy")},
-		QueueUrl:       url,
+	attributes, err := cloud.SQS().GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
+		AttributeNames: []sqstypes.QueueAttributeName{sqstypes.QueueAttributeNameMessageRetentionPeriod, sqstypes.QueueAttributeNamePolicy, sqstypes.QueueAttributeNameQueueArn},
+		QueueUrl:       aws.String(url),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("error getting SQS queue attributes: %v", err)
 	}
-	actualPolicy := *attributes.Attributes["Policy"]
-	period, err := strconv.Atoi(*attributes.Attributes["MessageRetentionPeriod"])
+	actualPolicy := attributes.Attributes["Policy"]
+	actualARN := attributes.Attributes["QueueArn"]
+	period, err := strconv.Atoi(attributes.Attributes["MessageRetentionPeriod"])
 	if err != nil {
 		return nil, fmt.Errorf("error coverting MessageRetentionPeriod to int: %v", err)
 	}
 
-	tags, err := cloud.SQS().ListQueueTags(&sqs.ListQueueTagsInput{
-		QueueUrl: url,
+	tags, err := cloud.SQS().ListQueueTags(ctx, &sqs.ListQueueTagsInput{
+		QueueUrl: aws.String(url),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("error listing SQS queue tags: %v", err)
@@ -98,42 +103,93 @@ func (q *SQS) Find(c *fi.Context) (*SQS, error) {
 	if q.Policy != nil {
 		expectedPolicy, err := fi.ResourceAsString(q.Policy)
 		if err != nil {
-			return nil, fmt.Errorf("error reading expected Policy for SQS %q: %v", aws.StringValue(q.Name), err)
+			return nil, fmt.Errorf("error reading expected Policy for SQS %q: %v", aws.ToString(q.Name), err)
 		}
 		expectedJson := make(map[string]interface{})
 		err = json.Unmarshal([]byte(expectedPolicy), &expectedJson)
 		if err != nil {
-			return nil, fmt.Errorf("error parsing expected Policy for SQS %q: %v", aws.StringValue(q.Name), err)
+			return nil, fmt.Errorf("error parsing expected Policy for SQS %q: %v", aws.ToString(q.Name), err)
 		}
 		actualJson := make(map[string]interface{})
 		err = json.Unmarshal([]byte(actualPolicy), &actualJson)
 		if err != nil {
-			return nil, fmt.Errorf("error parsing actual Policy for SQS %q: %v", aws.StringValue(q.Name), err)
+			return nil, fmt.Errorf("error parsing actual Policy for SQS %q: %v", aws.ToString(q.Name), err)
+		}
+
+		if err := normalizePolicy(expectedJson); err != nil {
+			return nil, err
+		}
+		if err := normalizePolicy(actualJson); err != nil {
+			return nil, err
 		}
 
 		if reflect.DeepEqual(actualJson, expectedJson) {
 			klog.V(2).Infof("actual Policy was json-equal to expected; returning expected value")
 			actualPolicy = expectedPolicy
+			q.Policy = fi.NewStringResource(expectedPolicy)
 		}
+
 	}
 
 	actual := &SQS{
+		ARN:                    s(actualARN),
 		Name:                   q.Name,
-		URL:                    url,
+		URL:                    aws.String(url),
 		Lifecycle:              q.Lifecycle,
 		Policy:                 fi.NewStringResource(actualPolicy),
 		MessageRetentionPeriod: period,
 		Tags:                   intersectSQSTags(tags.Tags, q.Tags),
 	}
 
-	//Avoid flapping
-	q.Name = actual.Name
+	// Avoid flapping
+	q.ARN = actual.ARN
 
 	return actual, nil
 }
 
-func (q *SQS) Run(c *fi.Context) error {
-	return fi.DefaultDeltaRunMethod(q, c)
+type JSONObject map[string]any
+
+func (j *JSONObject) Slice(key string) ([]any, bool, error) {
+	v, found := (*j)[key]
+	if !found {
+		return nil, false, nil
+	}
+	s, ok := v.([]any)
+	if !ok {
+		return nil, false, fmt.Errorf("expected slice at %q, got %T", key, v)
+	}
+	return s, true, nil
+}
+
+func (j *JSONObject) Object(key string) (JSONObject, bool, error) {
+	v, found := (*j)[key]
+	if !found {
+		return nil, false, nil
+	}
+	m, ok := v.(JSONObject)
+	if !ok {
+		return nil, false, fmt.Errorf("expected object at %q, got %T", key, v)
+	}
+	return m, true, nil
+}
+
+// normalizePolicy sorts the Service principals in the policy, so that we can compare policies more easily.
+func normalizePolicy(policy map[string]interface{}) error {
+	xform := jsonutils.NewTransformer()
+	xform.AddSliceTransform(func(path string, value []any) ([]any, error) {
+		if path != ".Statement[].Principal.Service[]" {
+			return value, nil
+		}
+		return jsonutils.SortSlice(value)
+	})
+	if err := xform.Transform(policy); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (q *SQS) Run(c *fi.CloudupContext) error {
+	return fi.CloudupDefaultDeltaRunMethod(q, c)
 }
 
 func (q *SQS) CheckChanges(a, e, changes *SQS) error {
@@ -151,6 +207,7 @@ func (q *SQS) CheckChanges(a, e, changes *SQS) error {
 }
 
 func (q *SQS) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *SQS) error {
+	ctx := context.TODO()
 	policy, err := fi.ResourceAsString(e.Policy)
 	if err != nil {
 		return fmt.Errorf("error rendering RolePolicyDocument: %v", err)
@@ -158,29 +215,37 @@ func (q *SQS) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *SQS) error {
 
 	if a == nil {
 		request := &sqs.CreateQueueInput{
-			Attributes: map[string]*string{
-				"MessageRetentionPeriod": s(strconv.Itoa(q.MessageRetentionPeriod)),
-				"Policy":                 s(policy),
+			Attributes: map[string]string{
+				"MessageRetentionPeriod": strconv.Itoa(q.MessageRetentionPeriod),
+				"Policy":                 policy,
 			},
 			QueueName: q.Name,
-			Tags:      convertTagsToPointers(q.Tags),
+			Tags:      q.Tags,
 		}
-		response, err := t.Cloud.SQS().CreateQueue(request)
+		response, err := t.Cloud.SQS().CreateQueue(ctx, request)
 		if err != nil {
 			return fmt.Errorf("error creating SQS queue: %v", err)
 		}
 
-		q.URL = response.QueueUrl
+		attributes, err := t.Cloud.SQS().GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
+			AttributeNames: []sqstypes.QueueAttributeName{sqstypes.QueueAttributeNameQueueArn},
+			QueueUrl:       response.QueueUrl,
+		})
+		if err != nil {
+			return fmt.Errorf("error getting SQS queue attributes: %v", err)
+		}
+
+		e.ARN = aws.String(attributes.Attributes["QueueArn"])
 	}
 
 	return nil
 }
 
 type terraformSQSQueue struct {
-	Name                    *string                  `json:"name" cty:"name"`
-	MessageRetentionSeconds int                      `json:"message_retention_seconds" cty:"message_retention_seconds"`
-	Policy                  *terraformWriter.Literal `json:"policy" cty:"policy"`
-	Tags                    map[string]string        `json:"tags" cty:"tags"`
+	Name                    *string                  `cty:"name"`
+	MessageRetentionSeconds int                      `cty:"message_retention_seconds"`
+	Policy                  *terraformWriter.Literal `cty:"policy"`
+	Tags                    map[string]string        `cty:"tags"`
 }
 
 func (_ *SQS) RenderTerraform(t *terraform.TerraformTarget, a, e, changes *SQS) error {
@@ -199,72 +264,19 @@ func (_ *SQS) RenderTerraform(t *terraform.TerraformTarget, a, e, changes *SQS) 
 	return t.RenderResource("aws_sqs_queue", *e.Name, tf)
 }
 
-type cloudformationSQSQueue struct {
-	QueueName              *string             `json:"QueueName"`
-	MessageRetentionPeriod int                 `json:"MessageRetentionPeriod"`
-	Tags                   []cloudformationTag `json:"Tags,omitempty"`
-}
-
-type cloudformationSQSQueuePolicy struct {
-	Queues         []*cloudformation.Literal `json:"Queues"`
-	PolicyDocument map[string]interface{}    `json:"PolicyDocument"`
-	Tags           []cloudformationTag       `json:"Tags,omitempty"`
-}
-
-func (_ *SQS) RenderCloudformation(t *cloudformation.CloudformationTarget, a, e, changes *SQS) error {
-	cfQueue := &cloudformationSQSQueue{
-		QueueName:              e.Name,
-		MessageRetentionPeriod: e.MessageRetentionPeriod,
-		Tags:                   buildCloudformationTags(e.Tags),
-	}
-
-	err := t.RenderResource("AWS::SQS::Queue", *e.Name, cfQueue)
-	if err != nil {
-		return err
-	}
-
-	// convert Policy string into json
-	jsonString, err := fi.ResourceAsBytes(e.Policy)
-	if err != nil {
-		return err
-	}
-	data := make(map[string]interface{})
-	err = json.Unmarshal(jsonString, &data)
-	if err != nil {
-		return fmt.Errorf("error parsing SQS PolicyDocument: %v", err)
-	}
-
-	cfQueueRef := cloudformation.Ref("AWS::SQS::Queue", fi.StringValue(e.Name))
-
-	cfQueuePolicy := &cloudformationSQSQueuePolicy{
-		Queues:         []*cloudformation.Literal{cfQueueRef},
-		PolicyDocument: data,
-	}
-	return t.RenderResource("AWS::SQS::QueuePolicy", *e.Name+"Policy", cfQueuePolicy)
-}
-
-// change tags to format required by CreateQueue
-func convertTagsToPointers(tags map[string]string) map[string]*string {
-	newTags := map[string]*string{}
-	for k, v := range tags {
-		vv := v
-		newTags[k] = &vv
-	}
-
-	return newTags
+func (e *SQS) TerraformLink() *terraformWriter.Literal {
+	return terraformWriter.LiteralProperty("aws_sqs_queue", *e.Name, "arn")
 }
 
 // intersectSQSTags does the same thing as intersectTags, but takes different input because SQS tags are listed differently
-func intersectSQSTags(tags map[string]*string, desired map[string]string) map[string]string {
+func intersectSQSTags(tags map[string]string, desired map[string]string) map[string]string {
 	if tags == nil {
 		return nil
 	}
 	actual := make(map[string]string)
 	for k, v := range tags {
-		vv := aws.StringValue(v)
-
 		if _, found := desired[k]; found {
-			actual[k] = vv
+			actual[k] = v
 		}
 	}
 	if len(actual) == 0 && desired == nil {

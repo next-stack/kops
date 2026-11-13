@@ -50,10 +50,10 @@ var (
 
 	distrustKeypairExample = templates.Examples(i18n.T(`
 	# Distrust all cluster CA keypairs older than the primary.
-	kops distrust keypair ca
+	kops distrust keypair kubernetes-ca
 
 	# Distrust a particular keypair.
-	kops distrust keypair ca 6977545226837259959403993899
+	kops distrust keypair kubernetes-ca 6977545226837259959403993899
 
 	# Distrust all rotatable keypairs older than their respective primaries.
 	kops distrust keypair all
@@ -98,10 +98,10 @@ func NewCmdDistrustKeypair(f *util.Factory, out io.Writer) *cobra.Command {
 			return nil
 		},
 		ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-			return completeDistrustKeyset(f, options, args, toComplete)
+			return completeDistrustKeyset(cmd.Context(), f, options, args, toComplete)
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return RunDistrustKeypair(context.TODO(), f, out, options)
+			return RunDistrustKeypair(cmd.Context(), f, out, options)
 		},
 	}
 
@@ -109,7 +109,7 @@ func NewCmdDistrustKeypair(f *util.Factory, out io.Writer) *cobra.Command {
 }
 
 func RunDistrustKeypair(ctx context.Context, f *util.Factory, out io.Writer, options *DistrustKeypairOptions) error {
-	clientset, err := f.Clientset()
+	clientset, err := f.KopsClient()
 	if err != nil {
 		return err
 	}
@@ -125,7 +125,7 @@ func RunDistrustKeypair(ctx context.Context, f *util.Factory, out io.Writer, opt
 	}
 
 	if options.Keyset != "all" {
-		return distrustKeypair(out, options.Keyset, options.KeypairIDs[:], keyStore)
+		return distrustKeypair(ctx, out, options.Keyset, options.KeypairIDs, keyStore)
 	}
 
 	keysets, err := keyStore.ListKeysets()
@@ -135,7 +135,7 @@ func RunDistrustKeypair(ctx context.Context, f *util.Factory, out io.Writer, opt
 
 	for name := range keysets {
 		if rotatableKeysetFilter(name, nil) {
-			if err := distrustKeypair(out, name, nil, keyStore); err != nil {
+			if err := distrustKeypair(ctx, out, name, nil, keyStore); err != nil {
 				return fmt.Errorf("distrusting keypair for %s: %v", name, err)
 			}
 		}
@@ -144,10 +144,12 @@ func RunDistrustKeypair(ctx context.Context, f *util.Factory, out io.Writer, opt
 	return nil
 }
 
-func distrustKeypair(out io.Writer, name string, keypairIDs []string, keyStore fi.CAStore) error {
-	keyset, err := keyStore.FindKeyset(name)
+func distrustKeypair(ctx context.Context, out io.Writer, name string, keypairIDs []string, keyStore fi.CAStore) error {
+	keyset, err := keyStore.FindKeyset(ctx, name)
 	if err != nil {
 		return err
+	} else if keyset == nil {
+		return fmt.Errorf("keyset not found")
 	}
 
 	if len(keypairIDs) == 0 {
@@ -180,7 +182,7 @@ func distrustKeypair(out io.Writer, name string, keypairIDs []string, keyStore f
 		now := time.Now().UTC().Round(0)
 		item.DistrustTimestamp = &now
 
-		if err := keyStore.StoreKeyset(name, keyset); err != nil {
+		if err := keyStore.StoreKeyset(ctx, name, keyset); err != nil {
 			return fmt.Errorf("error storing keyset: %w", err)
 		}
 
@@ -190,16 +192,15 @@ func distrustKeypair(out io.Writer, name string, keypairIDs []string, keyStore f
 	return nil
 }
 
-func completeDistrustKeyset(f commandutils.Factory, options *DistrustKeypairOptions, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+func completeDistrustKeyset(ctx context.Context, f commandutils.Factory, options *DistrustKeypairOptions, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 	commandutils.ConfigureKlogForCompletion()
-	ctx := context.TODO()
 
 	cluster, clientSet, completions, directive := GetClusterForCompletion(ctx, f, nil)
 	if cluster == nil {
 		return completions, directive
 	}
 
-	keyset, _, completions, directive := completeKeyset(cluster, clientSet, args, rotatableKeysetFilter)
+	keyset, _, completions, directive := completeKeyset(ctx, cluster, clientSet, args, rotatableKeysetFilter)
 	if keyset == nil {
 		return completions, directive
 	}

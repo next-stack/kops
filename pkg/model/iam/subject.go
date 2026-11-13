@@ -37,8 +37,7 @@ type Subject interface {
 }
 
 // NodeRoleMaster represents the role of control-plane nodes, and implements Subject.
-type NodeRoleMaster struct {
-}
+type NodeRoleMaster struct{}
 
 // ServiceAccount implements Subject.
 func (_ *NodeRoleMaster) ServiceAccount() (types.NamespacedName, bool) {
@@ -65,12 +64,35 @@ func (_ *NodeRoleNode) ServiceAccount() (types.NamespacedName, bool) {
 	return types.NamespacedName{}, false
 }
 
-// NodeRoleNode represents the role of bastion nodes, and implements Subject.
-type NodeRoleBastion struct {
-}
+// NodeRoleBastion represents the role of bastion nodes, and implements Subject.
+type NodeRoleBastion struct{}
 
 // ServiceAccount implements Subject.
 func (_ *NodeRoleBastion) ServiceAccount() (types.NamespacedName, bool) {
+	return types.NamespacedName{}, false
+}
+
+// NodeRoleEtcd represents the role of etcd-only nodes, and implements Subject.
+type NodeRoleEtcd struct{}
+
+// ServiceAccount implements Subject.
+func (_ *NodeRoleEtcd) ServiceAccount() (types.NamespacedName, bool) {
+	return types.NamespacedName{}, false
+}
+
+// NodeRoleScheduler represents the role of scheduler-only nodes, and implements Subject.
+type NodeRoleScheduler struct{}
+
+// ServiceAccount implements Subject.
+func (_ *NodeRoleScheduler) ServiceAccount() (types.NamespacedName, bool) {
+	return types.NamespacedName{}, false
+}
+
+// NodeRoleKubeControllerManager represents the role of kube-controller-manager-only nodes, and implements Subject.
+type NodeRoleKubeControllerManager struct{}
+
+// ServiceAccount implements Subject.
+func (_ *NodeRoleKubeControllerManager) ServiceAccount() (types.NamespacedName, bool) {
 	return types.NamespacedName{}, false
 }
 
@@ -90,7 +112,7 @@ func (g *GenericServiceAccount) BuildAWSPolicy(*PolicyBuilder) (*Policy, error) 
 // BuildNodeRoleSubject returns a Subject implementation for the specified InstanceGroupRole.
 func BuildNodeRoleSubject(igRole kops.InstanceGroupRole, enableLifecycleHookPermissions bool) (Subject, error) {
 	switch igRole {
-	case kops.InstanceGroupRoleMaster:
+	case kops.InstanceGroupRoleControlPlane:
 		return &NodeRoleMaster{}, nil
 	case kops.InstanceGroupRoleAPIServer:
 		return &NodeRoleAPIServer{
@@ -102,6 +124,12 @@ func BuildNodeRoleSubject(igRole kops.InstanceGroupRole, enableLifecycleHookPerm
 		}, nil
 	case kops.InstanceGroupRoleBastion:
 		return &NodeRoleBastion{}, nil
+	case kops.InstanceGroupRoleEtcd:
+		return &NodeRoleEtcd{}, nil
+	case kops.InstanceGroupRoleScheduler:
+		return &NodeRoleScheduler{}, nil
+	case kops.InstanceGroupRoleKubeControllerManager:
+		return &NodeRoleKubeControllerManager{}, nil
 	default:
 		return nil, fmt.Errorf("unknown instancegroup role %q", igRole)
 	}
@@ -109,7 +137,7 @@ func BuildNodeRoleSubject(igRole kops.InstanceGroupRole, enableLifecycleHookPerm
 
 // AddServiceAccountRole adds the appropriate mounts / env vars to enable a pod to use a service-account role
 func AddServiceAccountRole(context *IAMModelContext, podSpec *corev1.PodSpec, serviceAccountRole Subject) error {
-	cloudProvider := kops.CloudProviderID(context.Cluster.Spec.CloudProvider)
+	cloudProvider := context.Cluster.GetCloudProvider()
 
 	switch cloudProvider {
 	case kops.CloudProviderAWS:
@@ -126,7 +154,7 @@ func addServiceAccountRoleForAWS(context *IAMModelContext, podSpec *corev1.PodSp
 	}
 
 	awsRoleARN := "arn:" + context.AWSPartition + ":iam::" + context.AWSAccountID + ":role/" + roleName
-	tokenDir := "/var/run/secrets/amazonaws.com/"
+	tokenDir := "/var/run/secrets/amazonaws.com/" //nolint:gosec // This is the projected token directory path, not a credential.
 	tokenName := "token"
 
 	volume := corev1.Volume{

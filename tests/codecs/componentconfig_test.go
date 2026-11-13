@@ -36,11 +36,14 @@ func TestSerializeEmptyCluster(t *testing.T) {
 	yamlString := string(yaml)
 	expected := `apiVersion: kops.k8s.io/v1alpha3
 kind: Cluster
-metadata:
-  creationTimestamp: null
+metadata: {}
 spec:
+  api: {}
+  cloudProvider: {}
+  configStore: {}
   kubeControllerManager: {}
   kubelet: {}
+  networking: {}
 `
 	if yamlString != expected {
 		diffString := diff.FormatDiff(expected, yamlString)

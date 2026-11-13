@@ -69,6 +69,10 @@ func (c *doCloudMockImplementation) DeleteInstance(instance *cloudinstances.Clou
 	return errors.New("not tested")
 }
 
+func (c *doCloudMockImplementation) DeregisterInstance(i *cloudinstances.CloudInstance) error {
+	return nil
+}
+
 // DetachInstance is not implemented yet. It needs to cause a cloud instance to no longer be counted against the group's size limits.
 func (c *doCloudMockImplementation) DetachInstance(i *cloudinstances.CloudInstance) error {
 	return fmt.Errorf("digital ocean cloud provider does not support surging")
@@ -85,6 +89,10 @@ func (c *doCloudMockImplementation) FindClusterStatus(cluster *kops.Cluster) (*k
 
 func (c *doCloudMockImplementation) GetApiIngressStatus(cluster *kops.Cluster) ([]fi.ApiIngressStatus, error) {
 	return nil, errors.New("not tested")
+}
+
+func (c *doCloudMockImplementation) KeysService() godo.KeysService {
+	panic("KeyService not implemented by doCloudMockImplementation")
 }
 
 func (c *doCloudMockImplementation) DropletsService() godo.DropletsService {
@@ -122,6 +130,23 @@ func (c *doCloudMockImplementation) GetAllLoadBalancers() ([]godo.LoadBalancer, 
 func (c *doCloudMockImplementation) GetAllDropletsByTag(tag string) ([]godo.Droplet, error) {
 	return nil, nil
 }
+
 func (c *doCloudMockImplementation) GetAllVolumesByRegion() ([]godo.Volume, error) {
 	return nil, nil
+}
+
+func (c *doCloudMockImplementation) GetVPCUUID(networkCIDR string, vpcName string) (string, error) {
+	return "", nil
+}
+
+func (c *doCloudMockImplementation) GetAllVPCs() ([]*godo.VPC, error) {
+	return nil, nil
+}
+
+func (c *doCloudMockImplementation) GetAllSSHKeys() ([]godo.Key, error) {
+	return nil, nil
+}
+
+func (c *doCloudMockImplementation) VPCsService() godo.VPCsService {
+	return c.Client.VPCs
 }

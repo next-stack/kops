@@ -31,24 +31,13 @@ type DiscoveryOptionsBuilder struct {
 	*OptionsContext
 }
 
-var _ loader.OptionsBuilder = &DiscoveryOptionsBuilder{}
+var _ loader.ClusterOptionsBuilder = &DiscoveryOptionsBuilder{}
 
-func (b *DiscoveryOptionsBuilder) BuildOptions(o interface{}) error {
-	clusterSpec := o.(*kops.ClusterSpec)
+func (b *DiscoveryOptionsBuilder) BuildOptions(o *kops.Cluster) error {
+	clusterSpec := &o.Spec
 
 	if clusterSpec.KubeAPIServer == nil {
 		clusterSpec.KubeAPIServer = &kops.KubeAPIServerConfig{}
-	}
-
-	if b.IsKubernetesLT("1.20") {
-		// TODO when dropping support for 1.19, remove the logic in nodeup's KubeAPIServerBuilder
-		// and apply_cluster for handling an empty ServiceAccountIssuer.
-		if clusterSpec.KubeAPIServer.FeatureGates == nil {
-			return nil
-		}
-		if _, ok := clusterSpec.KubeAPIServer.FeatureGates["ServiceAccountIssuerDiscovery"]; !ok {
-			return nil
-		}
 	}
 
 	kubeAPIServer := clusterSpec.KubeAPIServer
@@ -68,6 +57,11 @@ func (b *DiscoveryOptionsBuilder) BuildOptions(o interface{}) error {
 			}
 			switch base := base.(type) {
 			case *vfs.S3Path:
+				serviceAccountIssuer, err = base.GetHTTPsUrl(clusterSpec.IsIPv6Only())
+				if err != nil {
+					return err
+				}
+			case *vfs.GSPath:
 				serviceAccountIssuer, err = base.GetHTTPsUrl()
 				if err != nil {
 					return err
@@ -81,26 +75,33 @@ func (b *DiscoveryOptionsBuilder) BuildOptions(o interface{}) error {
 			default:
 				return fmt.Errorf("locationStore=%q is of unexpected type %T", store, base)
 			}
+		} else if said != nil && said.DiscoveryService != nil {
+			discoveryService := said.DiscoveryService
+
+			serviceAccountIssuer = discoveryService.URL
+			if serviceAccountIssuer == "" {
+				return fmt.Errorf("discoveryService URL must be specified")
+			}
 		} else {
-			if supportsPublicJWKS(clusterSpec) {
-				serviceAccountIssuer = "https://" + clusterSpec.MasterPublicName
+			if supportsPublicJWKS(clusterSpec) && clusterSpec.API.PublicName != "" {
+				serviceAccountIssuer = "https://" + clusterSpec.API.PublicName
 			} else {
-				serviceAccountIssuer = "https://" + clusterSpec.MasterInternalName
+				serviceAccountIssuer = "https://api.internal." + b.ClusterName
 			}
 		}
 		kubeAPIServer.ServiceAccountIssuer = &serviceAccountIssuer
 	}
-	kubeAPIServer.ServiceAccountJWKSURI = fi.String(*kubeAPIServer.ServiceAccountIssuer + "/openid/v1/jwks")
+	kubeAPIServer.ServiceAccountJWKSURI = new(*kubeAPIServer.ServiceAccountIssuer + "/openid/v1/jwks")
 	// We set apiserver ServiceAccountKey and ServiceAccountSigningKeyFile in nodeup
 
 	return nil
 }
 
 func supportsPublicJWKS(clusterSpec *kops.ClusterSpec) bool {
-	if !fi.BoolValue(clusterSpec.KubeAPIServer.AnonymousAuth) {
+	if !fi.ValueOf(clusterSpec.KubeAPIServer.AnonymousAuth) {
 		return false
 	}
-	for _, cidr := range clusterSpec.KubernetesAPIAccess {
+	for _, cidr := range clusterSpec.API.Access {
 		if cidr == "0.0.0.0/0" || cidr == "::/0" {
 			return true
 		}

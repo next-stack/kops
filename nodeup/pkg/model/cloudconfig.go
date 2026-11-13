@@ -17,222 +17,76 @@ limitations under the License.
 package model
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/upup/pkg/fi"
+	"k8s.io/kops/upup/pkg/fi/cloudup/openstack/openstackcloudconfig"
 	"k8s.io/kops/upup/pkg/fi/nodeup/nodetasks"
 )
 
 const (
-	CloudConfigFilePath       = "/etc/kubernetes/cloud.config"
-	InTreeCloudConfigFilePath = "/etc/kubernetes/in-tree-cloud.config"
-
-	// VM UUID is set by cloud-init
-	VM_UUID_FILE_PATH = "/etc/vmware/vm_uuid"
+	CloudConfigFilePath = "/etc/kubernetes/cloud.config"
 )
-
-// azureCloudConfig is the configuration passed to Cloud Provider Azure.
-// The specification is described in https://kubernetes-sigs.github.io/cloud-provider-azure/install/configs/.
-type azureCloudConfig struct {
-	// SubscriptionID is the ID of the Azure Subscription that the cluster is deployed in.
-	SubscriptionID string `json:"subscriptionId,omitempty"`
-	// TenantID is the ID of the tenant that the cluster is deployed in.
-	TenantID string `json:"tenantId"`
-	// CloudConfigType is the cloud configure type for Azure cloud provider. Supported values are file, secret and merge.
-	CloudConfigType string `json:"cloudConfigType,omitempty"`
-	// VMType is the type of azure nodes.
-	VMType string `json:"vmType,omitempty" yaml:"vmType,omitempty"`
-	// ResourceGroup is the name of the resource group that the cluster is deployed in.
-	ResourceGroup string `json:"resourceGroup,omitempty"`
-	// Location is the location of the resource group that the cluster is deployed in.
-	Location string `json:"location,omitempty"`
-	// RouteTableName is the name of the route table attached to the subnet that the cluster is deployed in.
-	RouteTableName string `json:"routeTableName,omitempty"`
-	// VnetName is the name of the virtual network that the cluster is deployed in.
-	VnetName string `json:"vnetName"`
-
-	// UseInstanceMetadata specifies where instance metadata service is used where possible.
-	UseInstanceMetadata bool `json:"useInstanceMetadata,omitempty"`
-	// UseManagedIdentityExtension specifies where managed service
-	// identity is used for the virtual machine to access Azure
-	// ARM APIs.
-	UseManagedIdentityExtension bool `json:"useManagedIdentityExtension,omitempty"`
-	// DisableAvailabilitySetNodes disables VMAS nodes support.
-	DisableAvailabilitySetNodes bool `json:"disableAvailabilitySetNodes,omitempty"`
-}
 
 // CloudConfigBuilder creates the cloud configuration file
 type CloudConfigBuilder struct {
 	*NodeupModelContext
 }
 
-var _ fi.ModelBuilder = &CloudConfigBuilder{}
+var _ fi.NodeupModelBuilder = &CloudConfigBuilder{}
 
-func (b *CloudConfigBuilder) Build(c *fi.ModelBuilderContext) error {
-	if err := b.build(c, true); err != nil {
-		return err
+func (b *CloudConfigBuilder) Build(c *fi.NodeupModelBuilderContext) error {
+	// Azure reads its cloud config from the azure-cloud-provider Secret, so
+	// nodeup does not write a cloud config file for Azure nodes.
+	if b.CloudProvider() == kops.CloudProviderAzure {
+		return nil
 	}
-	if err := b.build(c, false); err != nil {
-		return err
+
+	if !b.HasAPIServer && b.NodeupConfig.KubeletConfig.CloudProvider == "external" {
+		return nil
 	}
-	return nil
+
+	return b.build(c)
 }
 
-func (b *CloudConfigBuilder) build(c *fi.ModelBuilderContext, inTree bool) error {
+func (b *CloudConfigBuilder) build(c *fi.NodeupModelBuilderContext) error {
 	// Add cloud config file if needed
 	var lines []string
 
-	cloudProvider := b.Cluster.Spec.CloudProvider
-	cloudConfig := b.Cluster.Spec.CloudConfig
+	cloudProvider := b.CloudProvider()
 
-	if cloudConfig == nil {
-		cloudConfig = &kops.CloudConfiguration{}
-	}
-
-	var config string
-	requireGlobal := true
 	switch cloudProvider {
-	case "gce":
-		if cloudConfig.NodeTags != nil {
-			lines = append(lines, "node-tags = "+*cloudConfig.NodeTags)
+	case kops.CloudProviderGCE:
+		if b.NodeupConfig.NodeTags != nil {
+			lines = append(lines, "node-tags = "+*b.NodeupConfig.NodeTags)
 		}
-		if cloudConfig.NodeInstancePrefix != nil {
-			lines = append(lines, "node-instance-prefix = "+*cloudConfig.NodeInstancePrefix)
+		if b.NodeupConfig.NodeInstancePrefix != nil {
+			lines = append(lines, "node-instance-prefix = "+*b.NodeupConfig.NodeInstancePrefix)
 		}
-		if cloudConfig.Multizone != nil {
-			lines = append(lines, fmt.Sprintf("multizone = %t", *cloudConfig.Multizone))
+		if b.NodeupConfig.Multizone != nil {
+			lines = append(lines, fmt.Sprintf("multizone = %t", *b.NodeupConfig.Multizone))
 		}
-	case "aws":
-		if cloudConfig.DisableSecurityGroupIngress != nil {
-			lines = append(lines, fmt.Sprintf("DisableSecurityGroupIngress = %t", *cloudConfig.DisableSecurityGroupIngress))
+	case kops.CloudProviderAWS:
+		if b.NodeupConfig.DisableSecurityGroupIngress != nil {
+			lines = append(lines, fmt.Sprintf("DisableSecurityGroupIngress = %t", *b.NodeupConfig.DisableSecurityGroupIngress))
 		}
-		if cloudConfig.ElbSecurityGroup != nil {
-			lines = append(lines, "ElbSecurityGroup = "+*cloudConfig.ElbSecurityGroup)
+		if b.NodeupConfig.ElbSecurityGroup != nil {
+			lines = append(lines, "ElbSecurityGroup = "+*b.NodeupConfig.ElbSecurityGroup)
 		}
-		if !inTree {
-			for _, family := range cloudConfig.NodeIPFamilies {
-				lines = append(lines, "NodeIPFamilies = "+family)
-			}
+		if b.NodeupConfig.NLBSecurityGroupMode != nil {
+			lines = append(lines, "NLBSecurityGroupMode = "+*b.NodeupConfig.NLBSecurityGroupMode)
 		}
-	case "openstack":
-		osc := cloudConfig.Openstack
-		if osc == nil {
-			break
+		for _, family := range b.NodeupConfig.NodeIPFamilies {
+			lines = append(lines, "NodeIPFamilies = "+family)
 		}
-		//Support mapping of older keystone API
-		tenantName := os.Getenv("OS_TENANT_NAME")
-		if tenantName == "" {
-			tenantName = os.Getenv("OS_PROJECT_NAME")
-		}
-		tenantID := os.Getenv("OS_TENANT_ID")
-		if tenantID == "" {
-			tenantID = os.Getenv("OS_PROJECT_ID")
-		}
-		lines = append(lines,
-			fmt.Sprintf("auth-url=\"%s\"", os.Getenv("OS_AUTH_URL")),
-			fmt.Sprintf("username=\"%s\"", os.Getenv("OS_USERNAME")),
-			fmt.Sprintf("password=\"%s\"", os.Getenv("OS_PASSWORD")),
-			fmt.Sprintf("region=\"%s\"", os.Getenv("OS_REGION_NAME")),
-			fmt.Sprintf("tenant-id=\"%s\"", tenantID),
-			fmt.Sprintf("tenant-name=\"%s\"", tenantName),
-			fmt.Sprintf("domain-name=\"%s\"", os.Getenv("OS_DOMAIN_NAME")),
-			fmt.Sprintf("domain-id=\"%s\"", os.Getenv("OS_DOMAIN_ID")),
-		)
-		if b.Cluster.Spec.ExternalCloudControllerManager != nil {
-			lines = append(lines,
-				fmt.Sprintf("application-credential-id=\"%s\"", os.Getenv("OS_APPLICATION_CREDENTIAL_ID")),
-				fmt.Sprintf("application-credential-secret=\"%s\"", os.Getenv("OS_APPLICATION_CREDENTIAL_SECRET")),
-			)
-
-		}
-
-		lines = append(lines,
-			"",
-		)
-
-		if lb := osc.Loadbalancer; lb != nil {
-			lines = append(lines,
-				"[LoadBalancer]",
-				fmt.Sprintf("floating-network-id=%s", fi.StringValue(lb.FloatingNetworkID)),
-				fmt.Sprintf("lb-method=%s", fi.StringValue(lb.Method)),
-				fmt.Sprintf("lb-provider=%s", fi.StringValue(lb.Provider)),
-				fmt.Sprintf("use-octavia=%t", fi.BoolValue(lb.UseOctavia)),
-				fmt.Sprintf("manage-security-groups=%t", fi.BoolValue(lb.ManageSecGroups)),
-				fmt.Sprintf("enable-ingress-hostname=%t", fi.BoolValue(lb.EnableIngressHostname)),
-				"",
-			)
-
-			if monitor := osc.Monitor; monitor != nil {
-				lines = append(lines,
-					"create-monitor=yes",
-					fmt.Sprintf("monitor-delay=%s", fi.StringValue(monitor.Delay)),
-					fmt.Sprintf("monitor-timeout=%s", fi.StringValue(monitor.Timeout)),
-					fmt.Sprintf("monitor-max-retries=%d", fi.IntValue(monitor.MaxRetries)),
-					"",
-				)
-			}
-		}
-
-		if bs := osc.BlockStorage; bs != nil {
-			//Block Storage Config
-			lines = append(lines,
-				"[BlockStorage]",
-				fmt.Sprintf("bs-version=%s", fi.StringValue(bs.Version)),
-				fmt.Sprintf("ignore-volume-az=%t", fi.BoolValue(bs.IgnoreAZ)),
-				"")
-		}
-	case "azure":
-		requireGlobal = false
-
-		var region string
-		for _, subnet := range b.Cluster.Spec.Subnets {
-			if subnet.Region != "" {
-				region = subnet.Region
-				break
-			}
-		}
-		if region == "" {
-			return fmt.Errorf("on Azure, subnets must include Regions")
-		}
-
-		vnetName := b.Cluster.Spec.NetworkID
-		if vnetName == "" {
-			vnetName = b.Cluster.Name
-		}
-
-		az := b.Cluster.Spec.CloudConfig.Azure
-		c := &azureCloudConfig{
-			CloudConfigType:             "file",
-			SubscriptionID:              az.SubscriptionID,
-			TenantID:                    az.TenantID,
-			Location:                    region,
-			VMType:                      "vmss",
-			ResourceGroup:               b.Cluster.AzureResourceGroupName(),
-			RouteTableName:              az.RouteTableName,
-			VnetName:                    vnetName,
-			UseInstanceMetadata:         true,
-			UseManagedIdentityExtension: true,
-			// Disable availability set nodes as we currently use VMSS.
-			DisableAvailabilitySetNodes: true,
-		}
-		data, err := json.Marshal(c)
-		if err != nil {
-			return fmt.Errorf("error marshalling azure config: %s", err)
-		}
-		config = string(data)
+	case kops.CloudProviderOpenstack:
+		lines = append(lines, openstackcloudconfig.MakeCloudConfig(b.NodeupConfig.Openstack)...)
 	}
 
-	if requireGlobal {
-		config = "[global]\n" + strings.Join(lines, "\n") + "\n"
-	}
+	config := "[global]\n" + strings.Join(lines, "\n") + "\n"
 	path := CloudConfigFilePath
-	if inTree {
-		path = InTreeCloudConfigFilePath
-	}
 	t := &nodetasks.File{
 		Path:     path,
 		Contents: fi.NewStringResource(config),

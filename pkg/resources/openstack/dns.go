@@ -18,50 +18,48 @@ package openstack
 
 import (
 	"fmt"
+	"strings"
 
-	"k8s.io/kops/pkg/dns"
-
-	"github.com/gophercloud/gophercloud/openstack/dns/v2/recordsets"
-	"github.com/gophercloud/gophercloud/openstack/dns/v2/zones"
+	"github.com/gophercloud/gophercloud/v2/openstack/dns/v2/zones"
 	"k8s.io/kops/pkg/resources"
 	"k8s.io/kops/upup/pkg/fi"
-	"k8s.io/kops/upup/pkg/fi/cloudup/openstack"
 )
 
 const (
-	typeDNSRecord = "dNSRecord"
+	typeDNSRecord = "DNSRecord"
 )
 
 func (os *clusterDiscoveryOS) ListDNSRecordsets() ([]*resources.Resource, error) {
-
-	// if dnsclient does not exist (designate disabled) or using gossip DNS
-	if os.osCloud.DNSClient() == nil || dns.IsGossipHostname(os.clusterName) {
+	// Designate is optional in OpenStack.
+	if os.osCloud.DNSClient() == nil {
 		return nil, nil
 	}
 
-	zopts := zones.ListOpts{
-		Name: os.clusterName,
-	}
-
-	zs, err := os.osCloud.ListDNSZones(zopts)
+	zs, err := os.osCloud.ListDNSZones(zones.ListOpts{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list dns zones: %s", err)
 	}
 
-	if len(zs) == 0 {
-		return nil, fmt.Errorf("dns zone not found: %s", os.clusterName)
+	var clusterZone zones.Zone
+	for _, zone := range zs {
+		if strings.HasSuffix(os.clusterName, strings.TrimSuffix(zone.Name, ".")) {
+			clusterZone = zone
+			break
+		}
 	}
 
-	z := zs[0]
+	if clusterZone.ID == "" {
+		return nil, fmt.Errorf("failed to find cluster dns zone")
+	}
 
-	rrs, err := os.osCloud.ListDNSRecordsets(z.ID, nil)
+	rrs, err := os.osCloud.ListDNSRecordsets(clusterZone.ID, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to extract recordsets pages for zone %s: %v", z.Name, err)
+		return nil, fmt.Errorf("failed to extract recordsets pages for zone %s: %v", clusterZone.Name, err)
 	}
 
 	var resourceTrackers []*resources.Resource
 	for _, rr := range rrs {
-		if rr.Type != "A" {
+		if rr.Type != "A" || !strings.HasSuffix(strings.TrimSuffix(rr.Name, "."), os.clusterName) {
 			continue
 		}
 
@@ -70,8 +68,7 @@ func (os *clusterDiscoveryOS) ListDNSRecordsets() ([]*resources.Resource, error)
 			ID:   rr.ID,
 			Type: typeDNSRecord,
 			Deleter: func(cloud fi.Cloud, r *resources.Resource) error {
-				// TODO: not tested and this should have retry similar to what we have in another resources
-				return recordsets.Delete(cloud.(openstack.OpenstackCloud).DNSClient(), z.ID, rr.ID).ExtractErr()
+				return os.osCloud.DeleteDNSRecordset(clusterZone.ID, r.ID)
 			},
 			Obj: rr,
 		}

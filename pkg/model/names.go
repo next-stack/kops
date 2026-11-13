@@ -19,11 +19,14 @@ package model
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"k8s.io/klog/v2"
 	"k8s.io/kops/pkg/apis/kops"
+	"k8s.io/kops/pkg/model/iam"
 	"k8s.io/kops/pkg/pki"
+	"k8s.io/kops/pkg/truncate"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awstasks"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
@@ -36,7 +39,7 @@ func (b *KopsModelContext) SecurityGroupName(role kops.InstanceGroupRole) string
 		return "bastion." + b.ClusterName()
 	case kops.InstanceGroupRoleNode:
 		return "nodes." + b.ClusterName()
-	case kops.InstanceGroupRoleMaster, kops.InstanceGroupRoleAPIServer:
+	case kops.InstanceGroupRoleControlPlane, kops.InstanceGroupRoleAPIServer:
 		return "masters." + b.ClusterName()
 	default:
 		klog.Fatalf("unknown role: %v", role)
@@ -53,13 +56,19 @@ func (b *KopsModelContext) LinkToSecurityGroup(role kops.InstanceGroupRole) *aws
 // AutoscalingGroupName derives the autoscaling group name for us
 func (b *KopsModelContext) AutoscalingGroupName(ig *kops.InstanceGroup) string {
 	switch ig.Spec.Role {
-	case kops.InstanceGroupRoleMaster:
+	case kops.InstanceGroupRoleControlPlane:
 		// We need to keep this back-compatible, so we introduce the masters name,
 		// though the IG name suffices for uniqueness, and with sensible naming masters
 		// should be redundant...
 		return ig.ObjectMeta.Name + ".masters." + b.ClusterName()
 	case kops.InstanceGroupRoleAPIServer:
 		return ig.ObjectMeta.Name + ".apiservers." + b.ClusterName()
+	case kops.InstanceGroupRoleEtcd:
+		return ig.ObjectMeta.Name + ".etcd." + b.ClusterName()
+	case kops.InstanceGroupRoleScheduler:
+		return ig.ObjectMeta.Name + ".scheduler." + b.ClusterName()
+	case kops.InstanceGroupRoleKubeControllerManager:
+		return ig.ObjectMeta.Name + ".kcm." + b.ClusterName()
 	case kops.InstanceGroupRoleNode, kops.InstanceGroupRoleBastion:
 		return ig.ObjectMeta.Name + "." + b.ClusterName()
 
@@ -90,27 +99,22 @@ func (b *KopsModelContext) LBName32(prefix string) string {
 	return awsup.GetResourceName32(b.Cluster.ObjectMeta.Name, prefix)
 }
 
-// CLBName returns CLB name plus cluster name
-func (b *KopsModelContext) CLBName(prefix string) string {
-	return prefix + "." + b.ClusterName()
-}
-
 func (b *KopsModelContext) NLBName(prefix string) string {
-	return strings.ReplaceAll(prefix+"-"+b.ClusterName(), ".", "-")
+	return prefix + "." + b.ClusterName()
 }
 
 func (b *KopsModelContext) NLBTargetGroupName(prefix string) string {
 	return awsup.GetResourceName32(b.Cluster.ObjectMeta.Name, prefix)
 }
 
-func (b *KopsModelContext) LinkToCLB(prefix string) *awstasks.ClassicLoadBalancer {
-	name := b.CLBName(prefix)
-	return &awstasks.ClassicLoadBalancer{Name: &name}
-}
-
 func (b *KopsModelContext) LinkToNLB(prefix string) *awstasks.NetworkLoadBalancer {
 	name := b.NLBName(prefix)
 	return &awstasks.NetworkLoadBalancer{Name: &name}
+}
+
+func (b *KopsModelContext) NLBListenerName(loadBalancerPrefix string, port int) string {
+	name := b.NLBName(loadBalancerPrefix)
+	return name + "-" + strconv.Itoa(port)
 }
 
 func (b *KopsModelContext) LinkToTargetGroup(prefix string) *awstasks.TargetGroup {
@@ -124,7 +128,7 @@ func (b *KopsModelContext) LinkToVPC() *awstasks.VPC {
 }
 
 func (b *KopsModelContext) LinkToAmazonVPCIPv6CIDR() *awstasks.VPCAmazonIPv6CIDRBlock {
-	return &awstasks.VPCAmazonIPv6CIDRBlock{Name: fi.String("AmazonIPv6")}
+	return &awstasks.VPCAmazonIPv6CIDRBlock{Name: new("AmazonIPv6")}
 }
 
 func (b *KopsModelContext) LinkToDNSZone() *awstasks.DNSZone {
@@ -139,20 +143,27 @@ func (b *KopsModelContext) NameForDNSZone() string {
 
 // IAMName determines the name of the IAM Role and Instance Profile to use for the InstanceGroup
 func (b *KopsModelContext) IAMName(role kops.InstanceGroupRole) string {
+	var rolename string
 	switch role {
-	case kops.InstanceGroupRoleMaster:
-		return "masters." + b.ClusterName()
+	case kops.InstanceGroupRoleControlPlane:
+		rolename = "masters." + b.ClusterName()
 	case kops.InstanceGroupRoleAPIServer:
-		return "apiservers." + b.ClusterName()
+		rolename = "apiservers." + b.ClusterName()
+	case kops.InstanceGroupRoleEtcd:
+		rolename = "etcds." + b.ClusterName()
+	case kops.InstanceGroupRoleScheduler:
+		rolename = "schedulers." + b.ClusterName()
+	case kops.InstanceGroupRoleKubeControllerManager:
+		rolename = "kcms." + b.ClusterName()
 	case kops.InstanceGroupRoleBastion:
-		return "bastions." + b.ClusterName()
+		rolename = "bastions." + b.ClusterName()
 	case kops.InstanceGroupRoleNode:
-		return "nodes." + b.ClusterName()
+		rolename = "nodes." + b.ClusterName()
 
 	default:
 		klog.Fatalf("unknown InstanceGroup Role: %q", role)
-		return ""
 	}
+	return truncate.TruncateString(rolename, truncate.TruncateStringOptions{MaxLength: iam.MaxLengthIAMRoleName, AlwaysAddHash: false})
 }
 
 var roleNamRegExp = regexp.MustCompile(`([^/]+$)`)
@@ -172,7 +183,7 @@ func FindCustomAuthNameFromArn(arn string) (string, error) {
 
 func (b *KopsModelContext) LinkToIAMInstanceProfile(ig *kops.InstanceGroup) (*awstasks.IAMInstanceProfile, error) {
 	if ig.Spec.IAM != nil && ig.Spec.IAM.Profile != nil {
-		name, err := FindCustomAuthNameFromArn(fi.StringValue(ig.Spec.IAM.Profile))
+		name, err := FindCustomAuthNameFromArn(fi.ValueOf(ig.Spec.IAM.Profile))
 		return &awstasks.IAMInstanceProfile{Name: &name}, err
 	}
 	name := b.IAMName(ig.Spec.Role)
@@ -206,12 +217,20 @@ func (b *KopsModelContext) LinkToSSHKey() (*awstasks.SSHKey, error) {
 	return &awstasks.SSHKey{Name: &sshKeyName}, nil
 }
 
+func (b *KopsModelContext) NamePublicRouteTableInZone(zoneName string) string {
+	return "public-" + zoneName + "." + b.ClusterName()
+}
+
+func (b *KopsModelContext) LinkToPublicRouteTableInZone(zoneName string) *awstasks.RouteTable {
+	return &awstasks.RouteTable{Name: new(b.NamePublicRouteTableInZone(zoneName))}
+}
+
 func (b *KopsModelContext) NamePrivateRouteTableInZone(zoneName string) string {
 	return "private-" + zoneName + "." + b.ClusterName()
 }
 
 func (b *KopsModelContext) LinkToPrivateRouteTableInZone(zoneName string) *awstasks.RouteTable {
-	return &awstasks.RouteTable{Name: fi.String(b.NamePrivateRouteTableInZone(zoneName))}
+	return &awstasks.RouteTable{Name: new(b.NamePrivateRouteTableInZone(zoneName))}
 }
 
 func (b *KopsModelContext) InstanceName(ig *kops.InstanceGroup, suffix string) string {
@@ -219,6 +238,14 @@ func (b *KopsModelContext) InstanceName(ig *kops.InstanceGroup, suffix string) s
 }
 
 func QueueNamePrefix(clusterName string) string {
-	// periods aren't allowed in queue name
-	return strings.ReplaceAll(clusterName, ".", "-")
+	// periods aren't allowed in queue name and queue name can't exceed 80 characters
+	safeClusterName := strings.ReplaceAll(clusterName, ".", "-")
+	return truncate.TruncateString(safeClusterName, truncate.TruncateStringOptions{MaxLength: 75, AlwaysAddHash: false})
+}
+
+// InterruptionQueueName returns the name of the SQS queue that receives the EC2 interruption
+// events of the cluster, consumed by either NTH or Karpenter. The "-nth" suffix is kept so the
+// queue of an existing cluster is reused when Karpenter replaces NTH.
+func InterruptionQueueName(clusterName string) string {
+	return QueueNamePrefix(clusterName) + "-nth"
 }

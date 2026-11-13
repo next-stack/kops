@@ -27,7 +27,7 @@ import (
 
 // PoolAssociation
 
-var _ fi.HasLifecycle = &PoolAssociation{}
+var _ fi.HasLifecycle = (*PoolAssociation)(nil)
 
 // GetLifecycle returns the Lifecycle of the object, implementing fi.HasLifecycle
 func (o *PoolAssociation) GetLifecycle() fi.Lifecycle {
@@ -39,7 +39,7 @@ func (o *PoolAssociation) SetLifecycle(lifecycle fi.Lifecycle) {
 	o.Lifecycle = lifecycle
 }
 
-var _ fi.HasName = &PoolAssociation{}
+var _ fi.HasName = (*PoolAssociation)(nil)
 
 // GetName returns the Name of the object, implementing fi.HasName
 func (o *PoolAssociation) GetName() *string {
@@ -48,5 +48,5 @@ func (o *PoolAssociation) GetName() *string {
 
 // String is the stringer function for the task, producing readable output using fi.TaskAsString
 func (o *PoolAssociation) String() string {
-	return fi.TaskAsString(o)
+	return fi.CloudupTaskAsString(o)
 }

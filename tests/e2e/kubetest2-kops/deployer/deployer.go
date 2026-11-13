@@ -22,9 +22,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/octago/sflags/gen/gpflag"
 	"github.com/spf13/pflag"
+	"github.com/urfave/sflags/gen/gpflag"
 	"k8s.io/klog/v2"
+	"k8s.io/kops/tests/e2e/kubetest2-kops/aws"
 	"k8s.io/kops/tests/e2e/kubetest2-kops/builder"
 	"k8s.io/kops/tests/e2e/pkg/target"
 
@@ -41,22 +42,38 @@ type deployer struct {
 	// doInit helps to make sure the initialization is performed only once
 	doInit sync.Once
 
-	KopsRoot      string `flag:"kops-root" desc:"Path to root of the kops repo. Used with --build."`
-	StageLocation string `flag:"stage-location" desc:"Storage location for kops artifacts. Only gs:// paths are supported."`
+	KopsRoot string `flag:"kops-root" desc:"Path to root of the kops repo. Used with --build."`
+
+	StageLocation string `flag:"stage-location" desc:"Storage location for kops and kubernetes build artifacts. gs:// paths are supported, and s3:// paths with --cloud-provider=aws, or in the sfo3 DigitalOcean Spaces region with --cloud-provider=digitalocean. The location must be publicly readable."`
+
+	KeepStagingStore bool `flag:"keep-staging-store" desc:"Do not delete the staging bucket created by --build in --down, e.g. when deleting a leaked cluster between --build and --up"`
 
 	KopsVersionMarker    string `flag:"kops-version-marker" desc:"The URL to the kops version marker. Conflicts with --build and --kops-binary-path"`
 	KopsBaseURL          string `flag:"-"`
+	KubernetesBaseURL    string `flag:"-"`
 	PublishVersionMarker string `flag:"publish-version-marker" desc:"The GCS path to which the --kops-version-marker is uploaded if the tests pass"`
 
-	ClusterName    string   `flag:"cluster-name" desc:"The FQDN to use for the cluster name"`
-	CloudProvider  string   `flag:"cloud-provider" desc:"Which cloud provider to use"`
-	GCPProject     string   `flag:"gcp-project" desc:"Which GCP Project to use when --cloud-provider=gce"`
-	Env            []string `flag:"env" desc:"Additional env vars to set for kops commands in NAME=VALUE format"`
-	CreateArgs     string   `flag:"create-args" desc:"Extra space-separated arguments passed to 'kops create cluster'"`
-	KopsBinaryPath string   `flag:"kops-binary-path" desc:"The path to kops executable used for testing"`
-	createBucket   bool     `flag:"-"`
+	ClusterName            string   `flag:"cluster-name" desc:"The FQDN to use for the cluster name"`
+	CloudProvider          string   `flag:"cloud-provider" desc:"Which cloud provider to use"`
+	GCPProject             string   `flag:"gcp-project" desc:"Which GCP Project to use when --cloud-provider=gce"`
+	Env                    []string `flag:"env" desc:"Additional env vars to set for kops commands in NAME=VALUE format"`
+	CreateArgs             string   `flag:"create-args" desc:"Extra space-separated arguments passed to 'kops create cluster'"`
+	KopsBinaryPath         string   `flag:"kops-binary-path" desc:"The path to kops executable used for testing"`
+	KopsVersion            string   `flag:"kops-version" desc:"The kops version to use in the cluster, must be a released version of kops"`
+	KubernetesFeatureGates string   `flag:"kubernetes-feature-gates" desc:"Feature Gates to enable on Kubernetes components"`
 
-	ValidationWait time.Duration `flag:"validation-wait" desc:"time to wait for newly created cluster to pass validation"`
+	// ControlPlaneCount specifies the number of VMs in the control-plane.
+	ControlPlaneCount int `flag:"control-plane-count" desc:"Number of control-plane instances"`
+
+	ControlPlaneIGOverrides []string `flag:"control-plane-instance-group-overrides" desc:"overrides for the control plane instance groups"`
+	NodeIGOverrides         []string `flag:"node-instance-group-overrides" desc:"overrides for the node instance groups"`
+
+	ValidationWait     time.Duration `flag:"validation-wait" desc:"time to wait for newly created cluster to pass validation"`
+	ValidationCount    int           `flag:"validation-count" desc:"how many times should a validation pass"`
+	ValidationInterval time.Duration `flag:"validation-interval" desc:"time in duration to wait between validation attempts"`
+	MaxUnreadyNodes    int           `flag:"max-unready-nodes" desc:"maximum number of non-ready worker nodes tolerated during validation, helpful to set when running scale tests"`
+	MaxNodesToDump     string        `flag:"max-nodes-to-dump" desc:"max number of nodes to dump logs from, helpful to set when running scale tests"`
+	NodeDumpTimeout    time.Duration `flag:"node-dump-timeout" desc:"timeout for connecting to and dumping logs from a single node, helpful to raise when running scale tests"`
 
 	TemplatePath string `flag:"template-path" desc:"The path to the manifest template used for cluster creation"`
 
@@ -74,14 +91,31 @@ type deployer struct {
 
 	BuildOptions *builder.BuildOptions
 
+	// EnvFile is the path to a file that will be written containing the env vars, in particular KOPS_STATE_STORE
+	EnvFile string `flag:"env-file" desc:"The path to a file that will be written containing the env vars, in particular KOPS_STATE_STORE"`
+
 	// manifestPath is the location of the rendered manifest based on TemplatePath
 	manifestPath string
 	terraform    *target.Terraform
 
+	aws *aws.Client
+
+	createStateStore     bool
+	createDiscoveryStore bool
+	createStagingStore   bool
+	stateStoreName       string
+	discoveryStoreName   string
+	stagingStoreName     string
+	region               string
+	zones                []string
+
 	// boskos struct field will be non-nil when the deployer is
 	// using boskos to acquire a GCP project
-	boskos *client.Client
-
+	boskos                  *client.Client
+	BoskosLocation          string        `flag:"boskos-location" desc:"If set, manually specifies the location of the Boskos server."`
+	BoskosAcquireTimeout    time.Duration `flag:"boskos-acquire-timeout" desc:"How long should boskos wait to acquire a resource before timing out"`
+	BoskosHeartbeatInterval time.Duration `flag:"boskos-heartbeat-interval" desc:"How often should boskos send a heartbeat to Boskos to hold the acquired resource. 0 means no heartbeat."`
+	BoskosResourceType      string        `flag:"boskos-resource-type" desc:"If set, manually specifies the resource type of GCP projects to acquire from Boskos."`
 	// this channel serves as a signal channel for the hearbeat goroutine
 	// so that it can be explicitly closed
 	boskosHeartbeatClose chan struct{}
@@ -91,8 +125,10 @@ type deployer struct {
 var _ types.NewDeployer = New
 
 // assert that deployer implements types.Deployer
-var _ types.Deployer = &deployer{}
-var _ types.DeployerWithPostTester = &deployer{}
+var (
+	_ types.Deployer               = &deployer{}
+	_ types.DeployerWithPostTester = &deployer{}
+)
 
 func (d *deployer) Provider() string {
 	return Name
@@ -100,13 +136,20 @@ func (d *deployer) Provider() string {
 
 // New implements deployer.New for kops
 func New(opts types.Options) (types.Deployer, *pflag.FlagSet) {
-	// create a deployer object and set fields that are not flag controlled
+	// create a deployer object and set fields that are not flag controlled, and default values
 	d := &deployer{
-		commonOptions:        opts,
-		BuildOptions:         &builder.BuildOptions{},
-		boskosHeartbeatClose: make(chan struct{}),
+		commonOptions: opts,
+		BuildOptions: &builder.BuildOptions{
+			BuildKubernetes: false,
+		},
+		boskosHeartbeatClose:    make(chan struct{}),
+		ValidationCount:         10,
+		ValidationInterval:      10 * time.Second,
+		BoskosLocation:          "http://boskos.test-pods.svc.cluster.local.",
+		BoskosResourceType:      "gce-project",
+		BoskosAcquireTimeout:    5 * time.Minute,
+		BoskosHeartbeatInterval: 5 * time.Minute,
 	}
-
 	dir, err := defaultArtifactsDir()
 	if err != nil {
 		klog.Fatalf("unable to determine artifacts directory: %v", err)
@@ -116,9 +159,19 @@ func New(opts types.Options) (types.Deployer, *pflag.FlagSet) {
 	// register flags
 	fs := bindFlags(d)
 
+	fs.IntVar(&d.ControlPlaneCount, "control-plane-size", d.ControlPlaneCount, "Number of control-plane instances")
+	fs.MarkDeprecated("control-plane-size", "use --control-plane-count instead")
+
 	// register flags for klog
-	klog.InitFlags(nil)
-	fs.AddGoFlagSet(flag.CommandLine)
+	klogFlags := flag.NewFlagSet("klog", flag.ExitOnError)
+	klog.InitFlags(klogFlags)
+	// Opt into the new klog behavior so that -stderrthreshold is honored even
+	// when -logtostderr=true (the default).
+	// Ref: kubernetes/klog#212, kubernetes/klog#432
+	_ = klogFlags.Set("legacy_stderr_threshold_behavior", "false")
+	_ = klogFlags.Set("stderrthreshold", "INFO")
+	fs.AddGoFlagSet(klogFlags)
+
 	return d, fs
 }
 

@@ -6,8 +6,8 @@
 
 # kOps - Kubernetes Operations
 
-[GoDoc]: https://pkg.go.dev/k8s.io/kOps
-[GoDoc Widget]: https://godoc.org/k8s.io/kOps?status.svg
+[GoDoc]: https://pkg.go.dev/k8s.io/kops
+[GoDoc Widget]: https://godoc.org/k8s.io/kops?status.svg
 
 The easiest way to get a production grade Kubernetes cluster up and running.
 
@@ -18,7 +18,7 @@ We like to think of it as `kubectl` for clusters.
 `kops` will not only help you create, destroy, upgrade and maintain production-grade, highly
 available, Kubernetes cluster, but it will also provision the necessary cloud infrastructure.
 
-[AWS](getting_started/aws.md) (Amazon Web Services) is currently officially supported, with [DigitalOcean](getting_started/digitalocean.md) and [OpenStack](getting_started/openstack.md) in beta support, and [Azure](getting_started/azure.md), AliCloud, and [GCE](getting_started/gce.md) in alpha.
+[AWS](getting_started/aws.md) (Amazon Web Services) and [GCE](getting_started/gce.md) (Google Cloud Platform) are currently officially supported, with [DigitalOcean](getting_started/digitalocean.md), [Hetzner](getting_started/hetzner.md) and [OpenStack](getting_started/openstack.md) in beta support, and [Azure](getting_started/azure.md) in alpha.
 
 ## Can I see it in action?
 

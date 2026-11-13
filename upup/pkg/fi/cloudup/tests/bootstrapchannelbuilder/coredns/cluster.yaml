@@ -19,7 +19,7 @@ spec:
       name: master-us-test-1a
     name: events
   iam: {}
-  kubernetesVersion: v1.20.0
+  kubernetesVersion: v1.26.0
   kubeDNS:
     provider: CoreDNS
     tolerations:
@@ -46,7 +46,6 @@ spec:
                 - kube-dns
             topologyKey: kubernetes.io/hostname
           weight: 100
-  masterInternalName: api.internal.minimal.example.com
   masterPublicName: api.minimal.example.com
   networkCIDR: 172.20.0.0/16
   networking:
@@ -54,9 +53,6 @@ spec:
   nonMasqueradeCIDR: 100.64.0.0/10
   sshAccess:
     - 0.0.0.0/0
-  topology:
-    masters: public
-    nodes: public
   subnets:
   - cidr: 172.20.32.0/19
     name: us-test-1a

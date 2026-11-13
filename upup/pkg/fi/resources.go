@@ -18,6 +18,7 @@ package fi
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -33,11 +34,6 @@ type Resource interface {
 // HasIsReady is implemented by Resources that are derived (and thus may not be ready at comparison time)
 type HasIsReady interface {
 	IsReady() bool
-}
-
-type TemplateResource interface {
-	Resource
-	Curry(args []string) TemplateResource
 }
 
 func ResourcesMatch(a, b Resource) (bool, error) {
@@ -129,7 +125,7 @@ func (r *StringResource) MarshalJSON() ([]byte, error) {
 	return json.Marshal(&r.s)
 }
 
-var _ Resource = &StringResource{}
+var _ Resource = (*StringResource)(nil)
 
 func NewStringResource(s string) *StringResource {
 	return &StringResource{s: s}
@@ -150,7 +146,7 @@ func (b *BytesResource) MarshalJSON() ([]byte, error) {
 	return json.Marshal(string(b.data))
 }
 
-var _ Resource = &BytesResource{}
+var _ Resource = (*BytesResource)(nil)
 
 func NewBytesResource(data []byte) *BytesResource {
 	return &BytesResource{data: data}
@@ -165,7 +161,7 @@ type FileResource struct {
 	Path string
 }
 
-var _ Resource = &FileResource{}
+var _ Resource = (*FileResource)(nil)
 
 func NewFileResource(path string) *FileResource {
 	return &FileResource{Path: path}
@@ -186,14 +182,16 @@ type VFSResource struct {
 	Path vfs.Path
 }
 
-var _ Resource = &VFSResource{}
+var _ Resource = (*VFSResource)(nil)
 
 func NewVFSResource(path vfs.Path) *VFSResource {
 	return &VFSResource{Path: path}
 }
 
 func (r *VFSResource) Open() (io.Reader, error) {
-	data, err := r.Path.ReadFile()
+	ctx := context.TODO()
+
+	data, err := r.Path.ReadFile(ctx)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, err
@@ -204,27 +202,57 @@ func (r *VFSResource) Open() (io.Reader, error) {
 	return b, err
 }
 
-type TaskDependentResource struct {
+type TaskDependentResource[T SubContext] struct {
 	Resource Resource `json:"resource,omitempty"`
-	Task     Task     `json:"task,omitempty"`
+	Task     Task[T]  `json:"task,omitempty"`
 }
 
-var _ Resource = &TaskDependentResource{}
-var _ HasDependencies = &TaskDependentResource{}
-var _ HasIsReady = &TaskDependentResource{}
+type CloudupTaskDependentResource = TaskDependentResource[CloudupSubContext]
+type NodeupTaskDependentResource = TaskDependentResource[NodeupSubContext]
 
-func (r *TaskDependentResource) Open() (io.Reader, error) {
+var (
+	_ Resource                           = &TaskDependentResource[CloudupSubContext]{}
+	_ HasDependencies[CloudupSubContext] = &TaskDependentResource[CloudupSubContext]{}
+	_ HasIsReady                         = &TaskDependentResource[CloudupSubContext]{}
+)
+
+func (r *TaskDependentResource[T]) Open() (io.Reader, error) {
 	if r.Resource == nil {
 		return nil, fmt.Errorf("resource opened before it is ready (task=%v)", r.Task)
 	}
 	return r.Resource.Open()
 }
 
-func (r *TaskDependentResource) GetDependencies(tasks map[string]Task) []Task {
-	return []Task{r.Task}
+func (r *TaskDependentResource[T]) GetDependencies(tasks map[string]Task[T]) []Task[T] {
+	return []Task[T]{r.Task}
 }
 
 // IsReady implements HasIsReady::IsReady
-func (r *TaskDependentResource) IsReady() bool {
+func (r *TaskDependentResource[T]) IsReady() bool {
 	return r.Resource != nil
+}
+
+// FunctionToResource converts a function to a Resource.  The result of executing the function is cached.
+func FunctionToResource(fn func() ([]byte, error)) Resource {
+	return &functionResource{
+		fn: fn,
+	}
+}
+
+type functionResource struct {
+	data []byte
+	fn   func() ([]byte, error)
+}
+
+func (r *functionResource) Open() (io.Reader, error) {
+	b := r.data
+	if b == nil {
+		data, err := r.fn()
+		if err != nil {
+			return nil, err
+		}
+		r.data = data
+		b = data
+	}
+	return bytes.NewReader(b), nil
 }

@@ -23,10 +23,11 @@ import (
 	"fmt"
 	"net/url"
 
+	"go.uber.org/multierr"
 	"k8s.io/kops/pkg/pki"
 	"k8s.io/kops/util/pkg/vfs"
 
-	certmanager "github.com/jetstack/cert-manager/pkg/client/clientset/versioned"
+	certmanager "github.com/cert-manager/cert-manager/pkg/client/clientset/versioned"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -35,10 +36,14 @@ import (
 	"k8s.io/klog/v2"
 	"k8s.io/kops/channels/pkg/api"
 
-	cmv1 "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
+	cmv1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+type Applier interface {
+	Apply(ctx context.Context, data []byte) error
+}
 
 // Addon is a wrapper around a single version of an addon
 type Addon struct {
@@ -90,35 +95,34 @@ func (a *Addon) ChannelVersion() *ChannelVersion {
 }
 
 func (a *Addon) buildChannel() *Channel {
-	namespace := "kube-system"
-	if a.Spec.Namespace != nil {
-		namespace = *a.Spec.Namespace
-	}
-
 	channel := &Channel{
-		Namespace: namespace,
+		Namespace: a.GetNamespace(),
 		Name:      a.Name,
 	}
 	return channel
 }
 
-func (a *Addon) GetRequiredUpdates(ctx context.Context, k8sClient kubernetes.Interface, cmClient certmanager.Interface) (*AddonUpdate, error) {
+func (a *Addon) GetNamespace() string {
+	namespace := "kube-system"
+	if a.Spec.Namespace != nil {
+		namespace = *a.Spec.Namespace
+	}
+	return namespace
+}
+
+func (a *Addon) GetRequiredUpdates(ctx context.Context, k8sClient kubernetes.Interface, cmClient certmanager.Interface, existingVersion *ChannelVersion) (*AddonUpdate, error) {
 	newVersion := a.ChannelVersion()
 
 	channel := a.buildChannel()
 
-	existingVersion, err := channel.GetInstalledVersion(ctx, k8sClient)
-	if err != nil {
-		return nil, err
-	}
-
 	pkiInstalled := true
 
 	if a.Spec.NeedsPKI {
-		pkiInstalled, err = channel.IsPKIInstalled(ctx, k8sClient, cmClient)
+		needsPKI, err := channel.IsPKIInstalled(ctx, k8sClient, cmClient)
 		if err != nil {
 			return nil, err
 		}
+		pkiInstalled = needsPKI
 	}
 
 	if existingVersion != nil && !newVersion.replaces(a.Name, existingVersion) {
@@ -153,8 +157,8 @@ func (a *Addon) GetManifestFullUrl() (*url.URL, error) {
 	return manifestURL, nil
 }
 
-func (a *Addon) EnsureUpdated(ctx context.Context, k8sClient kubernetes.Interface, cmClient certmanager.Interface, pruner *Pruner) (*AddonUpdate, error) {
-	required, err := a.GetRequiredUpdates(ctx, k8sClient, cmClient)
+func (a *Addon) EnsureUpdated(ctx context.Context, vfsContext *vfs.VFSContext, k8sClient kubernetes.Interface, cmClient certmanager.Interface, pruner *Pruner, applier Applier, existingVersion *ChannelVersion) (*AddonUpdate, error) {
+	required, err := a.GetRequiredUpdates(ctx, k8sClient, cmClient, existingVersion)
 	if err != nil {
 		return nil, err
 	}
@@ -162,44 +166,72 @@ func (a *Addon) EnsureUpdated(ctx context.Context, k8sClient kubernetes.Interfac
 		return nil, nil
 	}
 
+	var merr error
+
 	if required.NewVersion != nil {
-		manifestURL, err := a.GetManifestFullUrl()
+		err := a.updateAddon(ctx, k8sClient, vfsContext, pruner, applier, required)
 		if err != nil {
-			return nil, err
-		}
-		klog.Infof("Applying update from %q", manifestURL)
-
-		// We copy the manifest to a temp file because it is likely e.g. an s3 URL, which kubectl can't read
-		data, err := vfs.Context.ReadFile(manifestURL.String())
-		if err != nil {
-			return nil, fmt.Errorf("error reading manifest: %w", err)
-		}
-
-		if err := Apply(data); err != nil {
-			return nil, fmt.Errorf("error applying update from %q: %w", manifestURL, err)
-		}
-
-		if err := pruner.Prune(ctx, data, a.Spec.Prune); err != nil {
-			return nil, fmt.Errorf("error pruning manifest from %q: %w", manifestURL, err)
-		}
-
-		if err := a.AddNeedsUpdateLabel(ctx, k8sClient, required); err != nil {
-			return nil, fmt.Errorf("error adding needs-update label: %v", err)
-		}
-
-		channel := a.buildChannel()
-		err = channel.SetInstalledVersion(ctx, k8sClient, a.ChannelVersion())
-		if err != nil {
-			return nil, fmt.Errorf("error applying annotation to record addon installation: %v", err)
+			merr = multierr.Append(merr, err)
 		}
 	}
 	if required.InstallPKI {
 		err := a.installPKI(ctx, k8sClient, cmClient)
 		if err != nil {
-			return nil, fmt.Errorf("error installing PKI: %v", err)
+			merr = multierr.Append(merr, err)
 		}
 	}
-	return required, nil
+	return required, merr
+}
+
+func (a *Addon) updateAddon(ctx context.Context, k8sClient kubernetes.Interface, vfsContext *vfs.VFSContext, pruner *Pruner, applier Applier, required *AddonUpdate) error {
+	manifestURL, err := a.GetManifestFullUrl()
+	if err != nil {
+		return err
+	}
+
+	klog.Infof("Applying update from %q", manifestURL)
+
+	// We copy the manifest to a temp file because it is likely e.g. an s3 URL, which kubectl can't read
+	data, err := vfsContext.ReadFile(manifestURL.String())
+	if err != nil {
+		return fmt.Errorf("error reading manifest: %w", err)
+	}
+
+	var merr error
+	var applyError, pruneError error
+
+	if applyError = applier.Apply(ctx, data); applyError != nil {
+		merr = multierr.Append(merr, fmt.Errorf("error applying update: %w", applyError))
+	}
+
+	if pruneError = pruner.Prune(ctx, data, a.Spec.Prune); pruneError != nil {
+		merr = multierr.Append(merr, fmt.Errorf("error pruning manifest: %w", pruneError))
+	}
+
+	if applyError != nil && pruneError == nil {
+		// If we failed to apply, but not prune, we should try to apply again
+		if err := applier.Apply(ctx, data); err != nil {
+			merr = multierr.Append(merr, fmt.Errorf("error applying update after prune: %w", err))
+		} else {
+			// If we succeeded to apply after prune, clear the errors
+			merr = nil
+		}
+	}
+
+	if merr != nil {
+		return fmt.Errorf("error updating addon from %q: %w", manifestURL, merr)
+	}
+
+	if err := a.AddNeedsUpdateLabel(ctx, k8sClient, required); err != nil {
+		return fmt.Errorf("error adding needs-update label: %v", err)
+	}
+
+	channel := a.buildChannel()
+	err = channel.SetInstalledVersion(ctx, k8sClient, a.ChannelVersion())
+	if err != nil {
+		return fmt.Errorf("error applying annotation to record addon installation: %v", err)
+	}
+	return nil
 }
 
 func (a *Addon) AddNeedsUpdateLabel(ctx context.Context, k8sClient kubernetes.Interface, required *AddonUpdate) error {
@@ -218,9 +250,9 @@ func (a *Addon) patchNeedsUpdateLabel(ctx context.Context, k8sClient kubernetes.
 	klog.Infof("addon %v wants to update %v nodes", a.Name, a.Spec.NeedsRollingUpdate)
 	selector := ""
 	switch a.Spec.NeedsRollingUpdate {
-	case "control-plane":
+	case api.NeedsRollingUpdateControlPlane:
 		selector = "node-role.kubernetes.io/master="
-	case "worker":
+	case api.NeedsRollingUpdateWorkers:
 		selector = "node-role.kubernetes.io/node="
 	}
 
@@ -258,7 +290,7 @@ func (a *Addon) installPKI(ctx context.Context, k8sClient kubernetes.Interface, 
 			a.Name,
 		},
 	}
-	cert, privateKey, _, err := pki.IssueCert(req, nil)
+	cert, privateKey, _, err := pki.IssueCert(ctx, req, nil)
 	if err != nil {
 		return err
 	}

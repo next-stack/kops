@@ -27,7 +27,7 @@ import (
 
 // Address
 
-var _ fi.HasLifecycle = &Address{}
+var _ fi.HasLifecycle = (*Address)(nil)
 
 // GetLifecycle returns the Lifecycle of the object, implementing fi.HasLifecycle
 func (o *Address) GetLifecycle() fi.Lifecycle {
@@ -39,7 +39,7 @@ func (o *Address) SetLifecycle(lifecycle fi.Lifecycle) {
 	o.Lifecycle = lifecycle
 }
 
-var _ fi.HasName = &Address{}
+var _ fi.HasName = (*Address)(nil)
 
 // GetName returns the Name of the object, implementing fi.HasName
 func (o *Address) GetName() *string {
@@ -48,5 +48,5 @@ func (o *Address) GetName() *string {
 
 // String is the stringer function for the task, producing readable output using fi.TaskAsString
 func (o *Address) String() string {
-	return fi.TaskAsString(o)
+	return fi.CloudupTaskAsString(o)
 }

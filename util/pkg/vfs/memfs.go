@@ -17,9 +17,9 @@ limitations under the License.
 package vfs
 
 import (
+	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path"
 	"strings"
@@ -31,14 +31,17 @@ import (
 type MemFSPath struct {
 	context  *MemFSContext
 	location string
+	acl      ACL
 
 	mutex    sync.Mutex
 	contents []byte
 	children map[string]*MemFSPath
 }
 
-var _ Path = &MemFSPath{}
-var _ TerraformPath = &MemFSPath{}
+var (
+	_ Path          = &MemFSPath{}
+	_ TerraformPath = &MemFSPath{}
+)
 
 type MemFSContext struct {
 	clusterReadable bool
@@ -102,26 +105,27 @@ func (p *MemFSPath) Join(relativePath ...string) Path {
 	return current
 }
 
-func (p *MemFSPath) WriteFile(r io.ReadSeeker, acl ACL) error {
-	data, err := ioutil.ReadAll(r)
+func (p *MemFSPath) WriteFile(ctx context.Context, r io.ReadSeeker, acl ACL) error {
+	data, err := io.ReadAll(r)
 	if err != nil {
 		return fmt.Errorf("error reading data: %v", err)
 	}
 	p.contents = data
+	p.acl = acl
 	return nil
 }
 
-func (p *MemFSPath) CreateFile(data io.ReadSeeker, acl ACL) error {
+func (p *MemFSPath) CreateFile(ctx context.Context, data io.ReadSeeker, acl ACL) error {
 	// Check if exists
 	if p.contents != nil {
 		return os.ErrExist
 	}
 
-	return p.WriteFile(data, acl)
+	return p.WriteFile(ctx, data, acl)
 }
 
 // ReadFile implements Path::ReadFile
-func (p *MemFSPath) ReadFile() ([]byte, error) {
+func (p *MemFSPath) ReadFile(ctx context.Context) ([]byte, error) {
 	if p.contents == nil {
 		return nil, os.ErrNotExist
 	}
@@ -149,7 +153,7 @@ func (p *MemFSPath) ReadDir() ([]Path, error) {
 	return paths, nil
 }
 
-func (p *MemFSPath) ReadTree() ([]Path, error) {
+func (p *MemFSPath) ReadTree(ctx context.Context) ([]Path, error) {
 	var paths []Path
 	p.readTree(&paths)
 	return paths, nil
@@ -179,28 +183,48 @@ func (p *MemFSPath) String() string {
 	return p.Path()
 }
 
-func (p *MemFSPath) Remove() error {
+func (p *MemFSPath) Remove(ctx context.Context) error {
 	p.contents = nil
 	return nil
 }
 
-func (p *MemFSPath) RemoveAllVersions() error {
-	return p.Remove()
+func (p *MemFSPath) RemoveAll(ctx context.Context) error {
+	tree, err := p.ReadTree(ctx)
+	if err != nil {
+		return err
+	}
+
+	for _, filePath := range tree {
+		err := filePath.Remove(ctx)
+		if err != nil {
+			return fmt.Errorf("error removing file %s: %w", filePath, err)
+		}
+	}
+
+	return nil
+}
+
+func (p *MemFSPath) RemoveAllVersions(ctx context.Context) error {
+	return p.Remove(ctx)
 }
 
 func (p *MemFSPath) Location() string {
 	return p.location
 }
 
-// Terraform support for integration tests.
-
-func (p *MemFSPath) TerraformProvider() (*TerraformProvider, error) {
-	return &TerraformProvider{
-		Name: "aws",
-		Arguments: map[string]string{
-			"region": "us-test-1",
-		},
-	}, nil
+func (p *MemFSPath) IsPublic() (bool, error) {
+	if p.acl == nil {
+		return false, nil
+	}
+	s3Acl, ok := p.acl.(*S3Acl)
+	if !ok {
+		return false, fmt.Errorf("expected acl to be S3Acl, was %T", p.acl)
+	}
+	isPublic := false
+	if s3Acl.RequestACL != nil {
+		isPublic = *s3Acl.RequestACL == "public-read"
+	}
+	return isPublic, nil
 }
 
 type terraformMemFSFile struct {
@@ -213,12 +237,48 @@ type terraformMemFSFile struct {
 }
 
 func (p *MemFSPath) RenderTerraform(w *terraformWriter.TerraformWriter, name string, data io.Reader, acl ACL) error {
-	bytes, err := ioutil.ReadAll(data)
+	if w.Providers != nil && w.Providers["azurerm"] != nil {
+		return p.renderTerraformAzure(w, name, data)
+	}
+	return p.renderTerraformS3(w, name, data, acl)
+}
+
+func (p *MemFSPath) renderTerraformAzure(w *terraformWriter.TerraformWriter, name string, data io.Reader) error {
+	bytes, err := io.ReadAll(data)
 	if err != nil {
 		return fmt.Errorf("reading data: %v", err)
 	}
 
-	content, err := w.AddFileBytes("aws_s3_bucket_object", name, "content", bytes, false)
+	source, err := w.AddFilePath("azurerm_storage_blob", name, "source", bytes, false)
+	if err != nil {
+		return fmt.Errorf("rendering Azure Blob file: %w", err)
+	}
+
+	// memfs:// paths don't encode an Azure account or container, so this
+	// fallback (only used in integration tests) hard-codes a test placeholder
+	// container on the storage account from the cluster spec.
+	tf := &terraformAzureBlobFile{
+		Name:               p.location,
+		StorageContainerID: w.AzureStorageAccountID + "/blobServices/default/containers/testcontainer",
+		Type:               "Block",
+		Source:             source,
+		Provider:           terraformWriter.LiteralTokens("azurerm", "files"),
+	}
+	return w.RenderResource("azurerm_storage_blob", name, tf)
+}
+
+func (p *MemFSPath) renderTerraformS3(w *terraformWriter.TerraformWriter, name string, data io.Reader, acl ACL) error {
+	bytes, err := io.ReadAll(data)
+	if err != nil {
+		return fmt.Errorf("reading data: %v", err)
+	}
+
+	tfProviderArguments := map[string]string{
+		"region": "us-test-1",
+	}
+	w.EnsureTerraformProvider("aws", tfProviderArguments)
+
+	content, err := w.AddFileBytes("aws_s3_object", name, "content", bytes, false)
 	if err != nil {
 		return fmt.Errorf("rendering S3 file: %v", err)
 	}
@@ -229,7 +289,10 @@ func (p *MemFSPath) RenderTerraform(w *terraformWriter.TerraformWriter, name str
 		if !ok {
 			return fmt.Errorf("write to %s with ACL of unexpected type %T", p, acl)
 		}
-		requestAcl = s3Acl.RequestACL
+		if s3Acl != nil && s3Acl.RequestACL != nil {
+			aclVal := string(*s3Acl.RequestACL)
+			requestAcl = &aclVal
+		}
 	}
 
 	tf := &terraformMemFSFile{
@@ -240,5 +303,5 @@ func (p *MemFSPath) RenderTerraform(w *terraformWriter.TerraformWriter, name str
 		Acl:      requestAcl,
 		Provider: terraformWriter.LiteralTokens("aws", "files"),
 	}
-	return w.RenderResource("aws_s3_bucket_object", name, tf)
+	return w.RenderResource("aws_s3_object", name, tf)
 }

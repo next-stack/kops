@@ -22,31 +22,129 @@ import (
 	"sort"
 	"testing"
 
-	sg "github.com/gophercloud/gophercloud/openstack/networking/v2/extensions/security/groups"
-	"github.com/gophercloud/gophercloud/openstack/networking/v2/ports"
+	sg "github.com/gophercloud/gophercloud/v2/openstack/networking/v2/extensions/security/groups"
+	"github.com/gophercloud/gophercloud/v2/openstack/networking/v2/ports"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/openstack"
 )
 
+func Test_Port_GetActualAllowedAddressPairs_ReturnsPortAddressPairsWhenFindIsNil(t *testing.T) {
+	expected := []ports.AddressPair{
+		{
+			IPAddress:  "10.123.0.0/16",
+			MACAddress: "12:34:56:78:90:AB",
+		},
+		{
+			IPAddress: "192.168.0.0/16",
+		},
+	}
+
+	port := ports.Port{
+		AllowedAddressPairs: expected,
+	}
+
+	actual := getActualAllowedAddressPairs(new(port), nil)
+
+	if !reflect.DeepEqual(expected, actual) {
+		t.Errorf("Allowed address pairs differ:\n%v\n\tinstead of\n%v", actual, expected)
+	}
+}
+
+func Test_Port_GetAllowedAddressPairs_ReturnsModifiedPortAddressPairsWhenNoChanges(t *testing.T) {
+	expected := []ports.AddressPair{
+		{
+			IPAddress:  "10.123.0.0/16",
+			MACAddress: "12:34:56:78:90:AB",
+		},
+		{
+			IPAddress: "192.168.0.0/16",
+		},
+	}
+
+	port := ports.Port{
+		MACAddress: "CA:FE:BA:BE:BE:EF",
+		AllowedAddressPairs: []ports.AddressPair{
+			{
+				IPAddress:  "192.168.0.0/16",
+				MACAddress: "CA:FE:BA:BE:BE:EF",
+			},
+			{
+				IPAddress:  "10.123.0.0/16",
+				MACAddress: "12:34:56:78:90:AB",
+			},
+		},
+	}
+
+	find := Port{
+		AllowedAddressPairs: expected,
+	}
+
+	actual := getActualAllowedAddressPairs(new(port), new(find))
+
+	if !reflect.DeepEqual(expected, actual) {
+		t.Errorf("Allowed address pairs differ:\n%v\n\tinstead of\n%v", actual, expected)
+	}
+}
+
+func Test_Port_GetActualAllowedAddressPairs_ReturnsModifiedPortAddressPairsOnChanges(t *testing.T) {
+	expected := []ports.AddressPair{
+		{
+			IPAddress:  "10.123.0.0/16",
+			MACAddress: "12:34:56:78:90:AB",
+		},
+		{
+			IPAddress: "192.168.0.0/16",
+		},
+	}
+
+	port := ports.Port{
+		MACAddress: "CA:FE:BA:BE:BE:EF",
+		AllowedAddressPairs: []ports.AddressPair{
+			{
+				IPAddress:  "192.168.0.0/16",
+				MACAddress: "CA:FE:BA:BE:BE:EF",
+			},
+			{
+				IPAddress:  "10.123.0.0/16",
+				MACAddress: "12:34:56:78:90:AB",
+			},
+		},
+	}
+
+	find := Port{
+		AllowedAddressPairs: []ports.AddressPair{
+			{
+				IPAddress: "192.168.0.0/16",
+			},
+		},
+	}
+
+	actual := getActualAllowedAddressPairs(new(port), new(find))
+
+	if !reflect.DeepEqual(expected, actual) {
+		t.Errorf("Allowed address pairs differ:\n%v\n\tinstead of\n%v", actual, expected)
+	}
+}
+
 func Test_Port_GetDependencies(t *testing.T) {
-	tasks := map[string]fi.Task{
-		"foo": &SecurityGroup{Name: fi.String("security-group")},
-		"bar": &Subnet{Name: fi.String("subnet")},
-		"baz": &Instance{Name: fi.String("instance")},
-		"qux": &FloatingIP{Name: fi.String("fip")},
-		"xxx": &Network{Name: fi.String("network")},
+	tasks := map[string]fi.CloudupTask{
+		"foo": &SecurityGroup{Name: new("security-group")},
+		"bar": &Subnet{Name: new("subnet")},
+		"baz": &Instance{Name: new("instance")},
+		"qux": &FloatingIP{Name: new("fip")},
+		"xxx": &Network{Name: new("network")},
 	}
 
 	port := &Port{}
 
 	actual := port.GetDependencies(tasks)
 
-	expected := []fi.Task{
-		&Subnet{Name: fi.String("subnet")},
-		&Network{Name: fi.String("network")},
-		&SecurityGroup{Name: fi.String("security-group")},
+	expected := []fi.CloudupTask{
+		&Subnet{Name: new("subnet")},
+		&Network{Name: new("network")},
+		&SecurityGroup{Name: new("security-group")},
 	}
 
 	actualSorted := sortedTasks(actual)
@@ -78,9 +176,9 @@ func Test_NewPortTaskFromCloud(t *testing.T) {
 			foundPort:         nil,
 			modifiedFoundPort: nil,
 			expectedPortTask: &Port{
-				ID:             fi.String(""),
-				Name:           fi.String(""),
-				Network:        &Network{ID: fi.String("")},
+				ID:             new(""),
+				Name:           new(""),
+				Network:        &Network{ID: new("")},
 				SecurityGroups: []*SecurityGroup{},
 				Subnets:        []*Subnet{},
 				Lifecycle:      fi.LifecycleSync,
@@ -93,11 +191,11 @@ func Test_NewPortTaskFromCloud(t *testing.T) {
 			cloud:             &portCloud{},
 			cloudPort:         &ports.Port{},
 			foundPort:         &Port{},
-			modifiedFoundPort: &Port{ID: fi.String("")},
+			modifiedFoundPort: &Port{ID: new("")},
 			expectedPortTask: &Port{
-				ID:             fi.String(""),
-				Name:           fi.String(""),
-				Network:        &Network{ID: fi.String("")},
+				ID:             new(""),
+				Name:           new(""),
+				Network:        &Network{ID: new("")},
 				SecurityGroups: []*SecurityGroup{},
 				Subnets:        []*Subnet{},
 				Lifecycle:      fi.LifecycleSync,
@@ -122,18 +220,18 @@ func Test_NewPortTaskFromCloud(t *testing.T) {
 				},
 			},
 			foundPort:         &Port{},
-			modifiedFoundPort: &Port{ID: fi.String("id")},
+			modifiedFoundPort: &Port{ID: new("id")},
 			expectedPortTask: &Port{
-				ID:      fi.String("id"),
-				Name:    fi.String("name"),
-				Network: &Network{ID: fi.String("networkID")},
+				ID:      new("id"),
+				Name:    new("name"),
+				Network: &Network{ID: new("networkID")},
 				SecurityGroups: []*SecurityGroup{
-					{ID: fi.String("sg-1"), Lifecycle: fi.LifecycleSync},
-					{ID: fi.String("sg-2"), Lifecycle: fi.LifecycleSync},
+					{ID: new("sg-1"), Lifecycle: fi.LifecycleSync},
+					{ID: new("sg-2"), Lifecycle: fi.LifecycleSync},
 				},
 				Subnets: []*Subnet{
-					{ID: fi.String("subnet-a"), Lifecycle: fi.LifecycleSync},
-					{ID: fi.String("subnet-b"), Lifecycle: fi.LifecycleSync},
+					{ID: new("subnet-a"), Lifecycle: fi.LifecycleSync},
+					{ID: new("subnet-b"), Lifecycle: fi.LifecycleSync},
 				},
 				Lifecycle: fi.LifecycleSync,
 			},
@@ -158,24 +256,42 @@ func Test_NewPortTaskFromCloud(t *testing.T) {
 				Tags: []string{
 					"cluster",
 				},
+				AllowedAddressPairs: []ports.AddressPair{
+					{
+						IPAddress: "192.168.0.0/16",
+					},
+					{
+						IPAddress:  "10.123.0.1",
+						MACAddress: "12:34:56:78:90:AB",
+					},
+				},
 			},
 			foundPort:         nil,
 			modifiedFoundPort: nil,
 			expectedPortTask: &Port{
-				ID:        fi.String("id"),
+				ID:        new("id"),
 				Lifecycle: fi.LifecycleSync,
-				Name:      fi.String("name"),
-				Network:   &Network{ID: fi.String("networkID")},
+				Name:      new("name"),
+				Network:   &Network{ID: new("networkID")},
 				SecurityGroups: []*SecurityGroup{
-					{ID: fi.String("sg-1"), Lifecycle: fi.LifecycleSync},
-					{ID: fi.String("sg-2"), Lifecycle: fi.LifecycleSync},
+					{ID: new("sg-1"), Lifecycle: fi.LifecycleSync},
+					{ID: new("sg-2"), Lifecycle: fi.LifecycleSync},
 				},
 				Subnets: []*Subnet{
-					{ID: fi.String("subnet-a"), Lifecycle: fi.LifecycleSync},
-					{ID: fi.String("subnet-b"), Lifecycle: fi.LifecycleSync},
+					{ID: new("subnet-a"), Lifecycle: fi.LifecycleSync},
+					{ID: new("subnet-b"), Lifecycle: fi.LifecycleSync},
 				},
 				Tags: []string{
 					"cluster",
+				},
+				AllowedAddressPairs: []ports.AddressPair{
+					{
+						IPAddress: "192.168.0.0/16",
+					},
+					{
+						IPAddress:  "10.123.0.1",
+						MACAddress: "12:34:56:78:90:AB",
+					},
 				},
 			},
 			expectedError: nil,
@@ -199,36 +315,72 @@ func Test_NewPortTaskFromCloud(t *testing.T) {
 				Tags: []string{
 					"KopsInstanceGroup=node-ig",
 				},
+				AllowedAddressPairs: []ports.AddressPair{
+					{
+						IPAddress: "192.168.0.0/16",
+					},
+					{
+						IPAddress:  "10.123.0.1",
+						MACAddress: "12:34:56:78:90:AB",
+					},
+				},
 			},
 			foundPort: &Port{
-				InstanceGroupName: fi.String("node-ig"),
+				InstanceGroupName: new("node-ig"),
 				Tags: []string{
 					"KopsInstanceGroup=node-ig",
+				},
+				AllowedAddressPairs: []ports.AddressPair{
+					{
+						IPAddress:  "10.123.0.1",
+						MACAddress: "12:34:56:78:90:AB",
+					},
+					{
+						IPAddress: "192.168.0.0/16",
+					},
 				},
 			},
 			modifiedFoundPort: &Port{
-				ID:                fi.String("id"),
-				InstanceGroupName: fi.String("node-ig"),
+				ID:                new("id"),
+				InstanceGroupName: new("node-ig"),
 				Tags: []string{
 					"KopsInstanceGroup=node-ig",
+				},
+				AllowedAddressPairs: []ports.AddressPair{
+					{
+						IPAddress:  "10.123.0.1",
+						MACAddress: "12:34:56:78:90:AB",
+					},
+					{
+						IPAddress: "192.168.0.0/16",
+					},
 				},
 			},
 			expectedPortTask: &Port{
-				ID:                fi.String("id"),
-				InstanceGroupName: fi.String("node-ig"),
+				ID:                new("id"),
+				InstanceGroupName: new("node-ig"),
 				Lifecycle:         fi.LifecycleSync,
-				Name:              fi.String("name"),
-				Network:           &Network{ID: fi.String("networkID")},
+				Name:              new("name"),
+				Network:           &Network{ID: new("networkID")},
 				SecurityGroups: []*SecurityGroup{
-					{ID: fi.String("sg-1"), Lifecycle: fi.LifecycleSync},
-					{ID: fi.String("sg-2"), Lifecycle: fi.LifecycleSync},
+					{ID: new("sg-1"), Lifecycle: fi.LifecycleSync},
+					{ID: new("sg-2"), Lifecycle: fi.LifecycleSync},
 				},
 				Subnets: []*Subnet{
-					{ID: fi.String("subnet-a"), Lifecycle: fi.LifecycleSync},
-					{ID: fi.String("subnet-b"), Lifecycle: fi.LifecycleSync},
+					{ID: new("subnet-a"), Lifecycle: fi.LifecycleSync},
+					{ID: new("subnet-b"), Lifecycle: fi.LifecycleSync},
 				},
 				Tags: []string{
 					"KopsInstanceGroup=node-ig",
+				},
+				AllowedAddressPairs: []ports.AddressPair{
+					{
+						IPAddress:  "10.123.0.1",
+						MACAddress: "12:34:56:78:90:AB",
+					},
+					{
+						IPAddress: "192.168.0.0/16",
+					},
 				},
 			},
 			expectedError: nil,
@@ -253,26 +405,44 @@ func Test_NewPortTaskFromCloud(t *testing.T) {
 					"cluster",
 					"KopsInstanceGroup=node-ig",
 				},
+				AllowedAddressPairs: []ports.AddressPair{
+					{
+						IPAddress: "192.168.0.0/16",
+					},
+					{
+						IPAddress:  "10.123.0.1",
+						MACAddress: "12:34:56:78:90:AB",
+					},
+				},
 			},
 			foundPort:         nil,
 			modifiedFoundPort: nil,
 			expectedPortTask: &Port{
-				ID:                fi.String("id"),
-				InstanceGroupName: fi.String("node-ig"),
+				ID:                new("id"),
+				InstanceGroupName: new("node-ig"),
 				Lifecycle:         fi.LifecycleSync,
-				Name:              fi.String("name"),
-				Network:           &Network{ID: fi.String("networkID")},
+				Name:              new("name"),
+				Network:           &Network{ID: new("networkID")},
 				SecurityGroups: []*SecurityGroup{
-					{ID: fi.String("sg-1"), Lifecycle: fi.LifecycleSync},
-					{ID: fi.String("sg-2"), Lifecycle: fi.LifecycleSync},
+					{ID: new("sg-1"), Lifecycle: fi.LifecycleSync},
+					{ID: new("sg-2"), Lifecycle: fi.LifecycleSync},
 				},
 				Subnets: []*Subnet{
-					{ID: fi.String("subnet-a"), Lifecycle: fi.LifecycleSync},
-					{ID: fi.String("subnet-b"), Lifecycle: fi.LifecycleSync},
+					{ID: new("subnet-a"), Lifecycle: fi.LifecycleSync},
+					{ID: new("subnet-b"), Lifecycle: fi.LifecycleSync},
 				},
 				Tags: []string{
 					"cluster",
 					"KopsInstanceGroup=node-ig",
+				},
+				AllowedAddressPairs: []ports.AddressPair{
+					{
+						IPAddress: "192.168.0.0/16",
+					},
+					{
+						IPAddress:  "10.123.0.1",
+						MACAddress: "12:34:56:78:90:AB",
+					},
 				},
 			},
 			expectedError: nil,
@@ -312,27 +482,104 @@ func Test_NewPortTaskFromCloud(t *testing.T) {
 				},
 			},
 			modifiedFoundPort: &Port{
-				ID: fi.String("id"),
+				ID: new("id"),
 				AdditionalSecurityGroups: []string{
 					"add-1",
 					"add-2",
 				},
 			},
 			expectedPortTask: &Port{
-				ID:      fi.String("id"),
-				Name:    fi.String("name"),
-				Network: &Network{ID: fi.String("networkID")},
+				ID:      new("id"),
+				Name:    new("name"),
+				Network: &Network{ID: new("networkID")},
 				SecurityGroups: []*SecurityGroup{
-					{ID: fi.String("sg-1"), Lifecycle: fi.LifecycleSync},
-					{ID: fi.String("sg-2"), Lifecycle: fi.LifecycleSync},
+					{ID: new("sg-1"), Lifecycle: fi.LifecycleSync},
+					{ID: new("sg-2"), Lifecycle: fi.LifecycleSync},
 				},
 				AdditionalSecurityGroups: []string{
 					"add-1",
 					"add-2",
 				},
 				Subnets: []*Subnet{
-					{ID: fi.String("subnet-a"), Lifecycle: fi.LifecycleSync},
-					{ID: fi.String("subnet-b"), Lifecycle: fi.LifecycleSync},
+					{ID: new("subnet-a"), Lifecycle: fi.LifecycleSync},
+					{ID: new("subnet-b"), Lifecycle: fi.LifecycleSync},
+				},
+				Lifecycle: fi.LifecycleSync,
+			},
+			expectedError: nil,
+		},
+		{
+			desc:      "cloud port found port not nil honors allowed address pairs",
+			lifecycle: fi.LifecycleSync,
+			cloud:     &portCloud{},
+			cloudPort: &ports.Port{
+				ID:        "id",
+				Name:      "name",
+				NetworkID: "networkID",
+				FixedIPs: []ports.IP{
+					{SubnetID: "subnet-a"},
+				},
+				SecurityGroups: []string{
+					"sg-1",
+				},
+				MACAddress: "CA:FE:BA:BE:BE:EF",
+				AllowedAddressPairs: []ports.AddressPair{
+					{
+						IPAddress: "192.168.0.0/16",
+					},
+					{
+						IPAddress:  "10.0.0.1",
+						MACAddress: "12:34:56:78:90:AB",
+					},
+					{
+						IPAddress: "172.16.0.2",
+					},
+				},
+			},
+			foundPort: &Port{
+				AllowedAddressPairs: []ports.AddressPair{
+					{
+						IPAddress:  "10.0.0.1",
+						MACAddress: "12:34:56:78:90:AB",
+					},
+					{
+						IPAddress: "192.168.0.0/16",
+					},
+				},
+			},
+			modifiedFoundPort: &Port{
+				ID: new("id"),
+				AllowedAddressPairs: []ports.AddressPair{
+					{
+						IPAddress:  "10.0.0.1",
+						MACAddress: "12:34:56:78:90:AB",
+					},
+					{
+						IPAddress: "192.168.0.0/16",
+					},
+				},
+			},
+			expectedPortTask: &Port{
+				ID:      new("id"),
+				Name:    new("name"),
+				Network: &Network{ID: new("networkID")},
+				SecurityGroups: []*SecurityGroup{
+					{ID: new("sg-1"), Lifecycle: fi.LifecycleSync},
+				},
+				Subnets: []*Subnet{
+					{ID: new("subnet-a"), Lifecycle: fi.LifecycleSync},
+				},
+				AllowedAddressPairs: []ports.AddressPair{
+					{
+						IPAddress:  "10.0.0.1",
+						MACAddress: "12:34:56:78:90:AB",
+					},
+					{
+						IPAddress: "172.16.0.2",
+					},
+					{
+						IPAddress: "192.168.0.0/16",
+					},
 				},
 				Lifecycle: fi.LifecycleSync,
 			},
@@ -360,23 +607,25 @@ func Test_NewPortTaskFromCloud(t *testing.T) {
 func Test_Port_Find(t *testing.T) {
 	tests := []struct {
 		desc             string
-		context          *fi.Context
+		context          *fi.CloudupContext
 		port             *Port
 		expectedPortTask *Port
 		expectedError    error
 	}{
 		{
 			desc: "nothing found",
-			context: &fi.Context{
-				Cluster: &kops.Cluster{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "clusterName",
+			context: &fi.CloudupContext{
+				T: fi.CloudupSubContext{
+					Cloud: &portCloud{},
+					Cluster: &kops.Cluster{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "clusterName",
+						},
 					},
 				},
-				Cloud: &portCloud{},
 			},
 			port: &Port{
-				Name:      fi.String("name"),
+				Name:      new("name"),
 				Lifecycle: fi.LifecycleSync,
 			},
 			expectedPortTask: nil,
@@ -384,46 +633,48 @@ func Test_Port_Find(t *testing.T) {
 		},
 		{
 			desc: "port found no tags",
-			context: &fi.Context{
-				Cluster: &kops.Cluster{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "clusterName",
+			context: &fi.CloudupContext{
+				T: fi.CloudupSubContext{
+					Cloud: &portCloud{
+						listPorts: []ports.Port{
+							{
+								ID:        "id",
+								Name:      "name",
+								NetworkID: "networkID",
+								FixedIPs: []ports.IP{
+									{SubnetID: "subnet-a"},
+									{SubnetID: "subnet-b"},
+								},
+								SecurityGroups: []string{
+									"sg-1",
+									"sg-2",
+								},
+								Tags: []string{"clusterName"},
+							},
+						},
 					},
-				},
-				Cloud: &portCloud{
-					listPorts: []ports.Port{
-						{
-							ID:        "id",
-							Name:      "name",
-							NetworkID: "networkID",
-							FixedIPs: []ports.IP{
-								{SubnetID: "subnet-a"},
-								{SubnetID: "subnet-b"},
-							},
-							SecurityGroups: []string{
-								"sg-1",
-								"sg-2",
-							},
-							Tags: []string{"clusterName"},
+					Cluster: &kops.Cluster{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "clusterName",
 						},
 					},
 				},
 			},
 			port: &Port{
-				Name:      fi.String("name"),
+				Name:      new("name"),
 				Lifecycle: fi.LifecycleSync,
 			},
 			expectedPortTask: &Port{
-				ID:      fi.String("id"),
-				Name:    fi.String("name"),
-				Network: &Network{ID: fi.String("networkID")},
+				ID:      new("id"),
+				Name:    new("name"),
+				Network: &Network{ID: new("networkID")},
 				SecurityGroups: []*SecurityGroup{
-					{ID: fi.String("sg-1"), Lifecycle: fi.LifecycleSync},
-					{ID: fi.String("sg-2"), Lifecycle: fi.LifecycleSync},
+					{ID: new("sg-1"), Lifecycle: fi.LifecycleSync},
+					{ID: new("sg-2"), Lifecycle: fi.LifecycleSync},
 				},
 				Subnets: []*Subnet{
-					{ID: fi.String("subnet-a"), Lifecycle: fi.LifecycleSync},
-					{ID: fi.String("subnet-b"), Lifecycle: fi.LifecycleSync},
+					{ID: new("subnet-a"), Lifecycle: fi.LifecycleSync},
+					{ID: new("subnet-b"), Lifecycle: fi.LifecycleSync},
 				},
 				Lifecycle: fi.LifecycleSync,
 			},
@@ -431,47 +682,49 @@ func Test_Port_Find(t *testing.T) {
 		},
 		{
 			desc: "port found with tags",
-			context: &fi.Context{
-				Cluster: &kops.Cluster{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "clusterName",
+			context: &fi.CloudupContext{
+				T: fi.CloudupSubContext{
+					Cloud: &portCloud{
+						listPorts: []ports.Port{
+							{
+								ID:        "id",
+								Name:      "name",
+								NetworkID: "networkID",
+								FixedIPs: []ports.IP{
+									{SubnetID: "subnet-a"},
+									{SubnetID: "subnet-b"},
+								},
+								SecurityGroups: []string{
+									"sg-1",
+									"sg-2",
+								},
+								Tags: []string{"clusterName"},
+							},
+						},
 					},
-				},
-				Cloud: &portCloud{
-					listPorts: []ports.Port{
-						{
-							ID:        "id",
-							Name:      "name",
-							NetworkID: "networkID",
-							FixedIPs: []ports.IP{
-								{SubnetID: "subnet-a"},
-								{SubnetID: "subnet-b"},
-							},
-							SecurityGroups: []string{
-								"sg-1",
-								"sg-2",
-							},
-							Tags: []string{"clusterName"},
+					Cluster: &kops.Cluster{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "clusterName",
 						},
 					},
 				},
 			},
 			port: &Port{
-				Name:      fi.String("name"),
+				Name:      new("name"),
 				Lifecycle: fi.LifecycleSync,
 				Tags:      []string{"clusterName"},
 			},
 			expectedPortTask: &Port{
-				ID:      fi.String("id"),
-				Name:    fi.String("name"),
-				Network: &Network{ID: fi.String("networkID")},
+				ID:      new("id"),
+				Name:    new("name"),
+				Network: &Network{ID: new("networkID")},
 				SecurityGroups: []*SecurityGroup{
-					{ID: fi.String("sg-1"), Lifecycle: fi.LifecycleSync},
-					{ID: fi.String("sg-2"), Lifecycle: fi.LifecycleSync},
+					{ID: new("sg-1"), Lifecycle: fi.LifecycleSync},
+					{ID: new("sg-2"), Lifecycle: fi.LifecycleSync},
 				},
 				Subnets: []*Subnet{
-					{ID: fi.String("subnet-a"), Lifecycle: fi.LifecycleSync},
-					{ID: fi.String("subnet-b"), Lifecycle: fi.LifecycleSync},
+					{ID: new("subnet-a"), Lifecycle: fi.LifecycleSync},
+					{ID: new("subnet-b"), Lifecycle: fi.LifecycleSync},
 				},
 				Lifecycle: fi.LifecycleSync,
 				Tags:      []string{"clusterName"},
@@ -480,29 +733,31 @@ func Test_Port_Find(t *testing.T) {
 		},
 		{
 			desc: "multiple ports found",
-			context: &fi.Context{
-				Cluster: &kops.Cluster{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "clusterName",
-					},
-				},
-				Cloud: &portCloud{
-					listPorts: []ports.Port{
-						{
-							ID:   "id-1",
-							Name: "name",
-							Tags: []string{"clusterName"},
+			context: &fi.CloudupContext{
+				T: fi.CloudupSubContext{
+					Cloud: &portCloud{
+						listPorts: []ports.Port{
+							{
+								ID:   "id-1",
+								Name: "name",
+								Tags: []string{"clusterName"},
+							},
+							{
+								ID:   "id-2",
+								Name: "name",
+								Tags: []string{"clusterName"},
+							},
 						},
-						{
-							ID:   "id-2",
-							Name: "name",
-							Tags: []string{"clusterName"},
+					},
+					Cluster: &kops.Cluster{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "clusterName",
 						},
 					},
 				},
 			},
 			port: &Port{
-				Name:      fi.String("name"),
+				Name:      new("name"),
 				Lifecycle: fi.LifecycleSync,
 			},
 			expectedPortTask: nil,
@@ -510,28 +765,108 @@ func Test_Port_Find(t *testing.T) {
 		},
 		{
 			desc: "error listing ports",
-			context: &fi.Context{
-				Cluster: &kops.Cluster{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: "clusterName",
+			context: &fi.CloudupContext{
+				T: fi.CloudupSubContext{
+					Cloud: &portCloud{
+						listPorts: []ports.Port{
+							{
+								ID:   "id-1",
+								Name: "name",
+							},
+						},
+						listPortsError: fmt.Errorf("list error"),
 					},
-				},
-				Cloud: &portCloud{
-					listPorts: []ports.Port{
-						{
-							ID:   "id-1",
-							Name: "name",
+					Cluster: &kops.Cluster{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "clusterName",
 						},
 					},
-					listPortsError: fmt.Errorf("list error"),
 				},
 			},
 			port: &Port{
-				Name:      fi.String("name"),
+				Name:      new("name"),
 				Lifecycle: fi.LifecycleSync,
 			},
 			expectedPortTask: nil,
 			expectedError:    fmt.Errorf("list error"),
+		},
+		{
+			desc: "port found with allowed address pairs",
+			context: &fi.CloudupContext{
+				T: fi.CloudupSubContext{
+					Cloud: &portCloud{
+						listPorts: []ports.Port{
+							{
+								ID:        "id",
+								Name:      "name",
+								NetworkID: "networkID",
+								FixedIPs: []ports.IP{
+									{SubnetID: "subnet-a"},
+									{SubnetID: "subnet-b"},
+								},
+								SecurityGroups: []string{
+									"sg-1",
+									"sg-2",
+								},
+								Tags: []string{"clusterName"},
+								AllowedAddressPairs: []ports.AddressPair{
+									{
+										IPAddress: "192.168.0.0/16",
+									},
+									{
+										IPAddress:  "10.123.0.1",
+										MACAddress: "12:34:56:78:90:AB",
+									},
+								},
+							},
+						},
+					},
+					Cluster: &kops.Cluster{
+						ObjectMeta: metav1.ObjectMeta{
+							Name: "clusterName",
+						},
+					},
+				},
+			},
+			port: &Port{
+				Name:      new("name"),
+				Lifecycle: fi.LifecycleSync,
+				Tags:      []string{"clusterName"},
+				AllowedAddressPairs: []ports.AddressPair{
+					{
+						IPAddress: "192.168.0.0/16",
+					},
+					{
+						IPAddress:  "10.123.0.1",
+						MACAddress: "12:34:56:78:90:AB",
+					},
+				},
+			},
+			expectedPortTask: &Port{
+				ID:      new("id"),
+				Name:    new("name"),
+				Network: &Network{ID: new("networkID")},
+				SecurityGroups: []*SecurityGroup{
+					{ID: new("sg-1"), Lifecycle: fi.LifecycleSync},
+					{ID: new("sg-2"), Lifecycle: fi.LifecycleSync},
+				},
+				Subnets: []*Subnet{
+					{ID: new("subnet-a"), Lifecycle: fi.LifecycleSync},
+					{ID: new("subnet-b"), Lifecycle: fi.LifecycleSync},
+				},
+				Lifecycle: fi.LifecycleSync,
+				Tags:      []string{"clusterName"},
+				AllowedAddressPairs: []ports.AddressPair{
+					{
+						IPAddress:  "10.123.0.1",
+						MACAddress: "12:34:56:78:90:AB",
+					},
+					{
+						IPAddress: "192.168.0.0/16",
+					},
+				},
+			},
+			expectedError: nil,
 		},
 	}
 
@@ -560,8 +895,8 @@ func Test_Port_CheckChanges(t *testing.T) {
 			desc:   "actual nil all required fields set",
 			actual: nil,
 			expected: &Port{
-				Name:    fi.String("name"),
-				Network: &Network{ID: fi.String("networkID")},
+				Name:    new("name"),
+				Network: &Network{ID: new("networkID")},
 			},
 			expectedError: nil,
 		},
@@ -570,7 +905,7 @@ func Test_Port_CheckChanges(t *testing.T) {
 			actual: nil,
 			expected: &Port{
 				Name:    nil,
-				Network: &Network{ID: fi.String("networkID")},
+				Network: &Network{ID: new("networkID")},
 			},
 			expectedError: fi.RequiredField("Name"),
 		},
@@ -578,7 +913,7 @@ func Test_Port_CheckChanges(t *testing.T) {
 			desc:   "actual nil required field Network nil",
 			actual: nil,
 			expected: &Port{
-				Name:    fi.String("name"),
+				Name:    new("name"),
 				Network: nil,
 			},
 			expectedError: fi.RequiredField("Network"),
@@ -586,11 +921,11 @@ func Test_Port_CheckChanges(t *testing.T) {
 		{
 			desc: "actual not nil all changeable fields set",
 			actual: &Port{
-				Name:    fi.String("name"),
+				Name:    new("name"),
 				Network: nil,
 			},
 			expected: &Port{
-				Name:    fi.String("name"),
+				Name:    new("name"),
 				Network: nil,
 			},
 			changes: &Port{
@@ -602,31 +937,31 @@ func Test_Port_CheckChanges(t *testing.T) {
 		{
 			desc: "actual not nil all changeable fields set",
 			actual: &Port{
-				Name:    fi.String("name"),
+				Name:    new("name"),
 				Network: nil,
 			},
 			expected: &Port{
-				Name:    fi.String("name"),
+				Name:    new("name"),
 				Network: nil,
 			},
 			changes: &Port{
 				Name:    nil,
-				Network: &Network{ID: fi.String("networkID")},
+				Network: &Network{ID: new("networkID")},
 			},
 			expectedError: fi.CannotChangeField("Network"),
 		},
 		{
 			desc: "actual not nil unchangeable field Name set",
 			actual: &Port{
-				Name:    fi.String("name"),
+				Name:    new("name"),
 				Network: nil,
 			},
 			expected: &Port{
-				Name:    fi.String("name"),
-				Network: &Network{ID: fi.String("networkID")},
+				Name:    new("name"),
+				Network: &Network{ID: new("networkID")},
 			},
 			changes: &Port{
-				Name:    fi.String("name"),
+				Name:    new("name"),
 				Network: nil,
 			},
 			expectedError: fi.CannotChangeField("Name"),
@@ -634,16 +969,16 @@ func Test_Port_CheckChanges(t *testing.T) {
 		{
 			desc: "actual not nil unchangeable field Network set",
 			actual: &Port{
-				Name:    fi.String("name"),
+				Name:    new("name"),
 				Network: nil,
 			},
 			expected: &Port{
 				Name:    nil,
-				Network: &Network{ID: fi.String("networkID")},
+				Network: &Network{ID: new("networkID")},
 			},
 			changes: &Port{
 				Name:    nil,
-				Network: &Network{ID: fi.String("networkID")},
+				Network: &Network{ID: new("networkID")},
 			},
 			expectedError: fi.CannotChangeField("Network"),
 		},
@@ -673,19 +1008,19 @@ func Test_Port_RenderOpenstack(t *testing.T) {
 		{
 			desc: "actual not nil",
 			actual: &Port{
-				ID:      fi.String("actual-id"),
-				Name:    fi.String("name"),
-				Network: &Network{ID: fi.String("networkID")},
+				ID:      new("actual-id"),
+				Name:    new("name"),
+				Network: &Network{ID: new("networkID")},
 			},
 			expected: &Port{
-				ID:      fi.String("expected-id"),
-				Name:    fi.String("name"),
-				Network: &Network{ID: fi.String("networkID")},
+				ID:      new("expected-id"),
+				Name:    new("name"),
+				Network: &Network{ID: new("networkID")},
 			},
 			expectedAfter: &Port{
-				ID:      fi.String("actual-id"),
-				Name:    fi.String("name"),
-				Network: &Network{ID: fi.String("networkID")},
+				ID:      new("actual-id"),
+				Name:    new("name"),
+				Network: &Network{ID: new("networkID")},
 			},
 			expectedCloudPort: nil,
 			expectedError:     nil,
@@ -711,29 +1046,29 @@ func Test_Port_RenderOpenstack(t *testing.T) {
 			},
 			actual: nil,
 			expected: &Port{
-				ID:      fi.String("expected-id"),
-				Name:    fi.String("name"),
-				Network: &Network{ID: fi.String("networkID")},
+				ID:      new("expected-id"),
+				Name:    new("name"),
+				Network: &Network{ID: new("networkID")},
 				SecurityGroups: []*SecurityGroup{
-					{ID: fi.String("sg-1")},
-					{ID: fi.String("sg-2")},
+					{ID: new("sg-1")},
+					{ID: new("sg-2")},
 				},
 				Subnets: []*Subnet{
-					{ID: fi.String("subnet-a")},
-					{ID: fi.String("subnet-b")},
+					{ID: new("subnet-a")},
+					{ID: new("subnet-b")},
 				},
 			},
 			expectedAfter: &Port{
-				ID:      fi.String("cloud-id"),
-				Name:    fi.String("name"),
-				Network: &Network{ID: fi.String("networkID")},
+				ID:      new("cloud-id"),
+				Name:    new("name"),
+				Network: &Network{ID: new("networkID")},
 				SecurityGroups: []*SecurityGroup{
-					{ID: fi.String("sg-1")},
-					{ID: fi.String("sg-2")},
+					{ID: new("sg-1")},
+					{ID: new("sg-2")},
 				},
 				Subnets: []*Subnet{
-					{ID: fi.String("subnet-a")},
-					{ID: fi.String("subnet-b")},
+					{ID: new("subnet-a")},
+					{ID: new("subnet-b")},
 				},
 			},
 			expectedCloudPort: &ports.Port{
@@ -760,17 +1095,110 @@ func Test_Port_RenderOpenstack(t *testing.T) {
 			},
 			actual: nil,
 			expected: &Port{
-				ID:      fi.String("expected-id"),
-				Name:    fi.String("name"),
-				Network: &Network{ID: fi.String("networkID")},
+				ID:      new("expected-id"),
+				Name:    new("name"),
+				Network: &Network{ID: new("networkID")},
 			},
 			expectedAfter: &Port{
-				ID:      fi.String("expected-id"),
-				Name:    fi.String("name"),
-				Network: &Network{ID: fi.String("networkID")},
+				ID:      new("expected-id"),
+				Name:    new("name"),
+				Network: &Network{ID: new("networkID")},
 			},
 			expectedCloudPort: nil,
 			expectedError:     fmt.Errorf("Error creating port: port create error"),
+		},
+		{
+			desc: "changes in allowed address pairs success",
+			target: &openstack.OpenstackAPITarget{
+				Cloud: &portCloud{
+					updatePort: &ports.Port{
+						ID:        "cloud-id",
+						Name:      "name",
+						NetworkID: "networkID",
+						FixedIPs: []ports.IP{
+							{SubnetID: "subnet-a"},
+						},
+						SecurityGroups: []string{
+							"sg-1",
+						},
+						AllowedAddressPairs: []ports.AddressPair{
+							{
+								IPAddress: "192.168.0.0/16",
+							},
+							{
+								IPAddress:  "10.123.0.1",
+								MACAddress: "12:34:56:78:90:AB",
+							},
+						},
+					},
+				},
+			},
+			actual: &Port{
+				ID:      new("cloud-id"),
+				Name:    new("name"),
+				Network: &Network{ID: new("networkID")},
+				SecurityGroups: []*SecurityGroup{
+					{ID: new("sg-1")},
+				},
+				Subnets: []*Subnet{
+					{ID: new("subnet-a")},
+				},
+				AllowedAddressPairs: []ports.AddressPair{
+					{
+						IPAddress: "192.168.0.0/16",
+					},
+				},
+			},
+			expected: &Port{
+				ID:      new("expected-id"),
+				Name:    new("name"),
+				Network: &Network{ID: new("networkID")},
+				SecurityGroups: []*SecurityGroup{
+					{ID: new("sg-1")},
+				},
+				Subnets: []*Subnet{
+					{ID: new("subnet-a")},
+				},
+				AllowedAddressPairs: []ports.AddressPair{
+					{
+						IPAddress: "192.168.0.0/16",
+					},
+					{
+						IPAddress:  "10.123.0.1",
+						MACAddress: "12:34:56:78:90:AB",
+					},
+				},
+			},
+			changes: &Port{
+				AllowedAddressPairs: []ports.AddressPair{
+					{
+						IPAddress:  "10.123.0.1",
+						MACAddress: "12:34:56:78:90:AB",
+					},
+				},
+			},
+			expectedAfter: &Port{
+				ID:      new("cloud-id"),
+				Name:    new("name"),
+				Network: &Network{ID: new("networkID")},
+				SecurityGroups: []*SecurityGroup{
+					{ID: new("sg-1")},
+				},
+				Subnets: []*Subnet{
+					{ID: new("subnet-a")},
+				},
+				AllowedAddressPairs: []ports.AddressPair{
+					{
+						IPAddress: "192.168.0.0/16",
+					},
+					{
+						IPAddress:  "10.123.0.1",
+						MACAddress: "12:34:56:78:90:AB",
+					},
+				},
+			},
+			expectedCloudPort: nil,
+			expectedError:     nil,
 		},
 	}
 
@@ -813,20 +1241,29 @@ func Test_Port_createOptsFromPortTask(t *testing.T) {
 				},
 			},
 			expected: &Port{
-				ID:      fi.String("expected-id"),
-				Name:    fi.String("name"),
-				Network: &Network{ID: fi.String("networkID")},
+				ID:      new("expected-id"),
+				Name:    new("name"),
+				Network: &Network{ID: new("networkID")},
 				SecurityGroups: []*SecurityGroup{
-					{ID: fi.String("sg-1")},
-					{ID: fi.String("sg-2")},
+					{ID: new("sg-1")},
+					{ID: new("sg-2")},
 				},
 				AdditionalSecurityGroups: []string{
 					"add-1",
 					"add-2",
 				},
 				Subnets: []*Subnet{
-					{ID: fi.String("subnet-a")},
-					{ID: fi.String("subnet-b")},
+					{ID: new("subnet-a")},
+					{ID: new("subnet-b")},
+				},
+				AllowedAddressPairs: []ports.AddressPair{
+					{
+						IPAddress: "192.168.0.0/16",
+					},
+					{
+						IPAddress:  "10.123.0.1",
+						MACAddress: "12:34:56:78:90:AB",
+					},
 				},
 			},
 			expectedCreateOpts: ports.CreateOpts{
@@ -842,6 +1279,15 @@ func Test_Port_createOptsFromPortTask(t *testing.T) {
 					{SubnetID: "subnet-a"},
 					{SubnetID: "subnet-b"},
 				},
+				AllowedAddressPairs: []ports.AddressPair{
+					{
+						IPAddress: "192.168.0.0/16",
+					},
+					{
+						IPAddress:  "10.123.0.1",
+						MACAddress: "12:34:56:78:90:AB",
+					},
+				},
 			},
 		},
 		{
@@ -856,19 +1302,19 @@ func Test_Port_createOptsFromPortTask(t *testing.T) {
 				},
 			},
 			expected: &Port{
-				ID:      fi.String("expected-id"),
-				Name:    fi.String("name"),
-				Network: &Network{ID: fi.String("networkID")},
+				ID:      new("expected-id"),
+				Name:    new("name"),
+				Network: &Network{ID: new("networkID")},
 				SecurityGroups: []*SecurityGroup{
-					{ID: fi.String("sg-1")},
-					{ID: fi.String("sg-2")},
+					{ID: new("sg-1")},
+					{ID: new("sg-2")},
 				},
 				AdditionalSecurityGroups: []string{
 					"add-2",
 				},
 				Subnets: []*Subnet{
-					{ID: fi.String("subnet-a")},
-					{ID: fi.String("subnet-b")},
+					{ID: new("subnet-a")},
+					{ID: new("subnet-b")},
 				},
 			},
 			expectedError: fmt.Errorf("Additional SecurityGroup not found for name add-2"),
@@ -894,6 +1340,8 @@ type portCloud struct {
 	listPortsError          error
 	createPort              *ports.Port
 	createPortError         error
+	updatePort              *ports.Port
+	updatePortError         error
 	listSecurityGroups      map[string][]sg.SecGroup
 	listSecurityGroupsError error
 }
@@ -910,7 +1358,11 @@ func (p *portCloud) ListSecurityGroups(opt sg.ListOpts) ([]sg.SecGroup, error) {
 	return p.listSecurityGroups[opt.Name], p.listSecurityGroupsError
 }
 
-type sortedTasks []fi.Task
+func (p *portCloud) UpdatePort(id string, opt ports.UpdateOptsBuilder) (*ports.Port, error) {
+	return p.updatePort, p.updatePortError
+}
+
+type sortedTasks []fi.CloudupTask
 
 func (s sortedTasks) Len() int           { return len(s) }
 func (s sortedTasks) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }

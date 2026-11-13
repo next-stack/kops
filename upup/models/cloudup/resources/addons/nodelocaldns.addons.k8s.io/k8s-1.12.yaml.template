@@ -41,6 +41,9 @@ metadata:
     addonmanager.kubernetes.io/mode: Reconcile
 data:
   Corefile: |
+  {{- if KubeDNS.NodeLocalDNS.ExternalCoreFile }}
+{{ KubeDNS.NodeLocalDNS.ExternalCoreFile | indent 4 }}
+  {{- else }}
     {{ KubeDNS.Domain }}:53 {
         errors
         cache {
@@ -54,7 +57,7 @@ data:
           force_tcp
         }
         prometheus :9253
-        health {{ KubeDNS.NodeLocalDNS.LocalIP }}:{{ NodeLocalDNSHealthCheck }}
+        health {{ joinHostPort KubeDNS.NodeLocalDNS.LocalIP NodeLocalDNSHealthCheck }}
     }
     {{- if WithDefaultBool KubeDNS.NodeLocalDNS.ForwardToKubeDNS false }}
     .:53 {
@@ -99,8 +102,13 @@ data:
         bind {{ KubeDNS.NodeLocalDNS.LocalIP }}
         forward . __PILLAR__UPSTREAM__SERVERS__
         prometheus :9253
+        {{- if IsIPv6Only }}
+        dns64
+        {{- end }}
     }
     {{- end }}
+{{ KubeDNS.NodeLocalDNS.AdditionalConfig | indent 4 }}
+  {{- end }}
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -113,8 +121,7 @@ metadata:
     addonmanager.kubernetes.io/mode: Reconcile
 spec:
   updateStrategy:
-    rollingUpdate:
-      maxUnavailable: 10%
+    type: OnDelete
   selector:
     matchLabels:
       k8s-app: node-local-dns
@@ -125,6 +132,9 @@ spec:
       annotations:
         prometheus.io/port: "9253"
         prometheus.io/scrape: "true"
+        {{- range $key, $value := KubeDNS.NodeLocalDNS.PodAnnotations }}
+        {{ $key }}: "{{ $value }}"
+        {{- end }}
     spec:
       priorityClassName: system-node-critical
       serviceAccountName: node-local-dns
@@ -150,7 +160,14 @@ spec:
           - -upstreamsvc=kube-dns-upstream
           - -setupiptables=false
         securityContext:
-          privileged: true
+          capabilities:
+            add:
+            - NET_ADMIN
+{{ if ContainerdSELinuxEnabled }}
+          seLinuxOptions:
+            type: spc_t
+            level: s0
+{{ end }}
         ports:
         - containerPort: 53
           name: dns

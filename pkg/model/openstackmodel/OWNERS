@@ -1,8 +1,4 @@
-approvers:
-- dims # just for bootstrapping the provider
-- zetaab
-reviewers:
-- drekle
-- zetaab
 labels:
 - area/provider/openstack
+reviewers:
+- zetaab

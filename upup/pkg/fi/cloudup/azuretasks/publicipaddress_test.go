@@ -22,24 +22,25 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/Azure/azure-sdk-for-go/services/network/mgmt/2020-06-01/network"
-	"github.com/Azure/go-autorest/autorest/to"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
+	network "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork/v7"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/azure"
 )
 
 func newTestPublicIPAddress() *PublicIPAddress {
 	return &PublicIPAddress{
-		Name:      to.StringPtr("publicIPAddress"),
+		Name:      to.Ptr("publicIPAddress"),
 		Lifecycle: fi.LifecycleSync,
 		ResourceGroup: &ResourceGroup{
-			Name: to.StringPtr("rg"),
+			Name: to.Ptr("rg"),
 		},
 		Tags: map[string]*string{
-			testTagKey: to.StringPtr(testTagValue),
+			testTagKey: to.Ptr(testTagValue),
 		},
 	}
 }
+
 func TestPublicIPAddressRenderAzure(t *testing.T) {
 	cloud := NewMockAzureCloud("eastus")
 	apiTarget := azure.NewAzureAPITarget(cloud)
@@ -60,15 +61,17 @@ func TestPublicIPAddressRenderAzure(t *testing.T) {
 
 func TestPublicIPAddressFind(t *testing.T) {
 	cloud := NewMockAzureCloud("eastus")
-	ctx := &fi.Context{
-		Cloud: cloud,
+	ctx := &fi.CloudupContext{
+		T: fi.CloudupSubContext{
+			Cloud: cloud,
+		},
 	}
 
 	rg := &ResourceGroup{
-		Name: to.StringPtr("rg"),
+		Name: to.Ptr("rg"),
 	}
 	publicIPAddress := &PublicIPAddress{
-		Name: to.StringPtr("publicIPAddress"),
+		Name: to.Ptr("publicIPAddress"),
 		ResourceGroup: &ResourceGroup{
 			Name: rg.Name,
 		},
@@ -84,14 +87,14 @@ func TestPublicIPAddressFind(t *testing.T) {
 
 	// Create a public ip address.
 	publicIPAddressParameters := network.PublicIPAddress{
-		Location: to.StringPtr("eastus"),
-		Name:     to.StringPtr("publicIPAddress"),
-		PublicIPAddressPropertiesFormat: &network.PublicIPAddressPropertiesFormat{
-			PublicIPAddressVersion:   network.IPv4,
-			PublicIPAllocationMethod: network.Dynamic,
+		Location: to.Ptr("eastus"),
+		Name:     to.Ptr("publicIPAddress"),
+		Properties: &network.PublicIPAddressPropertiesFormat{
+			PublicIPAddressVersion:   to.Ptr(network.IPVersionIPv4),
+			PublicIPAllocationMethod: to.Ptr(network.IPAllocationMethodDynamic),
 		},
 	}
-	if err := cloud.PublicIPAddress().CreateOrUpdate(context.Background(), *rg.Name, *publicIPAddress.Name, publicIPAddressParameters); err != nil {
+	if _, err := cloud.PublicIPAddress().CreateOrUpdate(context.Background(), *rg.Name, *publicIPAddress.Name, publicIPAddressParameters); err != nil {
 		t.Fatalf("failed to create: %s", err)
 	}
 	// Find again.
@@ -110,19 +113,25 @@ func TestPublicIPAddressFind(t *testing.T) {
 
 func TestPublicIPAddressRun(t *testing.T) {
 	cloud := NewMockAzureCloud("eastus")
-	ctx := &fi.Context{
-		Cloud:  cloud,
+	ctx := &fi.CloudupContext{
+		T: fi.CloudupSubContext{
+			Cloud: cloud,
+		},
 		Target: azure.NewAzureAPITarget(cloud),
 	}
 
 	lb := newTestPublicIPAddress()
-	err := lb.Run(ctx)
+	err := lb.Normalize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	err = lb.Run(ctx)
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
 	}
 	e := map[string]*string{
-		azure.TagClusterName: to.StringPtr(testClusterName),
-		testTagKey:           to.StringPtr(testTagValue),
+		azure.TagClusterName: to.Ptr(testClusterName),
+		testTagKey:           to.Ptr(testTagValue),
 	}
 	if a := lb.Tags; !reflect.DeepEqual(a, e) {
 		t.Errorf("unexpected tags: expected %+v, but got %+v", e, a)
@@ -136,7 +145,7 @@ func TestPublicIPAddressCheckChanges(t *testing.T) {
 	}{
 		{
 			a:       nil,
-			e:       &PublicIPAddress{Name: to.StringPtr("name")},
+			e:       &PublicIPAddress{Name: to.Ptr("name")},
 			changes: nil,
 			success: true,
 		},
@@ -147,13 +156,13 @@ func TestPublicIPAddressCheckChanges(t *testing.T) {
 			success: false,
 		},
 		{
-			a:       &PublicIPAddress{Name: to.StringPtr("name")},
+			a:       &PublicIPAddress{Name: to.Ptr("name")},
 			changes: &PublicIPAddress{Name: nil},
 			success: true,
 		},
 		{
-			a:       &PublicIPAddress{Name: to.StringPtr("name")},
-			changes: &PublicIPAddress{Name: to.StringPtr("newName")},
+			a:       &PublicIPAddress{Name: to.Ptr("name")},
+			changes: &PublicIPAddress{Name: to.Ptr("newName")},
 			success: false,
 		},
 	}

@@ -18,38 +18,38 @@ package fi
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"sort"
 	"strings"
-	"sync"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/klog/v2"
-	"k8s.io/kops/pkg/acls"
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/apis/kops/v1alpha2"
 	"k8s.io/kops/pkg/kopscodecs"
-	"k8s.io/kops/pkg/pki"
 	"k8s.io/kops/pkg/sshcredentials"
 	"k8s.io/kops/util/pkg/vfs"
+	"k8s.io/kops/util/pkg/vfs/acls"
 )
 
 type VFSCAStore struct {
-	basedir vfs.Path
+	VFSKeystoreReader
 	cluster *kops.Cluster
-
-	mutex    sync.Mutex
-	cachedCA *Keyset
 }
 
-var _ CAStore = &VFSCAStore{}
-var _ SSHCredentialStore = &VFSCAStore{}
+var (
+	_ CAStore            = &VFSCAStore{}
+	_ SSHCredentialStore = &VFSCAStore{}
+)
 
 func NewVFSCAStore(cluster *kops.Cluster, basedir vfs.Path) *VFSCAStore {
 	c := &VFSCAStore{
-		basedir: basedir,
+		VFSKeystoreReader: VFSKeystoreReader{
+			basedir: basedir,
+		},
 		cluster: cluster,
 	}
 
@@ -60,66 +60,13 @@ func NewVFSCAStore(cluster *kops.Cluster, basedir vfs.Path) *VFSCAStore {
 func NewVFSSSHCredentialStore(cluster *kops.Cluster, basedir vfs.Path) SSHCredentialStore {
 	// Note currently identical to NewVFSCAStore
 	c := &VFSCAStore{
-		basedir: basedir,
+		VFSKeystoreReader: VFSKeystoreReader{
+			basedir: basedir,
+		},
 		cluster: cluster,
 	}
 
 	return c
-}
-
-func (c *VFSCAStore) VFSPath() vfs.Path {
-	return c.basedir
-}
-
-func (c *VFSCAStore) buildPrivateKeyPoolPath(name string) vfs.Path {
-	return c.basedir.Join("private", name)
-}
-
-func (c *VFSCAStore) parseKeysetYaml(data []byte) (*kops.Keyset, bool, error) {
-	defaultReadVersion := v1alpha2.SchemeGroupVersion.WithKind("Keyset")
-
-	object, gvk, err := kopscodecs.Decode(data, &defaultReadVersion)
-	if err != nil {
-		return nil, false, fmt.Errorf("error parsing keyset: %v", err)
-	}
-
-	keyset, ok := object.(*kops.Keyset)
-	if !ok {
-		return nil, false, fmt.Errorf("object was not a keyset, was a %T", object)
-	}
-
-	if gvk == nil {
-		return nil, false, fmt.Errorf("object did not have GroupVersionKind: %q", keyset.Name)
-	}
-
-	return keyset, gvk.Version != keysetFormatLatest, nil
-}
-
-// loadKeyset loads a Keyset from the path.
-// Returns (nil, nil) if the file is not found
-// Bundles avoid the need for a list-files permission, which can be tricky on e.g. GCE
-func (c *VFSCAStore) loadKeyset(p vfs.Path) (*Keyset, error) {
-	bundlePath := p.Join("keyset.yaml")
-	data, err := bundlePath.ReadFile()
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("unable to read bundle %q: %v", p, err)
-	}
-
-	o, legacyFormat, err := c.parseKeysetYaml(data)
-	if err != nil {
-		return nil, fmt.Errorf("error parsing bundle %q: %v", p, err)
-	}
-
-	keyset, err := parseKeyset(o)
-	if err != nil {
-		return nil, fmt.Errorf("error mapping bundle %q: %v", p, err)
-	}
-
-	keyset.LegacyFormat = legacyFormat
-	return keyset, nil
 }
 
 func (k *Keyset) ToAPIObject(name string) (*kops.Keyset, error) {
@@ -166,13 +113,13 @@ func (k *Keyset) ToAPIObject(name string) (*kops.Keyset, error) {
 		o.Spec.Keys = append(o.Spec.Keys, oki)
 	}
 	if k.Primary != nil {
-		o.Spec.PrimaryId = k.Primary.Id
+		o.Spec.PrimaryID = k.Primary.Id
 	}
 	return o, nil
 }
 
 // writeKeysetBundle writes a Keyset bundle to VFS.
-func writeKeysetBundle(cluster *kops.Cluster, p vfs.Path, name string, keyset *Keyset) error {
+func writeKeysetBundle(ctx context.Context, cluster *kops.Cluster, p vfs.Path, name string, keyset *Keyset) error {
 	p = p.Join("keyset.yaml")
 
 	o, err := keyset.ToAPIObject(name)
@@ -185,11 +132,11 @@ func writeKeysetBundle(cluster *kops.Cluster, p vfs.Path, name string, keyset *K
 		return err
 	}
 
-	acl, err := acls.GetACL(p, cluster)
+	acl, err := acls.GetACL(ctx, p, cluster)
 	if err != nil {
 		return err
 	}
-	return p.WriteFile(bytes.NewReader(objectData), acl)
+	return p.WriteFile(ctx, bytes.NewReader(objectData), acl)
 }
 
 // serializeKeysetBundle converts a Keyset bundle to yaml, for writing to VFS.
@@ -208,35 +155,12 @@ func serializeKeysetBundle(o *kops.Keyset) ([]byte, error) {
 	return objectData.Bytes(), nil
 }
 
-func (c *VFSCAStore) FindPrimaryKeypair(name string) (*pki.Certificate, *pki.PrivateKey, error) {
-	return FindPrimaryKeypair(c, name)
-}
-
-var legacyKeysetMappings = map[string]string{
-	// The strange name is because kOps prior to 1.19 used the api-server TLS key for this.
-	"service-account": "master",
-	// Renamed in kOps 1.22
-	"kubernetes-ca": "ca",
-}
-
-func (c *VFSCAStore) FindKeyset(id string) (*Keyset, error) {
-	keys, err := c.findPrivateKeyset(id)
-	if keys == nil || os.IsNotExist(err) {
-		if legacyId := legacyKeysetMappings[id]; legacyId != "" {
-			keys, err = c.findPrivateKeyset(legacyId)
-			if keys != nil {
-				keys.LegacyFormat = true
-			}
-		}
-	}
-
-	return keys, err
-}
-
 // ListKeysets implements CAStore::ListKeysets
 func (c *VFSCAStore) ListKeysets() (map[string]*Keyset, error) {
+	ctx := context.TODO()
+
 	baseDir := c.basedir.Join("private")
-	files, err := baseDir.ReadTree()
+	files, err := baseDir.ReadTree(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("error reading directory %q: %v", baseDir, err)
 	}
@@ -256,9 +180,9 @@ func (c *VFSCAStore) ListKeysets() (map[string]*Keyset, error) {
 		}
 
 		name := tokens[0]
-		loadedKeyset, err := c.loadKeyset(baseDir.Join(name))
+		loadedKeyset, err := c.loadKeyset(ctx, baseDir.Join(name))
 		if err != nil {
-			klog.Warningf("ignoring keyset %q: %w", name, err)
+			klog.Warningf("ignoring keyset %q: %v", name, err)
 			continue
 		}
 
@@ -269,7 +193,7 @@ func (c *VFSCAStore) ListKeysets() (map[string]*Keyset, error) {
 }
 
 // MirrorTo will copy keys to a vfs.Path, which is often easier for a machine to read
-func (c *VFSCAStore) MirrorTo(basedir vfs.Path) error {
+func (c *VFSCAStore) MirrorTo(ctx context.Context, basedir vfs.Path) error {
 	if basedir.Path() == c.basedir.Path() {
 		klog.V(2).Infof("Skipping key store mirror from %q to %q (same paths)", c.basedir, basedir)
 		return nil
@@ -282,7 +206,7 @@ func (c *VFSCAStore) MirrorTo(basedir vfs.Path) error {
 	}
 
 	for name, keyset := range keysets {
-		if err := mirrorKeyset(c.cluster, basedir, name, keyset); err != nil {
+		if err := mirrorKeyset(ctx, c.cluster, basedir, name, keyset); err != nil {
 			return err
 		}
 	}
@@ -293,7 +217,7 @@ func (c *VFSCAStore) MirrorTo(basedir vfs.Path) error {
 	}
 
 	for _, sshCredential := range sshCredentials {
-		if err := mirrorSSHCredential(c.cluster, basedir, sshCredential); err != nil {
+		if err := mirrorSSHCredential(ctx, c.cluster, basedir, sshCredential); err != nil {
 			return err
 		}
 	}
@@ -302,8 +226,8 @@ func (c *VFSCAStore) MirrorTo(basedir vfs.Path) error {
 }
 
 // mirrorKeyset writes Keyset bundles for the certificates & privatekeys.
-func mirrorKeyset(cluster *kops.Cluster, basedir vfs.Path, name string, keyset *Keyset) error {
-	if err := writeKeysetBundle(cluster, basedir.Join("private"), name, keyset); err != nil {
+func mirrorKeyset(ctx context.Context, cluster *kops.Cluster, basedir vfs.Path, name string, keyset *Keyset) error {
+	if err := writeKeysetBundle(ctx, cluster, basedir.Join("private"), name, keyset); err != nil {
 		return fmt.Errorf("writing private bundle: %v", err)
 	}
 
@@ -311,19 +235,19 @@ func mirrorKeyset(cluster *kops.Cluster, basedir vfs.Path, name string, keyset *
 }
 
 // mirrorSSHCredential writes the SSH credential file to the mirror location
-func mirrorSSHCredential(cluster *kops.Cluster, basedir vfs.Path, sshCredential *kops.SSHCredential) error {
+func mirrorSSHCredential(ctx context.Context, cluster *kops.Cluster, basedir vfs.Path, sshCredential *kops.SSHCredential) error {
 	id, err := sshcredentials.Fingerprint(sshCredential.Spec.PublicKey)
 	if err != nil {
 		return fmt.Errorf("error fingerprinting SSH public key %q: %v", sshCredential.Name, err)
 	}
 
 	p := basedir.Join("ssh", "public", sshCredential.Name, id)
-	acl, err := acls.GetACL(p, cluster)
+	acl, err := acls.GetACL(ctx, p, cluster)
 	if err != nil {
 		return err
 	}
 
-	err = p.WriteFile(bytes.NewReader([]byte(sshCredential.Spec.PublicKey)), acl)
+	err = p.WriteFile(ctx, bytes.NewReader([]byte(sshCredential.Spec.PublicKey)), acl)
 	if err != nil {
 		return fmt.Errorf("error writing %q: %v", p, err)
 	}
@@ -331,7 +255,7 @@ func mirrorSSHCredential(cluster *kops.Cluster, basedir vfs.Path, sshCredential 
 	return nil
 }
 
-func (c *VFSCAStore) StoreKeyset(name string, keyset *Keyset) error {
+func (c *VFSCAStore) StoreKeyset(ctx context.Context, name string, keyset *Keyset) error {
 	if keyset.Primary == nil || keyset.Primary.Id == "" {
 		return fmt.Errorf("keyset must have a primary key")
 	}
@@ -345,10 +269,13 @@ func (c *VFSCAStore) StoreKeyset(name string, keyset *Keyset) error {
 	if keyset.Items[primaryId].PrivateKey == nil {
 		return fmt.Errorf("keyset's primary id %q must have a private key", primaryId)
 	}
+	if keyset.Items[primaryId].Certificate == nil {
+		return fmt.Errorf("keyset's primary id %q must have a certificate", primaryId)
+	}
 
 	{
 		p := c.buildPrivateKeyPoolPath(name)
-		if err := writeKeysetBundle(c.cluster, p, name, keyset); err != nil {
+		if err := writeKeysetBundle(ctx, c.cluster, p, name, keyset); err != nil {
 			return fmt.Errorf("writing private bundle: %v", err)
 		}
 	}
@@ -356,64 +283,32 @@ func (c *VFSCAStore) StoreKeyset(name string, keyset *Keyset) error {
 	return nil
 }
 
-func (c *VFSCAStore) findPrivateKeyset(id string) (*Keyset, error) {
-	var keys *Keyset
-	var err error
-	if id == CertificateIDCA {
-		c.mutex.Lock()
-		defer c.mutex.Unlock()
-
-		cached := c.cachedCA
-		if cached != nil {
-			return cached, nil
-		}
-
-		keys, err = c.loadKeyset(c.buildPrivateKeyPoolPath(id))
-		if err != nil {
-			return nil, err
-		}
-
-		if keys == nil {
-			klog.Warningf("CA private key was not found")
-			// We no longer generate CA certificates automatically - too race-prone
-		} else {
-			c.cachedCA = keys
-		}
-	} else {
-		p := c.buildPrivateKeyPoolPath(id)
-		keys, err = c.loadKeyset(p)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	return keys, nil
-}
-
 // AddSSHPublicKey stores an SSH public key
-func (c *VFSCAStore) AddSSHPublicKey(pubkey []byte) error {
-	id, err := sshcredentials.Fingerprint(string(pubkey))
+func (c *VFSCAStore) AddSSHPublicKey(ctx context.Context, pubkey []byte) error {
+	id, err := sshcredentials.Fingerprint(strings.TrimSpace(string(pubkey)))
 	if err != nil {
 		return fmt.Errorf("error fingerprinting SSH public key: %v", err)
 	}
 
 	p := c.buildSSHPublicKeyPath(id)
 
-	acl, err := acls.GetACL(p, c.cluster)
+	acl, err := acls.GetACL(ctx, p, c.cluster)
 	if err != nil {
 		return err
 	}
 
-	return p.WriteFile(bytes.NewReader(pubkey), acl)
+	return p.WriteFile(ctx, bytes.NewReader(pubkey), acl)
 }
 
 func (c *VFSCAStore) buildSSHPublicKeyPath(id string) vfs.Path {
 	// id is fingerprint with colons, but we store without colons
-	id = strings.Replace(id, ":", "", -1)
+	id = strings.ReplaceAll(id, ":", "")
 	return c.basedir.Join("ssh", "public", "admin", id)
 }
 
 func (c *VFSCAStore) FindSSHPublicKeys() ([]*kops.SSHCredential, error) {
+	ctx := context.TODO()
+
 	p := c.basedir.Join("ssh", "public", "admin")
 
 	files, err := p.ReadDir()
@@ -427,7 +322,7 @@ func (c *VFSCAStore) FindSSHPublicKeys() ([]*kops.SSHCredential, error) {
 	var items []*kops.SSHCredential
 
 	for _, f := range files {
-		data, err := f.ReadFile()
+		data, err := f.ReadFile(ctx)
 		if err != nil {
 			if os.IsNotExist(err) {
 				klog.V(2).Infof("Ignoring not-found issue reading %q", f)
@@ -438,7 +333,7 @@ func (c *VFSCAStore) FindSSHPublicKeys() ([]*kops.SSHCredential, error) {
 
 		item := &kops.SSHCredential{}
 		item.Name = "admin"
-		item.Spec.PublicKey = string(data)
+		item.Spec.PublicKey = strings.TrimSpace(string(data))
 		items = append(items, item)
 	}
 
@@ -446,6 +341,8 @@ func (c *VFSCAStore) FindSSHPublicKeys() ([]*kops.SSHCredential, error) {
 }
 
 func (c *VFSCAStore) DeleteSSHCredential() error {
+	ctx := context.TODO()
+
 	p := c.basedir.Join("ssh", "public", "admin")
 
 	files, err := p.ReadDir()
@@ -456,7 +353,7 @@ func (c *VFSCAStore) DeleteSSHCredential() error {
 		return err
 	}
 	for _, f := range files {
-		if err := f.Remove(); err != nil {
+		if err := f.Remove(ctx); err != nil {
 			return err
 		}
 	}

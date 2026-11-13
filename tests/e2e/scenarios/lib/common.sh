@@ -19,13 +19,12 @@ set -o nounset
 set -o pipefail
 set -o xtrace
 
-echo "CLOUD_PROVIDER=${CLOUD_PROVIDER}"
-echo "CLUSTER_NAME=${CLUSTER_NAME}"
-
-if [[ -z "${WORKSPACE-}" ]]; then
-    export WORKSPACE
-    WORKSPACE=$(mktemp -dt kops.XXXXXXXXX)
+if [[ -z "${CLOUD_PROVIDER-}" ]]; then
+    export CLOUD_PROVIDER="aws"
 fi
+
+echo "CLOUD_PROVIDER=${CLOUD_PROVIDER}"
+echo "CLUSTER_NAME=${CLUSTER_NAME-}"
 
 if [[ -z "${WORKSPACE-}" ]]; then
     export WORKSPACE
@@ -39,35 +38,36 @@ fi
 export KOPS_BASE_URL
 export KOPS
 
-export KOPS_FEATURE_FLAGS="SpecOverrideFlag"
 export KOPS_RUN_TOO_NEW_VERSION=1
 
-if [[ -z "${DISCOVERY_STORE-}" ]]; then 
-    DISCOVERY_STORE="${KOPS_STATE_STORE}"
-fi
-
-if [[ ${KOPS_IRSA-} = true ]]; then
-    OVERRIDES="${OVERRIDES-} --override=cluster.spec.serviceAccountIssuerDiscovery.discoveryStore=${DISCOVERY_STORE}/${CLUSTER_NAME}/discovery"
-    OVERRIDES="${OVERRIDES} --override=cluster.spec.serviceAccountIssuerDiscovery.enableAWSOIDCProvider=true"
-    OVERRIDES="${OVERRIDES} --override=cluster.spec.iam.useServiceAccountExternalPermissions=true"
-fi
-
-export GO111MODULE=on
-
-if [[ -z "${AWS_SSH_PRIVATE_KEY_FILE-}" ]]; then
-    export AWS_SSH_PRIVATE_KEY_FILE="${HOME}/.ssh/id_rsa"
-fi
-if [[ -z "${AWS_SSH_PUBLIC_KEY_FILE-}" ]]; then
-    export AWS_SSH_PUBLIC_KEY_FILE="${HOME}/.ssh/id_rsa.pub"
-fi
-
 KUBETEST2="kubetest2 kops -v=2 --cloud-provider=${CLOUD_PROVIDER} --cluster-name=${CLUSTER_NAME:-} --kops-root=${REPO_ROOT}"
-KUBETEST2="${KUBETEST2} --admin-access=${ADMIN_ACCESS:-} --env=KOPS_FEATURE_FLAGS=${KOPS_FEATURE_FLAGS}"
+if [[ -n "${ADMIN_ACCESS-}" ]]; then
+  KUBETEST2="${KUBETEST2} --admin-access=${ADMIN_ACCESS}"
+fi
+if [[ -n "${GCP_PROJECT-}" ]]; then
+  KUBETEST2="${KUBETEST2} --gcp-project=${GCP_PROJECT}"
+fi
 
 # Always tear-down the cluster when we're done
 function kops-finish {
+    # The env file persists the kops binary used for --up. After an A->B upgrade
+    # that is the older binary, so keep the one the test last selected.
+    local down_kops="${KOPS-}"
+    # If we failed to start the cluster, we might not have sourced KOPS_STATE_STORE, so try to source it if we have an env file
+    if [[ -z "${ENV_FILE-}" ]]; then
+        ENV_FILE="${WORKSPACE}/env"
+    fi
+    if [[ -f "${ENV_FILE}" ]]; then
+        # shellcheck disable=SC1090
+        . "${ENV_FILE}"
+        export KOPS_STATE_STORE
+    fi
+    if [[ -n "${down_kops}" ]]; then
+        KOPS="${down_kops}"
+    fi
+
     # shellcheck disable=SC2153
-    ${KUBETEST2} --kops-binary-path="${KOPS}" --down || echo "kubetest2 down failed"
+    ${KUBETEST2} --kops-binary-path="${KOPS-}" --down || echo "kubetest2 down failed"
 }
 trap kops-finish EXIT
 
@@ -90,24 +90,26 @@ function kops-download-from-base() {
 }
 
 function kops-base-from-marker() {
-    if [[ "${1}" == "latest" ]]; then
-        curl -s "https://storage.googleapis.com/kops-ci/bin/latest-ci-updown-green.txt"
+    if [[ "${1}" =~ ^https: ]]; then
+        curl -fs "${1}"
+    elif [[ "${1}" == "latest" ]]; then
+        curl -fs "https://storage.googleapis.com/k8s-staging-kops/kops/releases/markers/master/latest-ci-updown-green.txt"
     else
-        curl -s "https://storage.googleapis.com/k8s-staging-kops/kops/releases/markers/release-${1}/latest-ci.txt"
+        curl -fs "https://storage.googleapis.com/k8s-staging-kops/kops/releases/markers/release-${1}/latest-ci.txt"
     fi
 }
 
 # This function will download the latest kops if in a periodic job, otherwise build from the current tree
 function kops-acquire-latest() {
     if [[ "${JOB_TYPE-}" == "periodic" ]]; then
-        KOPS_BASE_URL="$(curl -s https://storage.googleapis.com/kops-ci/bin/latest-ci-updown-green.txt)"
+        KOPS_BASE_URL="$(curl -fs https://storage.googleapis.com/k8s-staging-kops/kops/releases/markers/master/latest-ci-updown-green.txt)"
         KOPS=$(kops-download-from-base)
     else
          if [[ -n "${KOPS_BASE_URL-}" ]]; then
             KOPS_BASE_URL=""
          fi
          $KUBETEST2 --build
-         KOPS="${REPO_ROOT}/.bazelbuild/dist/linux/amd64/kops"
+         KOPS="${REPO_ROOT}/.build/dist/linux/amd64/kops"
          KOPS_BASE_URL=$(cat "${REPO_ROOT}/.kubetest2/kops-base-url")
          export KOPS_BASE_URL
          echo "KOPS_BASE_URL=$KOPS_BASE_URL"
@@ -120,9 +122,28 @@ function kops-up() {
     if [[ -n "${ZONES-}" ]]; then
         create_args="${create_args} --zones=${ZONES}"
     fi
+    if [[ -z "${K8S_VERSION-}" ]]; then
+        K8S_VERSION="$(curl -fs -L https://dl.k8s.io/release/stable.txt)"
+    fi
+
+    if [[ -z "${ENV_FILE-}" ]]; then
+        ENV_FILE="${WORKSPACE}/env"
+    fi
+
     ${KUBETEST2} \
         --up \
+        --env-file="${ENV_FILE}" \
         --kops-binary-path="${KOPS}" \
-        --kubernetes-version="1.22.1" \
-        --create-args="${create_args}"
+        --kubernetes-version="${K8S_VERSION}" \
+        --create-args="${create_args}" \
+        --control-plane-count="${KOPS_CONTROL_PLANE_COUNT:-1}" \
+        --template-path="${KOPS_TEMPLATE-}"
+
+    # Source the env file to get exported variables, in particular KOPS_STATE_STORE
+    . "${ENV_FILE}"
+    export KOPS_STATE_STORE
+    if [[ -n "${GCP_PROJECT:-}" ]]; then
+        export GCP_PROJECT
+        gcloud config set project "${GCP_PROJECT}"
+    fi
 }

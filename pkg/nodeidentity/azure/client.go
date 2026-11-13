@@ -18,98 +18,79 @@ package azure
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io/ioutil"
-	"net/http"
+	"strings"
 
-	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2020-06-01/compute"
-	"github.com/Azure/go-autorest/autorest/azure/auth"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
+	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
+	compute "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v7"
+	"k8s.io/kops/upup/pkg/fi/cloudup/azure/azuremetadata"
 )
-
-type instanceComputeMetadata struct {
-	ResourceGroupName string `json:"resourceGroupName"`
-	SubscriptionID    string `json:"subscriptionId"`
-}
-
-type instanceMetadata struct {
-	Compute *instanceComputeMetadata `json:"compute"`
-}
 
 // client is an Azure client.
 type client struct {
-	metadata     *instanceMetadata
-	vmssesClient *compute.VirtualMachineScaleSetsClient
+	subscriptionID string
+	vmClient       *compute.VirtualMachinesClient
+	vmssClient     *compute.VirtualMachineScaleSetVMsClient
 }
 
 // newClient returns a new Client.
 func newClient() (*client, error) {
-	m, err := queryInstanceMetadata()
+	// nodeidentity.Identifier.New does not propagate a context; the IMDS HTTP client's own timeout
+	// bounds this call.
+	metadata, err := azuremetadata.QueryComputeInstanceMetadata(context.TODO())
 	if err != nil {
 		return nil, fmt.Errorf("error querying instance metadata: %s", err)
 	}
-	if m.Compute.SubscriptionID == "" {
-		return nil, fmt.Errorf("empty subscription name")
-	}
-	if m.Compute.ResourceGroupName == "" {
-		return nil, fmt.Errorf("empty resource group name")
+	if metadata.SubscriptionID == "" {
+		return nil, fmt.Errorf("empty subscription ID")
 	}
 
-	authorizer, err := auth.NewAuthorizerFromEnvironment()
+	cred, err := azidentity.NewDefaultAzureCredential(nil)
 	if err != nil {
-		return nil, fmt.Errorf("error creating an authorizer: %s", err)
+		return nil, fmt.Errorf("creating identity: %w", err)
 	}
 
-	vmssesClient := compute.NewVirtualMachineScaleSetsClient(m.Compute.SubscriptionID)
-	vmssesClient.Authorizer = authorizer
+	vmClient, err := compute.NewVirtualMachinesClient(metadata.SubscriptionID, cred, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating VMs client: %w", err)
+	}
+
+	vmssClient, err := compute.NewVirtualMachineScaleSetVMsClient(metadata.SubscriptionID, cred, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating VMSS VMs client: %w", err)
+	}
 
 	return &client{
-		metadata:     m,
-		vmssesClient: &vmssesClient,
+		vmClient:   vmClient,
+		vmssClient: vmssClient,
 	}, nil
 }
 
-// getVMScaleSet returns the specified VM ScaleSet.
-func (c *client) getVMScaleSet(ctx context.Context, vmssName string) (compute.VirtualMachineScaleSet, error) {
-	return c.vmssesClient.Get(ctx, c.metadata.Compute.ResourceGroupName, vmssName)
-}
+func (c *client) getVMTags(ctx context.Context, providerID string) (map[string]*string, error) {
+	if !strings.HasPrefix(providerID, "azure://") {
+		return nil, fmt.Errorf("unknown providerID : %s", providerID)
+	}
 
-// queryInstanceMetadata queries Azure Instance Metadata documented in
-// https://docs.microsoft.com/en-us/azure/virtual-machines/windows/instance-metadata-service.
-func queryInstanceMetadata() (*instanceMetadata, error) {
-	client := &http.Client{}
-	req, err := http.NewRequest("GET", "http://169.254.169.254/metadata/instance", nil)
+	res, err := arm.ParseResourceID(strings.TrimPrefix(providerID, "azure://"))
 	if err != nil {
-		return nil, fmt.Errorf("error creating a new request: %s", err)
-	}
-	req.Header.Add("Metadata", "True")
-
-	q := req.URL.Query()
-	q.Add("format", "json")
-	q.Add("api-version", "2020-06-01")
-	req.URL.RawQuery = q.Encode()
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("error sending request to the metadata server: %s", err)
+		return nil, fmt.Errorf("error parsing providerID: %v", err)
 	}
 
-	defer resp.Body.Close()
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("error reading a response from the metadata server: %s", err)
+	switch res.ResourceType.String() {
+	case "Microsoft.Compute/virtualMachines":
+		resp, err := c.vmClient.Get(ctx, res.ResourceGroupName, res.Name, nil)
+		if err != nil {
+			return nil, fmt.Errorf("getting VM: %w", err)
+		}
+		return resp.VirtualMachine.Tags, nil
+	case "Microsoft.Compute/virtualMachineScaleSets/virtualMachines":
+		resp, err := c.vmssClient.Get(ctx, res.ResourceGroupName, res.Parent.Name, res.Name, nil)
+		if err != nil {
+			return nil, fmt.Errorf("getting VMSS VM: %w", err)
+		}
+		return resp.VirtualMachineScaleSetVM.Tags, nil
+	default:
+		return nil, fmt.Errorf("unsupported resource type %q for %q", res.ResourceType, providerID)
 	}
-	metadata, err := unmarshalInstanceMetadata(body)
-	if err != nil {
-		return nil, fmt.Errorf("error unmarshalling metadata: %s", err)
-	}
-	return metadata, nil
-}
-
-func unmarshalInstanceMetadata(data []byte) (*instanceMetadata, error) {
-	m := &instanceMetadata{}
-	if err := json.Unmarshal(data, m); err != nil {
-		return nil, err
-	}
-	return m, nil
 }

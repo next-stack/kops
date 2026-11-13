@@ -1,0 +1,13 @@
+ClusterName: karpenter.example.com
+Zones:
+- us-test-1a
+- us-test-1b
+- us-test-1c
+CloudProvider: aws
+Networking: calico
+KubernetesVersion: v1.35.0
+InstanceManager: karpenter
+NodeCount: 4
+DiscoveryStore: memfs://kops-state-store
+Sets:
+- cluster.spec.karpenter.featureGates=StaticCapacity=true

@@ -27,7 +27,7 @@ import (
 
 // Port
 
-var _ fi.HasLifecycle = &Port{}
+var _ fi.HasLifecycle = (*Port)(nil)
 
 // GetLifecycle returns the Lifecycle of the object, implementing fi.HasLifecycle
 func (o *Port) GetLifecycle() fi.Lifecycle {
@@ -39,7 +39,7 @@ func (o *Port) SetLifecycle(lifecycle fi.Lifecycle) {
 	o.Lifecycle = lifecycle
 }
 
-var _ fi.HasName = &Port{}
+var _ fi.HasName = (*Port)(nil)
 
 // GetName returns the Name of the object, implementing fi.HasName
 func (o *Port) GetName() *string {
@@ -48,5 +48,5 @@ func (o *Port) GetName() *string {
 
 // String is the stringer function for the task, producing readable output using fi.TaskAsString
 func (o *Port) String() string {
-	return fi.TaskAsString(o)
+	return fi.CloudupTaskAsString(o)
 }

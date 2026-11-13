@@ -131,25 +131,25 @@ func TestWarmPoolSpec_ResolveDefaults(t *testing.T) {
 			assertResolvesValue(t, tc.name, tc.nonDefaultValue, defaultCluster, nonDefaultGroup, InstanceGroupRoleNode, "{default} {nonDefault} node")
 			assertResolvesValue(t, tc.name, tc.nonDefaultValue, nonDefaultCluster, nonDefaultGroup, InstanceGroupRoleNode, "{nonDefault} {nonDefault} node")
 
-			assertResolvesValue(t, tc.name, expectedDefaultValue, nil, nil, InstanceGroupRoleMaster, "nil nil master")
-			assertResolvesValue(t, tc.name, expectedDefaultValue, &WarmPoolSpec{}, nil, InstanceGroupRoleMaster, "{nil} nil master")
-			assertResolvesValue(t, tc.name, expectedDefaultValue, defaultCluster, nil, InstanceGroupRoleMaster, "{default} nil master")
-			assertResolvesValue(t, tc.name, expectedDefaultValue, nonDefaultCluster, nil, InstanceGroupRoleMaster, "{nonDefault} nil master")
+			assertResolvesValue(t, tc.name, expectedDefaultValue, nil, nil, InstanceGroupRoleControlPlane, "nil nil master")
+			assertResolvesValue(t, tc.name, expectedDefaultValue, &WarmPoolSpec{}, nil, InstanceGroupRoleControlPlane, "{nil} nil master")
+			assertResolvesValue(t, tc.name, expectedDefaultValue, defaultCluster, nil, InstanceGroupRoleControlPlane, "{default} nil master")
+			assertResolvesValue(t, tc.name, expectedDefaultValue, nonDefaultCluster, nil, InstanceGroupRoleControlPlane, "{nonDefault} nil master")
 
-			assertResolvesValue(t, tc.name, tc.defaultValue, nil, &WarmPoolSpec{}, InstanceGroupRoleMaster, "nil {nil} master")
-			assertResolvesValue(t, tc.name, tc.defaultValue, &WarmPoolSpec{}, &WarmPoolSpec{}, InstanceGroupRoleMaster, "{nil} {nil} master")
-			assertResolvesValue(t, tc.name, tc.defaultValue, defaultCluster, &WarmPoolSpec{}, InstanceGroupRoleMaster, "{default} {nil} master")
-			assertResolvesValue(t, tc.name, tc.defaultValue, nonDefaultCluster, &WarmPoolSpec{}, InstanceGroupRoleMaster, "{nonDefault} {nil} master")
+			assertResolvesValue(t, tc.name, tc.defaultValue, nil, &WarmPoolSpec{}, InstanceGroupRoleControlPlane, "nil {nil} master")
+			assertResolvesValue(t, tc.name, tc.defaultValue, &WarmPoolSpec{}, &WarmPoolSpec{}, InstanceGroupRoleControlPlane, "{nil} {nil} master")
+			assertResolvesValue(t, tc.name, tc.defaultValue, defaultCluster, &WarmPoolSpec{}, InstanceGroupRoleControlPlane, "{default} {nil} master")
+			assertResolvesValue(t, tc.name, tc.defaultValue, nonDefaultCluster, &WarmPoolSpec{}, InstanceGroupRoleControlPlane, "{nonDefault} {nil} master")
 
-			assertResolvesValue(t, tc.name, tc.defaultValue, nil, defaultGroup, InstanceGroupRoleMaster, "nil {default} master")
-			assertResolvesValue(t, tc.name, tc.defaultValue, &WarmPoolSpec{}, defaultGroup, InstanceGroupRoleMaster, "{nil} {default} master")
-			assertResolvesValue(t, tc.name, tc.defaultValue, defaultCluster, defaultGroup, InstanceGroupRoleMaster, "{default} {default} master")
-			assertResolvesValue(t, tc.name, tc.defaultValue, nonDefaultCluster, defaultGroup, InstanceGroupRoleMaster, "{nonDefault} {default} master")
+			assertResolvesValue(t, tc.name, tc.defaultValue, nil, defaultGroup, InstanceGroupRoleControlPlane, "nil {default} master")
+			assertResolvesValue(t, tc.name, tc.defaultValue, &WarmPoolSpec{}, defaultGroup, InstanceGroupRoleControlPlane, "{nil} {default} master")
+			assertResolvesValue(t, tc.name, tc.defaultValue, defaultCluster, defaultGroup, InstanceGroupRoleControlPlane, "{default} {default} master")
+			assertResolvesValue(t, tc.name, tc.defaultValue, nonDefaultCluster, defaultGroup, InstanceGroupRoleControlPlane, "{nonDefault} {default} master")
 
-			assertResolvesValue(t, tc.name, tc.nonDefaultValue, nil, nonDefaultGroup, InstanceGroupRoleMaster, "nil {nonDefault} master")
-			assertResolvesValue(t, tc.name, tc.nonDefaultValue, &WarmPoolSpec{}, nonDefaultGroup, InstanceGroupRoleMaster, "{nil} {nonDefault} master")
-			assertResolvesValue(t, tc.name, tc.nonDefaultValue, defaultCluster, nonDefaultGroup, InstanceGroupRoleMaster, "{default} {nonDefault} master")
-			assertResolvesValue(t, tc.name, tc.nonDefaultValue, nonDefaultCluster, nonDefaultGroup, InstanceGroupRoleMaster, "{nonDefault} {nonDefault} master")
+			assertResolvesValue(t, tc.name, tc.nonDefaultValue, nil, nonDefaultGroup, InstanceGroupRoleControlPlane, "nil {nonDefault} master")
+			assertResolvesValue(t, tc.name, tc.nonDefaultValue, &WarmPoolSpec{}, nonDefaultGroup, InstanceGroupRoleControlPlane, "{nil} {nonDefault} master")
+			assertResolvesValue(t, tc.name, tc.nonDefaultValue, defaultCluster, nonDefaultGroup, InstanceGroupRoleControlPlane, "{default} {nonDefault} master")
+			assertResolvesValue(t, tc.name, tc.nonDefaultValue, nonDefaultCluster, nonDefaultGroup, InstanceGroupRoleControlPlane, "{nonDefault} {nonDefault} master")
 		})
 	}
 }
@@ -171,7 +171,11 @@ func setFieldValue(aStruct interface{}, fieldName string, fieldValue interface{}
 func assertResolvesValue(t *testing.T, name string, expected interface{}, warmPoolSpecDefault *WarmPoolSpec, ig *WarmPoolSpec, role InstanceGroupRole, msg interface{}) bool {
 	cluster := Cluster{
 		Spec: ClusterSpec{
-			WarmPool: warmPoolSpecDefault,
+			CloudProvider: CloudProviderSpec{
+				AWS: &AWSSpec{
+					WarmPool: warmPoolSpecDefault,
+				},
+			},
 		},
 	}
 	instanceGroup := InstanceGroup{
@@ -183,10 +187,10 @@ func assertResolvesValue(t *testing.T, name string, expected interface{}, warmPo
 	warmPoolSpecDefaultCopy := warmPoolSpecDefault.DeepCopy()
 	warmPoolSpecCopy := ig.DeepCopy()
 
-	resolved := cluster.Spec.WarmPool.ResolveDefaults(&instanceGroup)
+	resolved := cluster.Spec.CloudProvider.AWS.WarmPool.ResolveDefaults(&instanceGroup)
 	value := reflect.ValueOf(*resolved).FieldByName(name)
 
-	assert.Equal(t, warmPoolSpecDefault, cluster.Spec.WarmPool, "cluster not modified")
+	assert.Equal(t, warmPoolSpecDefault, cluster.Spec.CloudProvider.AWS.WarmPool, "cluster not modified")
 	assert.True(t, reflect.DeepEqual(warmPoolSpecDefault, warmPoolSpecDefaultCopy), "WarmPoolSpec not modified")
 	assert.Equal(t, ig, instanceGroup.Spec.WarmPool, "instancegroup not modified")
 	assert.True(t, reflect.DeepEqual(ig, warmPoolSpecCopy), "WarmPoolSpec not modified")
@@ -198,5 +202,52 @@ func assertResolvesValue(t *testing.T, name string, expected interface{}, warmPo
 			assert.Equal(t, expected, value.Elem().Interface(), msg)
 	} else {
 		return assert.Equal(t, expected, value.Interface(), msg)
+	}
+}
+
+func TestCluster_InstallCNIAssets(t *testing.T) {
+	tests := []struct {
+		name       string
+		networking NetworkingSpec
+		expected   bool
+	}{
+		{
+			name:       "no networking configured",
+			networking: NetworkingSpec{},
+			expected:   true,
+		},
+		{
+			name:       "amazon vpc",
+			networking: NetworkingSpec{AmazonVPC: &AmazonVPCNetworkingSpec{}},
+			expected:   false,
+		},
+		{
+			name:       "calico",
+			networking: NetworkingSpec{Calico: &CalicoNetworkingSpec{}},
+			expected:   false,
+		},
+		{
+			name:       "cilium without chaining",
+			networking: NetworkingSpec{Cilium: &CiliumNetworkingSpec{}},
+			expected:   false,
+		},
+		{
+			name:       "cilium with chaining mode none",
+			networking: NetworkingSpec{Cilium: &CiliumNetworkingSpec{ChainingMode: "none"}},
+			expected:   false,
+		},
+		{
+			name:       "cilium with portmap chaining",
+			networking: NetworkingSpec{Cilium: &CiliumNetworkingSpec{ChainingMode: "portmap"}},
+			expected:   true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := &Cluster{Spec: ClusterSpec{Networking: tc.networking}}
+			if actual := c.InstallCNIAssets(); actual != tc.expected {
+				t.Errorf("InstallCNIAssets() = %v, want %v", actual, tc.expected)
+			}
+		})
 	}
 }

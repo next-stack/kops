@@ -74,10 +74,9 @@ func TestToVersionedYaml(t *testing.T) {
 		actual = strings.TrimSpace(actual)
 		expected := strings.TrimSpace(g.expected)
 		if actual != expected {
-			t.Logf(diff.FormatDiff(actual, expected))
+			t.Log(diff.FormatDiff(actual, expected))
 			t.Errorf("actual != expected")
 			continue
 		}
 	}
-
 }

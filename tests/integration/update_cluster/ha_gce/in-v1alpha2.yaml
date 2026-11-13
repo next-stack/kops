@@ -6,29 +6,36 @@ metadata:
 spec:
   api:
     dns: {}
+  clusterAutoscaler:
+    enabled: true
   authorization:
-    alwaysAllow: {}
+    rbac: {}
   channel: stable
   cloudProvider: gce
   configBase: memfs://tests/ha-gce.example.com
   etcdClusters:
-  - etcdMembers:
+  - cpuRequest: 200m
+    etcdMembers:
     - instanceGroup: master-us-test1-a
-      name: "1"
+      name: a
     - instanceGroup: master-us-test1-b
-      name: "2"
+      name: b
     - instanceGroup: master-us-test1-c
-      name: "3"
+      name: c
+    memoryRequest: 100Mi
     name: main
-  - etcdMembers:
+  - cpuRequest: 100m
+    etcdMembers:
     - instanceGroup: master-us-test1-a
-      name: "1"
+      name: a
     - instanceGroup: master-us-test1-b
-      name: "2"
+      name: b
     - instanceGroup: master-us-test1-c
-      name: "3"
+      name: c
+    memoryRequest: 100Mi
     name: events
-  gceServiceAccount: default
+  cloudConfig:
+    gceServiceAccount: default
   iam:
     legacy: false
   kubelet:
@@ -36,7 +43,7 @@ spec:
   kubernetesApiAccess:
   - 0.0.0.0/0
   - ::/0
-  kubernetesVersion: v1.21.0
+  kubernetesVersion: v1.32.0
   masterPublicName: api.ha-gce.example.com
   networking:
     cni: {}
@@ -52,8 +59,6 @@ spec:
   topology:
     dns:
       type: Public
-    masters: public
-    nodes: public
 
 ---
 
@@ -65,8 +70,8 @@ metadata:
     kops.k8s.io/cluster: ha-gce.example.com
   name: master-us-test1-a
 spec:
-  image: cos-cloud/cos-stable-57-9202-64-0
-  machineType: n1-standard-1
+  image: ubuntu-os-cloud/ubuntu-2604-resolute-amd64-v20221018
+  machineType: e2-medium
   maxSize: 1
   minSize: 1
   role: Master
@@ -85,8 +90,8 @@ metadata:
     kops.k8s.io/cluster: ha-gce.example.com
   name: master-us-test1-b
 spec:
-  image: cos-cloud/cos-stable-57-9202-64-0
-  machineType: n1-standard-1
+  image: ubuntu-os-cloud/ubuntu-2604-resolute-amd64-v20221018
+  machineType: e2-medium
   maxSize: 1
   minSize: 1
   role: Master
@@ -105,8 +110,8 @@ metadata:
     kops.k8s.io/cluster: ha-gce.example.com
   name: master-us-test1-c
 spec:
-  image: cos-cloud/cos-stable-57-9202-64-0
-  machineType: n1-standard-1
+  image: ubuntu-os-cloud/ubuntu-2604-resolute-amd64-v20221018
+  machineType: e2-medium
   maxSize: 1
   minSize: 1
   role: Master
@@ -125,13 +130,17 @@ metadata:
     kops.k8s.io/cluster: ha-gce.example.com
   name: nodes
 spec:
-  image: cos-cloud/cos-stable-57-9202-64-0
-  machineType: n1-standard-2
+  image: ubuntu-os-cloud/ubuntu-2604-resolute-amd64-v20221018
+  machineType: e2-medium
   maxSize: 2
   minSize: 2
+  nodeLabels:
+    kops.k8s.io/instancegroup: nodes
   role: Node
   subnets:
   - us-test1
+  taints:
+  - a=b:c
   zones:
   - us-test1-a
   - us-test1-b

@@ -28,6 +28,8 @@ AmazonRoute53FullAccess
 AmazonS3FullAccess
 IAMFullAccess
 AmazonVPCFullAccess
+AmazonSQSFullAccess
+AmazonEventBridgeFullAccess
 ```
 
 You can create the kOps IAM user from the command line using the following:
@@ -70,7 +72,7 @@ somewhere to build the required DNS records.  There are three scenarios
 below and you should choose the one that most closely matches your AWS
 situation.
 
-Note: if you want to use [gossip-based DNS](../gossip.md), you can skip this section.
+Note: if you create a None-DNS cluster (`--dns=none`, the default unless a DNS zone is specified), you can skip this section.
 
 ### Scenario 1a: A Domain purchased/hosted via AWS
 
@@ -201,7 +203,7 @@ kops create cluster --dns private --dns-zone ZABCDEFG $NAME
 
 ## Testing your DNS setup
 
-This section is not required if a gossip-based cluster is created.
+This section is not required if a None-DNS cluster is created.
 
 You should now be able to dig your domain (or subdomain) and see the AWS Name
 Servers on the other end.
@@ -224,9 +226,9 @@ This is a critical component when setting up clusters. If you are experiencing
 problems with the Kubernetes API not coming up, chances are something is wrong
 with the cluster's DNS.
 
-**Please DO NOT MOVE ON until you have validated your NS records! This is not required if a gossip-based cluster is created.**
+**Please DO NOT MOVE ON until you have validated your NS records! This is not required if a None-DNS cluster is created.**
 
-## Cluster State storage
+## Cluster State store
 
 In order to store the state of your cluster, and the representation of your
 cluster, we need to create a dedicated S3 bucket for `kops` to use.  This
@@ -250,6 +252,25 @@ to revert or recover a previous state store.
 
 ```bash
 aws s3api put-bucket-versioning --bucket prefix-example-com-state-store  --versioning-configuration Status=Enabled
+```
+
+## Cluster OIDC store
+In order for ServiceAccounts to use external permissions (aka IAM Roles for ServiceAccounts), you also need a bucket for hosting the OIDC documents.
+While you can reuse the bucket above if you grant it a public ACL, we do recommend a separate bucket for these files.
+
+The ACL must be public so that the AWS STS service can access them.
+
+```bash
+aws s3api create-bucket \
+    --bucket prefix-example-com-oidc-store \
+    --region us-east-1 \
+    --object-ownership BucketOwnerPreferred
+aws s3api put-public-access-block \
+    --bucket prefix-example-com-oidc-store \
+    --public-access-block-configuration BlockPublicAcls=false,IgnorePublicAcls=false,BlockPublicPolicy=false,RestrictPublicBuckets=false
+aws s3api put-bucket-acl \
+    --bucket prefix-example-com-oidc-store \
+    --acl public-read
 ```
 
 Information regarding cluster state store location must be set when using `kops` cli. See [state store](../state.md) for further information.
@@ -295,7 +316,7 @@ export NAME=myfirstcluster.example.com
 export KOPS_STATE_STORE=s3://prefix-example-com-state-store
 ```
 
-For a gossip-based cluster, make sure the name ends with `k8s.local`. For example:
+For a None-DNS cluster, the name does not need to be a registered domain. For example:
 
 ```bash
 export NAME=myfirstcluster.k8s.local
@@ -321,8 +342,10 @@ it. Make sure you have generated an SSH key pair before creating your cluster.
 
 ```bash
 kops create cluster \
+    --name=${NAME} \
+    --cloud=aws \
     --zones=us-west-2a \
-    ${NAME}
+    --discovery-store=s3://prefix-example-com-oidc-store/${NAME}/discovery
 ```
 
 All instances created by `kops` will be built within ASG (Auto Scaling Groups),
@@ -335,7 +358,7 @@ Now we have a cluster configuration, we can look at every aspect that defines
 our cluster by editing the description.
 
 ```bash
-kops edit cluster ${NAME}
+kops edit cluster --name ${NAME}
 ```
 
 This opens your editor (as defined by $EDITOR) and allows you to edit the
@@ -352,7 +375,7 @@ while.  Once it finishes you'll have to wait longer while the booted instances
 finish downloading Kubernetes components and reach a "ready" state.
 
 ```bash
-kops update cluster ${NAME} --yes
+kops update cluster --name ${NAME} --yes --admin
 ```
 
 ### Use the Cluster
@@ -412,7 +435,7 @@ Now that you have a working kOps cluster, read through the [recommendations for 
 
 There's an incredible team behind kOps and we encourage you to reach out to the
 community on the Kubernetes
-Slack(<http://slack.k8s.io/>).  Bring your
+Slack (<http://slack.k8s.io/>).  Bring your
 questions, comments, and requests and meet the people behind the project!
 
 ## Legal

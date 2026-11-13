@@ -1,0 +1,12 @@
+metadata:
+  name: minimal.example.com
+spec:
+  api: {}
+  authorization:
+    rbac: {}
+  cloudProvider: {}
+  configStore: {}
+  kubernetesVersion: v1.26.0
+  networking:
+    topology:
+      dns: Public

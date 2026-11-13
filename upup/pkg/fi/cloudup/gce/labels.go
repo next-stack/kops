@@ -21,14 +21,21 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+
+	"k8s.io/kops/pkg/apis/kops"
+	"k8s.io/kops/upup/pkg/fi/cloudup/gce/gcenames"
 )
 
 const (
 	// The tag name we use to differentiate multiple logically independent clusters running in the same region
-	GceLabelNameKubernetesCluster = "k8s-io-cluster-name"
+	gceLabelNameKubernetesCluster = "k8s-io-cluster-name"
 
-	GceLabelNameRolePrefix        = "k8s-io-role-"
+	GceLabelNameInstanceGroup     = "k8s-io-instance-group"
+	GceLabelNameRolePrefix        = gcenames.GceLabelNameRolePrefix
 	GceLabelNameEtcdClusterPrefix = "k8s-io-etcd-"
+	ControlPlane                  = "control-plane"
+	Bastion                       = "bastion"
+	Node                          = "node"
 )
 
 // EncodeGCELabel encodes a string into an RFC1035 compatible value, suitable for use as GCE label key or value
@@ -36,7 +43,7 @@ const (
 func EncodeGCELabel(s string) string {
 	var b bytes.Buffer
 
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		c := s[i]
 		if ('0' <= c && c <= '9') || ('a' <= c && c <= 'z') {
 			b.WriteByte(c)
@@ -52,10 +59,15 @@ func EncodeGCELabel(s string) string {
 
 // DecodeGCELabel reverse EncodeGCELabel, taking the encoded RFC1035 compatible value back to a string
 func DecodeGCELabel(s string) (string, error) {
-	uriForm := strings.Replace(s, "-", "%", -1)
+	uriForm := strings.ReplaceAll(s, "-", "%")
 	v, err := url.QueryUnescape(uriForm)
 	if err != nil {
 		return "", fmt.Errorf("cannot decode GCE label: %q", s)
 	}
 	return v, nil
+}
+
+// TagForRole return the instance (network) tag used for instances with the given role.
+func TagForRole(clusterName string, role kops.InstanceGroupRole) string {
+	return gcenames.TagForRole(clusterName, role)
 }

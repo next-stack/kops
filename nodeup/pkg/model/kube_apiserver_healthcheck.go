@@ -17,6 +17,7 @@ limitations under the License.
 package model
 
 import (
+	"context"
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
@@ -28,18 +29,10 @@ import (
 )
 
 func (b *KubeAPIServerBuilder) findHealthcheckManifest() *nodeup.StaticManifest {
-	if b.NodeupConfig == nil {
-		return nil
-	}
-	for _, manifest := range b.NodeupConfig.StaticManifests {
-		if manifest.Key == "kube-apiserver-healthcheck" {
-			return manifest
-		}
-	}
-	return nil
+	return b.findStaticManifest("kube-apiserver-healthcheck")
 }
 
-func (b *KubeAPIServerBuilder) addHealthcheckSidecar(pod *corev1.Pod) error {
+func (b *KubeAPIServerBuilder) addHealthcheckSidecar(ctx context.Context, pod *corev1.Pod) error {
 	manifest := b.findHealthcheckManifest()
 	if manifest == nil {
 		return nil
@@ -47,14 +40,14 @@ func (b *KubeAPIServerBuilder) addHealthcheckSidecar(pod *corev1.Pod) error {
 
 	p := b.ConfigBase.Join(manifest.Path)
 
-	data, err := p.ReadFile()
+	data, err := p.ReadFile(ctx)
 	if err != nil {
-		return fmt.Errorf("error reading kube-apiserver-healthcheck manifest %s: %v", manifest.Path, err)
+		return fmt.Errorf("error reading kube-apiserver-healthcheck manifest %s: %w", p, err)
 	}
 
 	sidecar := &corev1.Pod{}
 	if err := yaml.Unmarshal(data, sidecar); err != nil {
-		return fmt.Errorf("error parsing kube-apiserver-healthcheck manifest %s: %v", manifest.Path, err)
+		return fmt.Errorf("error parsing kube-apiserver-healthcheck manifest %s: %w", p, err)
 	}
 
 	// Quick-and-dirty merge of the fields we care about
@@ -64,7 +57,7 @@ func (b *KubeAPIServerBuilder) addHealthcheckSidecar(pod *corev1.Pod) error {
 	return nil
 }
 
-func (b *KubeAPIServerBuilder) addHealthcheckSidecarTasks(c *fi.ModelBuilderContext) error {
+func (b *KubeAPIServerBuilder) addHealthcheckSidecarTasks(c *fi.NodeupModelBuilderContext) error {
 	id := "kube-apiserver-healthcheck"
 	secretsDir := "/etc/kubernetes/" + id + "/secrets"
 	userID := wellknownusers.KubeApiserverHealthcheckID

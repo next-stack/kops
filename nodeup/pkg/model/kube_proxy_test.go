@@ -21,12 +21,11 @@ import (
 	"testing"
 
 	"k8s.io/kops/pkg/apis/kops"
-	"k8s.io/kops/pkg/flagbuilder"
+	kopsmodel "k8s.io/kops/pkg/apis/kops/model"
+	"k8s.io/kops/pkg/apis/nodeup"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/util/pkg/architectures"
-	"k8s.io/kops/util/pkg/exec"
 
-	"github.com/blang/semver/v4"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -37,20 +36,15 @@ func TestKubeProxyBuilder_buildPod(t *testing.T) {
 	// https://pkg.go.dev/k8s.io/kops/pkg/apis/kops#ClusterSpec
 	// https://pkg.go.dev/k8s.io/kops/pkg/apis/kops#KubeProxyConfig
 
-	var cluster = &kops.Cluster{}
-	cluster.Spec.MasterInternalName = "dev-cluster"
+	kubeProxy := kops.KubeProxyConfig{
+		Image:      "kube-proxy:1.2",
+		CPURequest: resource.NewScaledQuantity(20, resource.Milli),
+		CPULimit:   resource.NewScaledQuantity(30, resource.Milli),
+	}
 
-	cluster.Spec.KubeProxy = &kops.KubeProxyConfig{}
-	cluster.Spec.KubeProxy.Image = "kube-proxy:1.2"
-	cluster.Spec.KubeProxy.CPURequest = "20m"
-	cluster.Spec.KubeProxy.CPULimit = "30m"
-
-	flags, _ := flagbuilder.BuildFlagsList(cluster.Spec.KubeProxy)
-
-	flags = append(flags, []string{
-		"--kubeconfig=/var/lib/kube-proxy/kubeconfig",
-		"--oom-score-adj=-998",
-		`--resource-container=""`}...)
+	nodeupConfig := &nodeup.Config{
+		KubeProxy: &kubeProxy,
+	}
 
 	type fields struct {
 		NodeupModelContext *NodeupModelContext
@@ -62,11 +56,11 @@ func TestKubeProxyBuilder_buildPod(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			"Setup KubeProxy for kubernetes version 1.20",
+			"Setup KubeProxy for kubernetes version 1.35",
 			fields{
 				&NodeupModelContext{
-					Cluster:           cluster,
-					kubernetesVersion: semver.Version{Major: 1, Minor: 20},
+					NodeupConfig:      nodeupConfig,
+					kubernetesVersion: kopsmodel.MustParseKubernetesVersion("1.35"),
 				},
 			},
 			&v1.Pod{
@@ -86,13 +80,13 @@ func TestKubeProxyBuilder_buildPod(t *testing.T) {
 							Image: "kube-proxy:1.2",
 							Resources: v1.ResourceRequirements{
 								Requests: v1.ResourceList{
-									v1.ResourceCPU: resource.MustParse("20m"),
+									v1.ResourceCPU: *resource.NewScaledQuantity(20, resource.Milli),
 								},
 								Limits: v1.ResourceList{
-									v1.ResourceCPU: resource.MustParse("30m"),
+									v1.ResourceCPU: *resource.NewScaledQuantity(30, resource.Milli),
 								},
 							},
-							Command: exec.WithTee("/usr/local/bin/kube-proxy", sortedStrings(flags), "/var/log/kube-proxy.log"),
+							Command: []string{"/go-runner"},
 						},
 					},
 				},
@@ -133,7 +127,6 @@ func TestKubeProxyBuilder_buildPod(t *testing.T) {
 			// compare pod spec container name
 			if !reflect.DeepEqual(got.Spec.Containers[0].Name, tt.want.Spec.Containers[0].Name) {
 				t.Errorf("KubeProxyBuilder.buildPod() Container Name = %v, want %v", got.Spec.Containers[0].Name, tt.want.Spec.Containers[0].Name)
-
 			}
 			// compare pod spec container Image
 			if !reflect.DeepEqual(got.Spec.Containers[0].Image, tt.want.Spec.Containers[0].Image) {
@@ -145,26 +138,30 @@ func TestKubeProxyBuilder_buildPod(t *testing.T) {
 				t.Errorf("KubeProxyBuilder.buildPod() Resources = %v, want %v", got.Spec.Containers[0].Resources, tt.want.Spec.Containers[0].Resources)
 			}
 
+			// compare pod spec container command
+			if !reflect.DeepEqual(got.Spec.Containers[0].Command, tt.want.Spec.Containers[0].Command) {
+				t.Errorf("KubeProxyBuilder.buildPod() Command = %v, want %v", got.Spec.Containers[0].Command, tt.want.Spec.Containers[0].Command)
+			}
 		})
 	}
 }
 
 func TestKubeProxyBuilder(t *testing.T) {
-	RunGoldenTest(t, "tests/golden/minimal", "kube-proxy", func(nodeupModelContext *NodeupModelContext, target *fi.ModelBuilderContext) error {
+	RunGoldenTest(t, "tests/golden/minimal", "kube-proxy", func(nodeupModelContext *NodeupModelContext, target *fi.NodeupModelBuilderContext) error {
 		builder := KubeProxyBuilder{NodeupModelContext: nodeupModelContext}
 		return builder.Build(target)
 	})
 }
 
 func TestKubeProxyBuilderAMD64(t *testing.T) {
-	RunGoldenTest(t, "tests/golden/side-loading", "kube-proxy-amd64", func(nodeupModelContext *NodeupModelContext, target *fi.ModelBuilderContext) error {
+	RunGoldenTest(t, "tests/golden/side-loading", "kube-proxy-amd64", func(nodeupModelContext *NodeupModelContext, target *fi.NodeupModelBuilderContext) error {
 		builder := KubeProxyBuilder{NodeupModelContext: nodeupModelContext}
 		return builder.Build(target)
 	})
 }
 
 func TestKubeProxyBuilderARM64(t *testing.T) {
-	RunGoldenTest(t, "tests/golden/side-loading", "kube-proxy-arm64", func(nodeupModelContext *NodeupModelContext, target *fi.ModelBuilderContext) error {
+	RunGoldenTest(t, "tests/golden/side-loading", "kube-proxy-arm64", func(nodeupModelContext *NodeupModelContext, target *fi.NodeupModelBuilderContext) error {
 		builder := KubeProxyBuilder{NodeupModelContext: nodeupModelContext}
 		builder.Architecture = architectures.ArchitectureArm64
 		return builder.Build(target)

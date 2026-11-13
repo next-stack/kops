@@ -5,7 +5,6 @@ AvailabilityZone: zone-1
 ConfigDrive: false
 Flavor: blc.2-4
 FloatingIP: null
-ForAPIServer: false
 GroupName: node
 ID: null
 Image: image-node
@@ -19,13 +18,13 @@ Metadata:
   cluster_generation: "0"
   ig_generation: "0"
   k8s: cluster
-  k8s.io_cluster-autoscaler_node-template_label_kubernetes.io_role: node
   k8s.io_cluster-autoscaler_node-template_label_node-role.kubernetes.io_node: ""
   k8s.io_role_node: "1"
   kops.k8s.io_instancegroup: node
 Name: node-1-cluster
 Port:
   AdditionalSecurityGroups: null
+  AllowedAddressPairs: null
   ID: null
   InstanceGroupName: node
   Lifecycle: Sync
@@ -55,6 +54,7 @@ Port:
   - KopsInstanceGroup=node
   - KopsName=port-node-1
   - KubernetesCluster=cluster
+  WellKnownServices: null
 Region: region
 Role: Node
 SSHKey: kubernetes.cluster-ba_d8_85_a0_5b_50_b0_01_e0_b2_b0_ae_5d_f6_7a_d1
@@ -62,22 +62,24 @@ SecurityGroups: null
 ServerGroup:
   ClusterName: cluster
   ID: null
-  IGName: node
+  IGMap:
+    node: 1
   Lifecycle: Sync
-  MaxSize: 1
   Name: cluster-node
   Policies:
   - soft-anti-affinity
+Status: null
 UserData:
   task:
     Lifecycle: ""
     Name: node
+WellKnownServices: null
 ---
 Lifecycle: ""
 Name: apiserver-aggregator-ca
 Signer: null
 alternateNames: null
-oldFormat: false
+issuer: ""
 subject: cn=apiserver-aggregator-ca
 type: ca
 ---
@@ -85,7 +87,7 @@ Lifecycle: ""
 Name: etcd-clients-ca
 Signer: null
 alternateNames: null
-oldFormat: false
+issuer: ""
 subject: cn=etcd-clients-ca
 type: ca
 ---
@@ -93,15 +95,23 @@ Lifecycle: ""
 Name: etcd-manager-ca-events
 Signer: null
 alternateNames: null
-oldFormat: false
+issuer: ""
 subject: cn=etcd-manager-ca-events
+type: ca
+---
+Lifecycle: ""
+Name: etcd-manager-ca-leases
+Signer: null
+alternateNames: null
+issuer: ""
+subject: cn=etcd-manager-ca-leases
 type: ca
 ---
 Lifecycle: ""
 Name: etcd-manager-ca-main
 Signer: null
 alternateNames: null
-oldFormat: false
+issuer: ""
 subject: cn=etcd-manager-ca-main
 type: ca
 ---
@@ -109,15 +119,23 @@ Lifecycle: ""
 Name: etcd-peers-ca-events
 Signer: null
 alternateNames: null
-oldFormat: false
+issuer: ""
 subject: cn=etcd-peers-ca-events
+type: ca
+---
+Lifecycle: ""
+Name: etcd-peers-ca-leases
+Signer: null
+alternateNames: null
+issuer: ""
+subject: cn=etcd-peers-ca-leases
 type: ca
 ---
 Lifecycle: ""
 Name: etcd-peers-ca-main
 Signer: null
 alternateNames: null
-oldFormat: false
+issuer: ""
 subject: cn=etcd-peers-ca-main
 type: ca
 ---
@@ -128,11 +146,11 @@ Signer:
   Name: kubernetes-ca
   Signer: null
   alternateNames: null
-  oldFormat: false
+  issuer: ""
   subject: cn=kubernetes
   type: ca
 alternateNames: null
-oldFormat: false
+issuer: ""
 subject: cn=kube-proxy
 type: client
 ---
@@ -143,11 +161,11 @@ Signer:
   Name: kubernetes-ca
   Signer: null
   alternateNames: null
-  oldFormat: false
+  issuer: ""
   subject: cn=kubernetes
   type: ca
 alternateNames: null
-oldFormat: false
+issuer: ""
 subject: cn=kubelet
 type: client
 ---
@@ -155,7 +173,7 @@ Lifecycle: ""
 Name: kubernetes-ca
 Signer: null
 alternateNames: null
-oldFormat: false
+issuer: ""
 subject: cn=kubernetes
 type: ca
 ---
@@ -163,7 +181,7 @@ Lifecycle: ""
 Name: service-account
 Signer: null
 alternateNames: null
-oldFormat: false
+issuer: ""
 subject: cn=service-account
 type: ca
 ---
@@ -175,9 +193,10 @@ Contents:
 Lifecycle: ""
 Location: igconfig/node/node/nodeupconfig.yaml
 Name: nodeupconfig-node
-Public: null
+PublicACL: null
 ---
 AdditionalSecurityGroups: null
+AllowedAddressPairs: null
 ID: null
 InstanceGroupName: node
 Lifecycle: Sync
@@ -207,12 +226,13 @@ Tags:
 - KopsInstanceGroup=node
 - KopsName=port-node-1
 - KubernetesCluster=cluster
+WellKnownServices: null
 ---
 ClusterName: cluster
 ID: null
-IGName: node
+IGMap:
+  node: 1
 Lifecycle: Sync
-MaxSize: 1
 Name: cluster-node
 Policies:
 - soft-anti-affinity

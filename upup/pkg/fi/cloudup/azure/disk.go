@@ -1,5 +1,5 @@
 /*
-Copyright 2020 The Kubernetes Authors.
+Copyright 2024 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,16 +18,18 @@ package azure
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
-	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2020-06-01/compute"
-	"github.com/Azure/go-autorest/autorest"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
+	compute "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v7"
 )
 
-// DisksClient is a client for managing VM Scale Set.
+// DisksClient is a client for managing disks.
 type DisksClient interface {
-	CreateOrUpdate(ctx context.Context, resourceGroupName, diskName string, parameters compute.Disk) error
-	List(ctx context.Context, resourceGroupName string) ([]compute.Disk, error)
+	CreateOrUpdate(ctx context.Context, resourceGroupName, diskName string, parameters compute.Disk) (*compute.Disk, error)
+	List(ctx context.Context, resourceGroupName string) ([]*compute.Disk, error)
 	Delete(ctx context.Context, resourceGroupName, diskname string) error
 }
 
@@ -35,39 +37,58 @@ type disksClientImpl struct {
 	c *compute.DisksClient
 }
 
-var _ DisksClient = &disksClientImpl{}
+var _ DisksClient = (*disksClientImpl)(nil)
 
-func (c *disksClientImpl) CreateOrUpdate(ctx context.Context, resourceGroupName, diskName string, parameters compute.Disk) error {
-	_, err := c.c.CreateOrUpdate(ctx, resourceGroupName, diskName, parameters)
-	return err
+func (c *disksClientImpl) CreateOrUpdate(ctx context.Context, resourceGroupName, diskName string, parameters compute.Disk) (*compute.Disk, error) {
+	future, err := c.c.BeginCreateOrUpdate(ctx, resourceGroupName, diskName, parameters, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating/updating disk: %w", err)
+	}
+	resp, err := future.PollUntilDone(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("waiting for disk create/update completion: %w", err)
+	}
+	return &resp.Disk, err
 }
 
-func (c *disksClientImpl) List(ctx context.Context, resourceGroupName string) ([]compute.Disk, error) {
-	var l []compute.Disk
-	for iter, err := c.c.ListByResourceGroupComplete(ctx, resourceGroupName); iter.NotDone(); err = iter.Next() {
+func (c *disksClientImpl) List(ctx context.Context, resourceGroupName string) ([]*compute.Disk, error) {
+	if resourceGroupName == "" {
+		return nil, nil
+	}
+
+	var l []*compute.Disk
+	pager := c.c.NewListByResourceGroupPager(resourceGroupName, nil)
+	for pager.More() {
+		resp, err := pager.NextPage(ctx)
 		if err != nil {
-			return nil, err
+			var respErr *azcore.ResponseError
+			if errors.As(err, &respErr) && respErr.ErrorCode == "ResourceGroupNotFound" {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("listing disks: %w", err)
 		}
-		l = append(l, iter.Value())
+		l = append(l, resp.Value...)
 	}
 	return l, nil
 }
 
 func (c *disksClientImpl) Delete(ctx context.Context, resourceGroupName, diskName string) error {
-	future, err := c.c.Delete(ctx, resourceGroupName, diskName)
+	future, err := c.c.BeginDelete(ctx, resourceGroupName, diskName, nil)
 	if err != nil {
-		return fmt.Errorf("error deleting disk: %s", err)
+		return fmt.Errorf("deleting disk: %w", err)
 	}
-	if err := future.WaitForCompletionRef(ctx, c.c.Client); err != nil {
-		return fmt.Errorf("error waiting for disk deletion completion: %s", err)
+	if _, err := future.PollUntilDone(ctx, nil); err != nil {
+		return fmt.Errorf("waiting for disk deletion completion: %w", err)
 	}
 	return nil
 }
 
-func newDisksClientImpl(subscriptionID string, authorizer autorest.Authorizer) *disksClientImpl {
-	c := compute.NewDisksClient(subscriptionID)
-	c.Authorizer = authorizer
-	return &disksClientImpl{
-		c: &c,
+func newDisksClientImpl(subscriptionID string, cred *azidentity.DefaultAzureCredential) (*disksClientImpl, error) {
+	c, err := compute.NewDisksClient(subscriptionID, cred, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating disks client: %w", err)
 	}
+	return &disksClientImpl{
+		c: c,
+	}, nil
 }

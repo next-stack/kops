@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
 	"k8s.io/klog/v2"
 
 	"k8s.io/kops/upup/pkg/fi"
@@ -30,7 +29,7 @@ type AWSAPITarget struct {
 	Cloud AWSCloud
 }
 
-var _ fi.Target = &AWSAPITarget{}
+var _ fi.CloudupTarget = (*AWSAPITarget)(nil)
 
 func NewAWSAPITarget(cloud AWSCloud) *AWSAPITarget {
 	return &AWSAPITarget{
@@ -38,11 +37,11 @@ func NewAWSAPITarget(cloud AWSCloud) *AWSAPITarget {
 	}
 }
 
-func (t *AWSAPITarget) ProcessDeletions() bool {
+func (t *AWSAPITarget) DefaultCheckExisting() bool {
 	return true
 }
 
-func (t *AWSAPITarget) Finish(taskMap map[string]fi.Task) error {
+func (t *AWSAPITarget) Finish(taskMap map[string]fi.CloudupTask) error {
 	return nil
 }
 
@@ -53,12 +52,15 @@ func (t *AWSAPITarget) AddAWSTags(id string, expected map[string]string) error {
 func (t *AWSAPITarget) GetTags(id string) (map[string]string, error) {
 	return t.Cloud.GetTags(id)
 }
+
 func (t *AWSAPITarget) CreateTags(id string, tags map[string]string) error {
 	return t.Cloud.CreateTags(id, tags)
 }
+
 func (t *AWSAPITarget) DeleteTags(id string, tags map[string]string) error {
 	return t.Cloud.DeleteTags(id, tags)
 }
+
 func (t *AWSAPITarget) UpdateTags(id string, tags map[string]string) error {
 	return t.Cloud.UpdateTags(id, tags)
 }
@@ -115,58 +117,6 @@ func (t *AWSAPITarget) RemoveELBV2Tags(ResourceArn string, expected map[string]s
 	return nil
 }
 
-func (t *AWSAPITarget) AddELBTags(loadBalancerName string, expected map[string]string) error {
-	actual, err := t.Cloud.GetELBTags(loadBalancerName)
-	if err != nil {
-		return fmt.Errorf("unexpected error fetching tags for resource: %v", err)
-	}
-
-	missing := map[string]string{}
-	for k, v := range expected {
-		actualValue, found := actual[k]
-		if found && actualValue == v {
-			continue
-		}
-		missing[k] = v
-	}
-
-	if len(missing) != 0 {
-		klog.V(4).Infof("adding tags to %q: %v", loadBalancerName, missing)
-		err := t.Cloud.CreateELBTags(loadBalancerName, missing)
-		if err != nil {
-			return fmt.Errorf("error adding tags to ELB %q: %v", loadBalancerName, err)
-		}
-	}
-
-	return nil
-}
-
-func (t *AWSAPITarget) RemoveELBTags(loadBalancerName string, expected map[string]string) error {
-	actual, err := t.Cloud.GetELBTags(loadBalancerName)
-	if err != nil {
-		return fmt.Errorf("unexpected error fetching tags for resource: %v", err)
-	}
-
-	extra := map[string]string{}
-	for k, v := range actual {
-		expectedValue, found := expected[k]
-		if found && expectedValue == v {
-			continue
-		}
-		extra[k] = v
-	}
-
-	if len(extra) != 0 {
-		klog.V(4).Infof("removing tags from %q: %v", loadBalancerName, extra)
-		err := t.Cloud.RemoveELBTags(loadBalancerName, extra)
-		if err != nil {
-			return fmt.Errorf("error removing tags from ELB %q: %v", loadBalancerName, err)
-		}
-	}
-
-	return nil
-}
-
 func (t *AWSAPITarget) WaitForInstanceRunning(instanceID string) error {
 	attempt := 0
 	for {
@@ -182,7 +132,7 @@ func (t *AWSAPITarget) WaitForInstanceRunning(instanceID string) error {
 
 		state := "?"
 		if instance.State != nil {
-			state = aws.StringValue(instance.State.Name)
+			state = string(instance.State.Name)
 		}
 		if state == "running" {
 			return nil

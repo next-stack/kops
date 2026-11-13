@@ -23,6 +23,7 @@ type ECSCluster struct {
 	AutoScaler  *ECSAutoScaler `json:"autoScaler,omitempty"`
 	Strategy    *ECSStrategy   `json:"strategy,omitempty"`
 	Scheduling  *ECSScheduling `json:"scheduling,omitempty"`
+	Logging     *ECSLogging    `json:"logging,omitempty"`
 
 	// Read-only fields.
 	CreatedAt *time.Time `json:"createdAt,omitempty"`
@@ -46,17 +47,64 @@ type ECSCluster struct {
 }
 
 type ECSStrategy struct {
-	DrainingTimeout          *int  `json:"drainingTimeout,omitempty"`
-	UtilizeReservedInstances *bool `json:"utilizeReservedInstances,omitempty"`
-	UtilizeCommitments       *bool `json:"utilizeCommitments,omitempty"`
+	DrainingTimeout          *int                   `json:"drainingTimeout,omitempty"`
+	UtilizeReservedInstances *bool                  `json:"utilizeReservedInstances,omitempty"`
+	UtilizeCommitments       *bool                  `json:"utilizeCommitments,omitempty"`
+	SpotPercentage           *int                   `json:"spotPercentage,omitempty"`
+	ClusterOrientation       *ECSClusterOrientation `json:"clusterOrientation,omitempty"`
 
 	forceSendFields []string
 	nullFields      []string
+}
+type ECSClusterOrientation struct {
+	AvailabilityVsCost *string `json:"availabilityVsCost,omitempty"`
+	forceSendFields    []string
+	nullFields         []string
+}
+
+func (o *ECSClusterOrientation) SetECSAvailabilityVsCost(v *string) *ECSClusterOrientation {
+	if o.AvailabilityVsCost = v; o.AvailabilityVsCost == nil {
+		o.nullFields = append(o.nullFields, "AvailabilityVsCost")
+	}
+	return o
+}
+
+func (o *ECSStrategy) SetECSClusterOrientation(v *ECSClusterOrientation) *ECSStrategy {
+	if o.ClusterOrientation = v; o.ClusterOrientation == nil {
+		o.nullFields = append(o.nullFields, "ClusterOrientation")
+	}
+	return o
+}
+func (o ECSClusterOrientation) MarshalJSON() ([]byte, error) {
+	type noMethod ECSClusterOrientation
+	raw := noMethod(o)
+	return jsonutil.MarshalJSON(raw, o.forceSendFields, o.nullFields)
 }
 
 type ECSScheduling struct {
 	Tasks         []*ECSTask        `json:"tasks,omitempty"`
 	ShutdownHours *ECSShutdownHours `json:"shutdownHours,omitempty"`
+
+	forceSendFields []string
+	nullFields      []string
+}
+
+type ECSLogging struct {
+	Export *ECSExport `json:"export,omitempty"`
+
+	forceSendFields []string
+	nullFields      []string
+}
+
+type ECSExport struct {
+	S3 *ECSS3 `json:"s3,omitempty"`
+
+	forceSendFields []string
+	nullFields      []string
+}
+
+type ECSS3 struct {
+	ID *string `json:"id,omitempty"`
 
 	forceSendFields []string
 	nullFields      []string
@@ -99,23 +147,52 @@ type ECSCompute struct {
 }
 
 type ECSInstanceTypes struct {
-	Whitelist []string `json:"whitelist,omitempty"`
+	Whitelist []string    `json:"whitelist,omitempty"`
+	Blacklist []string    `json:"blacklist,omitempty"`
+	Filters   *ECSFilters `json:"filters,omitempty"`
+
+	forceSendFields []string
+	nullFields      []string
+}
+
+type ECSFilters struct {
+	Architectures         []string `json:"architectures,omitempty"`
+	Categories            []string `json:"categories,omitempty"`
+	DiskTypes             []string `json:"diskTypes,omitempty"`
+	ExcludeFamilies       []string `json:"excludeFamilies,omitempty"`
+	ExcludeMetal          *bool    `json:"excludeMetal,omitempty"`
+	Hypervisor            []string `json:"hypervisor,omitempty"`
+	IncludeFamilies       []string `json:"includeFamilies,omitempty"`
+	IsEnaSupported        *bool    `json:"isEnaSupported,omitempty"`
+	MaxGpu                *int     `json:"maxGpu,omitempty"`
+	MaxMemoryGiB          *float64 `json:"maxMemoryGiB,omitempty"`
+	MaxNetworkPerformance *int     `json:"maxNetworkPerformance,omitempty"`
+	MaxVcpu               *int     `json:"maxVcpu,omitempty"`
+	MinEnis               *int     `json:"minEnis,omitempty"`
+	MinGpu                *int     `json:"minGpu,omitempty"`
+	MinMemoryGiB          *float64 `json:"minMemoryGiB,omitempty"`
+	MinNetworkPerformance *int     `json:"minNetworkPerformance,omitempty"`
+	MinVcpu               *int     `json:"minVcpu,omitempty"`
+	RootDeviceTypes       []string `json:"rootDeviceTypes,omitempty"`
+	VirtualizationTypes   []string `json:"virtualizationTypes,omitempty"`
 
 	forceSendFields []string
 	nullFields      []string
 }
 
 type ECSLaunchSpecification struct {
-	AssociatePublicIPAddress *bool                    `json:"associatePublicIpAddress,omitempty"`
-	SecurityGroupIDs         []string                 `json:"securityGroupIds,omitempty"`
-	ImageID                  *string                  `json:"imageId,omitempty"`
-	KeyPair                  *string                  `json:"keyPair,omitempty"`
-	UserData                 *string                  `json:"userData,omitempty"`
-	IAMInstanceProfile       *ECSIAMInstanceProfile   `json:"iamInstanceProfile,omitempty"`
-	Tags                     []*Tag                   `json:"tags,omitempty"`
-	Monitoring               *bool                    `json:"monitoring,omitempty"`
-	EBSOptimized             *bool                    `json:"ebsOptimized,omitempty"`
-	BlockDeviceMappings      []*ECSBlockDeviceMapping `json:"blockDeviceMappings,omitempty"`
+	AssociatePublicIPAddress *bool                       `json:"associatePublicIpAddress,omitempty"`
+	SecurityGroupIDs         []string                    `json:"securityGroupIds,omitempty"`
+	ImageID                  *string                     `json:"imageId,omitempty"`
+	KeyPair                  *string                     `json:"keyPair,omitempty"`
+	UserData                 *string                     `json:"userData,omitempty"`
+	IAMInstanceProfile       *ECSIAMInstanceProfile      `json:"iamInstanceProfile,omitempty"`
+	Tags                     []*Tag                      `json:"tags,omitempty"`
+	Monitoring               *bool                       `json:"monitoring,omitempty"`
+	EBSOptimized             *bool                       `json:"ebsOptimized,omitempty"`
+	BlockDeviceMappings      []*ECSBlockDeviceMapping    `json:"blockDeviceMappings,omitempty"`
+	InstanceMetadataOptions  *ECSInstanceMetadataOptions `json:"instanceMetadataOptions,omitempty"`
+	UseAsTemplateOnly        *bool                       `json:"useAsTemplateOnly,omitempty"`
 
 	forceSendFields []string
 	nullFields      []string
@@ -139,12 +216,15 @@ type ECSIAMInstanceProfile struct {
 }
 
 type ECSAutoScaler struct {
-	IsEnabled      *bool                        `json:"isEnabled,omitempty"`
-	IsAutoConfig   *bool                        `json:"isAutoConfig,omitempty"`
-	Cooldown       *int                         `json:"cooldown,omitempty"`
-	Headroom       *ECSAutoScalerHeadroom       `json:"headroom,omitempty"`
-	ResourceLimits *ECSAutoScalerResourceLimits `json:"resourceLimits,omitempty"`
-	Down           *ECSAutoScalerDown           `json:"down,omitempty"`
+	IsEnabled                        *bool                        `json:"isEnabled,omitempty"`
+	IsAutoConfig                     *bool                        `json:"isAutoConfig,omitempty"`
+	Cooldown                         *int                         `json:"cooldown,omitempty"`
+	Headroom                         *ECSAutoScalerHeadroom       `json:"headroom,omitempty"`
+	ResourceLimits                   *ECSAutoScalerResourceLimits `json:"resourceLimits,omitempty"`
+	Down                             *ECSAutoScalerDown           `json:"down,omitempty"`
+	AutoHeadroomPercentage           *int                         `json:"autoHeadroomPercentage,omitempty"`
+	ShouldScaleDownNonServiceTasks   *bool                        `json:"shouldScaleDownNonServiceTasks,omitempty"`
+	EnableAutomaticAndManualHeadroom *bool                        `json:"enableAutomaticAndManualHeadroom,omitempty"`
 
 	forceSendFields []string
 	nullFields      []string
@@ -219,11 +299,12 @@ type ECSRollClusterOutput struct {
 }
 
 type ECSRoll struct {
-	ClusterID           *string  `json:"clusterId,omitempty"`
-	Comment             *string  `json:"comment,omitempty"`
-	BatchSizePercentage *int     `json:"batchSizePercentage,omitempty"`
-	LaunchSpecIDs       []string `json:"launchSpecIds,omitempty"`
-	InstanceIDs         []string `json:"instanceIds,omitempty"`
+	ClusterID                 *string  `json:"clusterId,omitempty"`
+	Comment                   *string  `json:"comment,omitempty"`
+	BatchSizePercentage       *int     `json:"batchSizePercentage,omitempty"`
+	BatchMinHealthyPercentage *int     `json:"batchMinHealthyPercentage,omitempty"`
+	LaunchSpecIDs             []string `json:"launchSpecIds,omitempty"`
+	InstanceIDs               []string `json:"instanceIds,omitempty"`
 
 	forceSendFields []string
 	nullFields      []string
@@ -243,6 +324,14 @@ type ECSRollClusterStatus struct {
 type ECSProgress struct {
 	Unit  *string `json:"unit,omitempty"`
 	Value *int    `json:"value,omitempty"`
+}
+
+type ECSInstanceMetadataOptions struct {
+	HTTPTokens              *string `json:"httpTokens,omitempty"`
+	HTTPPutResponseHopLimit *int    `json:"httpPutResponseHopLimit,omitempty"`
+
+	forceSendFields []string
+	nullFields      []string
 }
 
 func ecsClusterFromJSON(in []byte) (*ECSCluster, error) {
@@ -565,6 +654,64 @@ func (o *ECSCluster) SetScheduling(v *ECSScheduling) *ECSCluster {
 	return o
 }
 
+func (o *ECSCluster) SetLogging(v *ECSLogging) *ECSCluster {
+	if o.Logging = v; o.Logging == nil {
+		o.nullFields = append(o.nullFields, "Logging")
+	}
+	return o
+}
+
+// endregion
+
+// region Logging
+
+func (o ECSLogging) MarshalJSON() ([]byte, error) {
+	type noMethod ECSLogging
+	raw := noMethod(o)
+	return jsonutil.MarshalJSON(raw, o.forceSendFields, o.nullFields)
+}
+
+func (o *ECSLogging) SetExport(v *ECSExport) *ECSLogging {
+	if o.Export = v; o.Export == nil {
+		o.nullFields = append(o.nullFields, "Export")
+	}
+	return o
+}
+
+// endregion
+
+// region Export
+
+func (o ECSExport) MarshalJSON() ([]byte, error) {
+	type noMethod ECSExport
+	raw := noMethod(o)
+	return jsonutil.MarshalJSON(raw, o.forceSendFields, o.nullFields)
+}
+
+func (o *ECSExport) SetS3(v *ECSS3) *ECSExport {
+	if o.S3 = v; o.S3 == nil {
+		o.nullFields = append(o.nullFields, "S3")
+	}
+	return o
+}
+
+// endregion
+
+// region S3
+
+func (o ECSS3) MarshalJSON() ([]byte, error) {
+	type noMethod ECSS3
+	raw := noMethod(o)
+	return jsonutil.MarshalJSON(raw, o.forceSendFields, o.nullFields)
+}
+
+func (o *ECSS3) SetId(v *string) *ECSS3 {
+	if o.ID = v; o.ID == nil {
+		o.nullFields = append(o.nullFields, "ID")
+	}
+	return o
+}
+
 // endregion
 
 // region Scheduling
@@ -713,6 +860,13 @@ func (o *ECSStrategy) SetUtilizeCommitments(v *bool) *ECSStrategy {
 	return o
 }
 
+func (o *ECSStrategy) SetSpotPercentage(v *int) *ECSStrategy {
+	if o.SpotPercentage = v; o.SpotPercentage == nil {
+		o.nullFields = append(o.nullFields, "SpotPercentage")
+	}
+	return o
+}
+
 // endregion
 
 // region InstanceTypes
@@ -726,6 +880,20 @@ func (o ECSInstanceTypes) MarshalJSON() ([]byte, error) {
 func (o *ECSInstanceTypes) SetWhitelist(v []string) *ECSInstanceTypes {
 	if o.Whitelist = v; o.Whitelist == nil {
 		o.nullFields = append(o.nullFields, "Whitelist")
+	}
+	return o
+}
+
+func (o *ECSInstanceTypes) SetBlacklist(v []string) *ECSInstanceTypes {
+	if o.Blacklist = v; o.Blacklist == nil {
+		o.nullFields = append(o.nullFields, "Blacklist")
+	}
+	return o
+}
+
+func (o *ECSInstanceTypes) SetFilters(v *ECSFilters) *ECSInstanceTypes {
+	if o.Filters = v; o.Filters == nil {
+		o.nullFields = append(o.nullFields, "Filters")
 	}
 	return o
 }
@@ -806,6 +974,20 @@ func (o *ECSLaunchSpecification) SetEBSOptimized(v *bool) *ECSLaunchSpecificatio
 func (o *ECSLaunchSpecification) SetBlockDeviceMappings(v []*ECSBlockDeviceMapping) *ECSLaunchSpecification {
 	if o.BlockDeviceMappings = v; o.BlockDeviceMappings == nil {
 		o.nullFields = append(o.nullFields, "BlockDeviceMappings")
+	}
+	return o
+}
+
+func (o *ECSLaunchSpecification) SetInstanceMetadataOptions(v *ECSInstanceMetadataOptions) *ECSLaunchSpecification {
+	if o.InstanceMetadataOptions = v; o.InstanceMetadataOptions == nil {
+		o.nullFields = append(o.nullFields, "InstanceMetadataOptions")
+	}
+	return o
+}
+
+func (o *ECSLaunchSpecification) SetUseAsTemplateOnly(v *bool) *ECSLaunchSpecification {
+	if o.UseAsTemplateOnly = v; o.UseAsTemplateOnly == nil {
+		o.nullFields = append(o.nullFields, "UseAsTemplateOnly")
 	}
 	return o
 }
@@ -917,6 +1099,27 @@ func (o *ECSAutoScaler) SetDown(v *ECSAutoScalerDown) *ECSAutoScaler {
 	return o
 }
 
+func (o *ECSAutoScaler) SetAutoHeadroomPercentage(v *int) *ECSAutoScaler {
+	if o.AutoHeadroomPercentage = v; o.AutoHeadroomPercentage == nil {
+		o.nullFields = append(o.nullFields, "AutoHeadroomPercentage")
+	}
+	return o
+}
+
+func (o *ECSAutoScaler) SetShouldScaleDownNonServiceTasks(v *bool) *ECSAutoScaler {
+	if o.ShouldScaleDownNonServiceTasks = v; o.ShouldScaleDownNonServiceTasks == nil {
+		o.nullFields = append(o.nullFields, "ShouldScaleDownNonServiceTasks")
+	}
+	return o
+}
+
+func (o *ECSAutoScaler) SetEnableAutomaticAndManualHeadroom(v *bool) *ECSAutoScaler {
+	if o.EnableAutomaticAndManualHeadroom = v; o.EnableAutomaticAndManualHeadroom == nil {
+		o.nullFields = append(o.nullFields, "EnableAutomaticAndManualHeadroom")
+	}
+	return o
+}
+
 // endregion
 
 // region AutoScalerHeadroom
@@ -1013,6 +1216,13 @@ func (o *ECSRoll) SetBatchSizePercentage(v *int) *ECSRoll {
 	return o
 }
 
+func (o *ECSRoll) SetBatchMinHealthyPercentage(v *int) *ECSRoll {
+	if o.BatchMinHealthyPercentage = v; o.BatchMinHealthyPercentage == nil {
+		o.nullFields = append(o.nullFields, "BatchMinHealthyPercentage")
+	}
+	return o
+}
+
 func (o *ECSRoll) SetLaunchSpecIDs(v []string) *ECSRoll {
 	if o.LaunchSpecIDs = v; o.LaunchSpecIDs == nil {
 		o.nullFields = append(o.nullFields, "LaunchSpecIDs")
@@ -1023,6 +1233,169 @@ func (o *ECSRoll) SetLaunchSpecIDs(v []string) *ECSRoll {
 func (o *ECSRoll) SetInstanceIDs(v []string) *ECSRoll {
 	if o.InstanceIDs = v; o.InstanceIDs == nil {
 		o.nullFields = append(o.nullFields, "InstanceIDs")
+	}
+	return o
+}
+
+// endregion
+
+// region InstanceMetadataOptions
+
+func (o ECSInstanceMetadataOptions) MarshalJSON() ([]byte, error) {
+	type noMethod ECSInstanceMetadataOptions
+	raw := noMethod(o)
+	return jsonutil.MarshalJSON(raw, o.forceSendFields, o.nullFields)
+}
+
+func (o *ECSInstanceMetadataOptions) SetHTTPTokens(v *string) *ECSInstanceMetadataOptions {
+	if o.HTTPTokens = v; o.HTTPTokens == nil {
+		o.nullFields = append(o.nullFields, "HTTPTokens")
+	}
+	return o
+}
+
+func (o *ECSInstanceMetadataOptions) SetHTTPPutResponseHopLimit(v *int) *ECSInstanceMetadataOptions {
+	if o.HTTPPutResponseHopLimit = v; o.HTTPPutResponseHopLimit == nil {
+		o.nullFields = append(o.nullFields, "HTTPPutResponseHopLimit")
+	}
+	return o
+}
+
+func (o ECSFilters) MarshalJSON() ([]byte, error) {
+	type noMethod Filters
+	raw := noMethod(o)
+	return jsonutil.MarshalJSON(raw, o.forceSendFields, o.nullFields)
+}
+
+func (o *ECSFilters) SetArchitectures(v []string) *ECSFilters {
+	if o.Architectures = v; o.Architectures == nil {
+		o.nullFields = append(o.nullFields, "Architectures")
+	}
+	return o
+}
+
+func (o *ECSFilters) SetCategories(v []string) *ECSFilters {
+	if o.Categories = v; o.Categories == nil {
+		o.nullFields = append(o.nullFields, "Categories")
+	}
+	return o
+}
+
+func (o *ECSFilters) SetDiskTypes(v []string) *ECSFilters {
+	if o.DiskTypes = v; o.DiskTypes == nil {
+		o.nullFields = append(o.nullFields, "DiskTypes")
+	}
+	return o
+}
+
+func (o *ECSFilters) SetExcludeFamilies(v []string) *ECSFilters {
+	if o.ExcludeFamilies = v; o.ExcludeFamilies == nil {
+		o.nullFields = append(o.nullFields, "ExcludeFamilies")
+	}
+	return o
+}
+
+func (o *ECSFilters) SetExcludeMetal(v *bool) *ECSFilters {
+	if o.ExcludeMetal = v; o.ExcludeMetal == nil {
+		o.nullFields = append(o.nullFields, "ExcludeMetal")
+	}
+	return o
+}
+
+func (o *ECSFilters) SetHypervisor(v []string) *ECSFilters {
+	if o.Hypervisor = v; o.Hypervisor == nil {
+		o.nullFields = append(o.nullFields, "Hypervisor")
+	}
+	return o
+}
+
+func (o *ECSFilters) SetIncludeFamilies(v []string) *ECSFilters {
+	if o.IncludeFamilies = v; o.IncludeFamilies == nil {
+		o.nullFields = append(o.nullFields, "IncludeFamilies")
+	}
+	return o
+}
+
+func (o *ECSFilters) SetIsEnaSupported(v *bool) *ECSFilters {
+	if o.IsEnaSupported = v; o.IsEnaSupported == nil {
+		o.nullFields = append(o.nullFields, "IsEnaSupported")
+	}
+	return o
+}
+
+func (o *ECSFilters) SetMaxGpu(v *int) *ECSFilters {
+	if o.MaxGpu = v; o.MaxGpu == nil {
+		o.nullFields = append(o.nullFields, "MaxGpu")
+	}
+	return o
+}
+
+func (o *ECSFilters) SetMaxMemoryGiB(v *float64) *ECSFilters {
+	if o.MaxMemoryGiB = v; o.MaxMemoryGiB == nil {
+		o.nullFields = append(o.nullFields, "MaxMemoryGiB")
+	}
+	return o
+}
+
+func (o *ECSFilters) SetMaxNetworkPerformance(v *int) *ECSFilters {
+	if o.MaxNetworkPerformance = v; o.MaxNetworkPerformance == nil {
+		o.nullFields = append(o.nullFields, "MaxNetworkPerformance")
+	}
+	return o
+}
+
+func (o *ECSFilters) SetMaxVcpu(v *int) *ECSFilters {
+	if o.MaxVcpu = v; o.MaxVcpu == nil {
+		o.nullFields = append(o.nullFields, "MaxVcpu")
+	}
+	return o
+}
+
+func (o *ECSFilters) SetMinEnis(v *int) *ECSFilters {
+	if o.MinEnis = v; o.MinEnis == nil {
+		o.nullFields = append(o.nullFields, "MinEnis")
+	}
+	return o
+}
+
+func (o *ECSFilters) SetMinGpu(v *int) *ECSFilters {
+	if o.MinGpu = v; o.MinGpu == nil {
+		o.nullFields = append(o.nullFields, "MinGpu")
+	}
+	return o
+}
+
+func (o *ECSFilters) SetMinMemoryGiB(v *float64) *ECSFilters {
+	if o.MinMemoryGiB = v; o.MinMemoryGiB == nil {
+		o.nullFields = append(o.nullFields, "MinMemoryGiB")
+	}
+	return o
+}
+
+func (o *ECSFilters) SetMinNetworkPerformance(v *int) *ECSFilters {
+	if o.MinNetworkPerformance = v; o.MinNetworkPerformance == nil {
+		o.nullFields = append(o.nullFields, "MinNetworkPerformance")
+	}
+	return o
+}
+
+func (o *ECSFilters) SetMinVcpu(v *int) *ECSFilters {
+	if o.MinVcpu = v; o.MinVcpu == nil {
+		o.nullFields = append(o.nullFields, "MinVcpu")
+	}
+	return o
+}
+
+func (o *ECSFilters) SetRootDeviceTypes(v []string) *ECSFilters {
+	if o.RootDeviceTypes = v; o.RootDeviceTypes == nil {
+		o.nullFields = append(o.nullFields, "RootDeviceTypes")
+	}
+	return o
+}
+
+func (o *ECSFilters) SetVirtualizationTypes(v []string) *ECSFilters {
+	if o.VirtualizationTypes = v; o.VirtualizationTypes == nil {
+		o.nullFields = append(o.nullFields, "VirtualizationTypes")
 	}
 	return o
 }

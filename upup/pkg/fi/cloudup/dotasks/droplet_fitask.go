@@ -27,7 +27,7 @@ import (
 
 // Droplet
 
-var _ fi.HasLifecycle = &Droplet{}
+var _ fi.HasLifecycle = (*Droplet)(nil)
 
 // GetLifecycle returns the Lifecycle of the object, implementing fi.HasLifecycle
 func (o *Droplet) GetLifecycle() fi.Lifecycle {
@@ -39,7 +39,7 @@ func (o *Droplet) SetLifecycle(lifecycle fi.Lifecycle) {
 	o.Lifecycle = lifecycle
 }
 
-var _ fi.HasName = &Droplet{}
+var _ fi.HasName = (*Droplet)(nil)
 
 // GetName returns the Name of the object, implementing fi.HasName
 func (o *Droplet) GetName() *string {
@@ -48,5 +48,5 @@ func (o *Droplet) GetName() *string {
 
 // String is the stringer function for the task, producing readable output using fi.TaskAsString
 func (o *Droplet) String() string {
-	return fi.TaskAsString(o)
+	return fi.CloudupTaskAsString(o)
 }

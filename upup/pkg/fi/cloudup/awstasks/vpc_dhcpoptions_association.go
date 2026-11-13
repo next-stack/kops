@@ -17,13 +17,13 @@ limitations under the License.
 package awstasks
 
 import (
+	"context"
 	"fmt"
 
-	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"k8s.io/klog/v2"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
-	"k8s.io/kops/upup/pkg/fi/cloudup/cloudformation"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraform"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraformWriter"
 )
@@ -37,8 +37,8 @@ type VPCDHCPOptionsAssociation struct {
 	DHCPOptions *DHCPOptions
 }
 
-func (e *VPCDHCPOptionsAssociation) Find(c *fi.Context) (*VPCDHCPOptionsAssociation, error) {
-	cloud := c.Cloud.(awsup.AWSCloud)
+func (e *VPCDHCPOptionsAssociation) Find(c *fi.CloudupContext) (*VPCDHCPOptionsAssociation, error) {
+	cloud := awsup.GetCloud(c)
 
 	vpcID := e.VPC.ID
 	dhcpOptionsID := e.DHCPOptions.ID
@@ -63,8 +63,8 @@ func (e *VPCDHCPOptionsAssociation) Find(c *fi.Context) (*VPCDHCPOptionsAssociat
 	return actual, nil
 }
 
-func (e *VPCDHCPOptionsAssociation) Run(c *fi.Context) error {
-	return fi.DefaultDeltaRunMethod(e, c)
+func (e *VPCDHCPOptionsAssociation) Run(c *fi.CloudupContext) error {
+	return fi.CloudupDefaultDeltaRunMethod(e, c)
 }
 
 func (s *VPCDHCPOptionsAssociation) CheckChanges(a, e, changes *VPCDHCPOptionsAssociation) error {
@@ -86,6 +86,7 @@ func (s *VPCDHCPOptionsAssociation) CheckChanges(a, e, changes *VPCDHCPOptionsAs
 }
 
 func (_ *VPCDHCPOptionsAssociation) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *VPCDHCPOptionsAssociation) error {
+	ctx := context.TODO()
 	if changes.DHCPOptions != nil {
 		klog.V(2).Infof("calling EC2 AssociateDhcpOptions")
 		request := &ec2.AssociateDhcpOptionsInput{
@@ -93,7 +94,7 @@ func (_ *VPCDHCPOptionsAssociation) RenderAWS(t *awsup.AWSAPITarget, a, e, chang
 			DhcpOptionsId: e.DHCPOptions.ID,
 		}
 
-		_, err := t.Cloud.EC2().AssociateDhcpOptions(request)
+		_, err := t.Cloud.EC2().AssociateDhcpOptions(ctx, request)
 		if err != nil {
 			return fmt.Errorf("error creating VPCDHCPOptionsAssociation: %v", err)
 		}
@@ -103,8 +104,8 @@ func (_ *VPCDHCPOptionsAssociation) RenderAWS(t *awsup.AWSAPITarget, a, e, chang
 }
 
 type terraformVPCDHCPOptionsAssociation struct {
-	VPCID         *terraformWriter.Literal `json:"vpc_id" cty:"vpc_id"`
-	DHCPOptionsID *terraformWriter.Literal `json:"dhcp_options_id" cty:"dhcp_options_id"`
+	VPCID         *terraformWriter.Literal `cty:"vpc_id"`
+	DHCPOptionsID *terraformWriter.Literal `cty:"dhcp_options_id"`
 }
 
 func (_ *VPCDHCPOptionsAssociation) RenderTerraform(t *terraform.TerraformTarget, a, e, changes *VPCDHCPOptionsAssociation) error {
@@ -114,18 +115,4 @@ func (_ *VPCDHCPOptionsAssociation) RenderTerraform(t *terraform.TerraformTarget
 	}
 
 	return t.RenderResource("aws_vpc_dhcp_options_association", *e.Name, tf)
-}
-
-type cloudformationVPCDHCPOptionsAssociation struct {
-	VpcId         *cloudformation.Literal `json:"VpcId"`
-	DhcpOptionsId *cloudformation.Literal `json:"DhcpOptionsId"`
-}
-
-func (_ *VPCDHCPOptionsAssociation) RenderCloudformation(t *cloudformation.CloudformationTarget, a, e, changes *VPCDHCPOptionsAssociation) error {
-	tf := &cloudformationVPCDHCPOptionsAssociation{
-		VpcId:         e.VPC.CloudformationLink(),
-		DhcpOptionsId: e.DHCPOptions.CloudformationLink(),
-	}
-
-	return t.RenderResource("AWS::EC2::VPCDHCPOptionsAssociation", *e.Name, tf)
 }

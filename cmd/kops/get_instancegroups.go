@@ -81,7 +81,7 @@ func NewCmdGetInstanceGroups(f *util.Factory, out io.Writer, getOptions *GetOpti
 			return completeInstanceGroup(f, &args, nil)(cmd, nil, toComplete)
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return RunGetInstanceGroups(context.TODO(), f, out, &options)
+			return RunGetInstanceGroups(cmd.Context(), f, out, &options)
 		},
 	}
 
@@ -89,7 +89,7 @@ func NewCmdGetInstanceGroups(f *util.Factory, out io.Writer, getOptions *GetOpti
 }
 
 func RunGetInstanceGroups(ctx context.Context, f commandutils.Factory, out io.Writer, options *GetInstanceGroupsOptions) error {
-	clientset, err := f.Clientset()
+	clientset, err := f.KopsClient()
 	if err != nil {
 		return err
 	}
@@ -113,8 +113,12 @@ func RunGetInstanceGroups(ctx context.Context, f commandutils.Factory, out io.Wr
 		return err
 	}
 
+	singleObject := false
+
 	if len(instancegroups) == 0 {
 		return fmt.Errorf("no InstanceGroup objects found")
+	} else if len(instancegroups) == 1 {
+		singleObject = true
 	}
 
 	var obj []runtime.Object
@@ -130,7 +134,7 @@ func RunGetInstanceGroups(ctx context.Context, f commandutils.Factory, out io.Wr
 	case OutputYaml:
 		return fullOutputYAML(out, obj...)
 	case OutputJSON:
-		return fullOutputJSON(out, obj...)
+		return fullOutputJSON(out, singleObject, obj...)
 	default:
 		return fmt.Errorf("unknown output format: %q", options.Output)
 	}

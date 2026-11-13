@@ -1,5 +1,5 @@
 /*
-Copyright 2020 The Kubernetes Authors.
+Copyright 2024 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,27 +22,35 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2020-06-01/compute"
-	"github.com/Azure/go-autorest/autorest/to"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
+	compute "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v7"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/kops/pkg/apis/kops"
 )
 
 type mockVMScaleSetsClient struct {
-	vmsses []compute.VirtualMachineScaleSet
+	vmsses []*compute.VirtualMachineScaleSet
 }
 
-var _ VMScaleSetsClient = &mockVMScaleSetsClient{}
+var _ VMScaleSetsClient = (*mockVMScaleSetsClient)(nil)
 
 // CreateOrUpdate creates or updates a VM Scale Set.
 func (c *mockVMScaleSetsClient) CreateOrUpdate(ctx context.Context, resourceGroupName, vmScaleSetName string, parameters compute.VirtualMachineScaleSet) (*compute.VirtualMachineScaleSet, error) {
-
 	return nil, fmt.Errorf("unimplemented")
 }
 
-func (c *mockVMScaleSetsClient) List(ctx context.Context, resourceGroupName string) ([]compute.VirtualMachineScaleSet, error) {
+func (c *mockVMScaleSetsClient) List(ctx context.Context, resourceGroupName string) ([]*compute.VirtualMachineScaleSet, error) {
 	return c.vmsses, nil
+}
+
+func (c *mockVMScaleSetsClient) Get(ctx context.Context, resourceGroupName string, vmssName string) (*compute.VirtualMachineScaleSet, error) {
+	for _, vmss := range c.vmsses {
+		if *vmss.Name == vmssName {
+			return vmss, nil
+		}
+	}
+	return nil, nil
 }
 
 func (c *mockVMScaleSetsClient) Delete(ctx context.Context, resourceGroupName, vmssName string) error {
@@ -50,13 +58,24 @@ func (c *mockVMScaleSetsClient) Delete(ctx context.Context, resourceGroupName, v
 }
 
 type mockVMScaleSetVMsClient struct {
-	vms []compute.VirtualMachineScaleSetVM
+	vms []*compute.VirtualMachineScaleSetVM
 }
 
-var _ VMScaleSetVMsClient = &mockVMScaleSetVMsClient{}
+var _ VMScaleSetVMsClient = (*mockVMScaleSetVMsClient)(nil)
 
-func (c *mockVMScaleSetVMsClient) List(ctx context.Context, resourceGroupName, vmssName string) ([]compute.VirtualMachineScaleSetVM, error) {
+func (c *mockVMScaleSetVMsClient) List(ctx context.Context, resourceGroupName, vmssName string) ([]*compute.VirtualMachineScaleSetVM, error) {
 	return c.vms, nil
+}
+
+func (c *mockVMScaleSetVMsClient) Delete(ctx context.Context, resourceGroupName, vmssName, instanceID string) error {
+	var l []*compute.VirtualMachineScaleSetVM
+	for _, vm := range c.vms {
+		if *vm.ID != instanceID {
+			l = append(l, vm)
+		}
+	}
+	c.vms = l
+	return nil
 }
 
 func TestFindEtcdStatus(t *testing.T) {
@@ -68,43 +87,46 @@ func TestFindEtcdStatus(t *testing.T) {
 	}
 
 	etcdClusterName := "main"
-	disks := []compute.Disk{
+	disks := []*compute.Disk{
 		{
-			Name: to.StringPtr("d0"),
+			Name: to.Ptr("d0"),
 			Tags: map[string]*string{
-				TagClusterName:                             to.StringPtr(clusterName),
-				TagNameRolePrefix + TagRoleMaster:          to.StringPtr("1"),
-				TagNameEtcdClusterPrefix + etcdClusterName: to.StringPtr("a/a,b,c"),
+				TagClusterName:                             to.Ptr(clusterName),
+				TagNameRolePrefix + TagRoleControlPlane:    to.Ptr("1"),
+				TagNameRolePrefix + TagRoleMaster:          to.Ptr("1"),
+				TagNameEtcdClusterPrefix + etcdClusterName: to.Ptr("a/a,b,c"),
 			},
 		},
 		{
-			Name: to.StringPtr("d1"),
+			Name: to.Ptr("d1"),
 			Tags: map[string]*string{
-				TagClusterName:                             to.StringPtr(clusterName),
-				TagNameRolePrefix + TagRoleMaster:          to.StringPtr("1"),
-				TagNameEtcdClusterPrefix + etcdClusterName: to.StringPtr("b/a,b,c"),
+				TagClusterName:                             to.Ptr(clusterName),
+				TagNameRolePrefix + TagRoleControlPlane:    to.Ptr("1"),
+				TagNameRolePrefix + TagRoleMaster:          to.Ptr("1"),
+				TagNameEtcdClusterPrefix + etcdClusterName: to.Ptr("b/a,b,c"),
 			},
 		},
 		{
-			Name: to.StringPtr("d2"),
+			Name: to.Ptr("d2"),
 			Tags: map[string]*string{
-				TagClusterName:                             to.StringPtr(clusterName),
-				TagNameRolePrefix + TagRoleMaster:          to.StringPtr("1"),
-				TagNameEtcdClusterPrefix + etcdClusterName: to.StringPtr("c/a,b,c"),
+				TagClusterName:                             to.Ptr(clusterName),
+				TagNameRolePrefix + TagRoleControlPlane:    to.Ptr("1"),
+				TagNameRolePrefix + TagRoleMaster:          to.Ptr("1"),
+				TagNameEtcdClusterPrefix + etcdClusterName: to.Ptr("c/a,b,c"),
 			},
 		},
 		{
 			// No etcd tag.
-			Name: to.StringPtr("not_relevant"),
+			Name: to.Ptr("not_relevant"),
 			Tags: map[string]*string{
-				TagClusterName: to.StringPtr("different_cluster"),
+				TagClusterName: to.Ptr("different_cluster"),
 			},
 		},
 		{
 			// No corresponding cluster tag.
-			Name: to.StringPtr("not_relevant"),
+			Name: to.Ptr("not_relevant"),
 			Tags: map[string]*string{
-				TagClusterName: to.StringPtr("different_cluster"),
+				TagClusterName: to.Ptr("different_cluster"),
 			},
 		},
 	}
@@ -127,15 +149,15 @@ func TestFindEtcdStatus(t *testing.T) {
 	expected := map[string]*kops.EtcdMemberStatus{
 		"a": {
 			Name:     "a",
-			VolumeId: "d0",
+			VolumeID: "d0",
 		},
 		"b": {
 			Name:     "b",
-			VolumeId: "d1",
+			VolumeID: "d1",
 		},
 		"c": {
 			Name:     "c",
-			VolumeId: "d2",
+			VolumeID: "d2",
 		},
 	}
 
@@ -160,36 +182,36 @@ func TestGetCloudGroups(t *testing.T) {
 
 	vmssClient := &mockVMScaleSetsClient{}
 	vmssClient.vmsses = append(vmssClient.vmsses,
-		compute.VirtualMachineScaleSet{
-			Name: to.StringPtr(masterVMSS),
+		&compute.VirtualMachineScaleSet{
+			Name: to.Ptr(masterVMSS),
 			Tags: map[string]*string{
-				TagClusterName: to.StringPtr(clusterName),
+				TagClusterName: to.Ptr(clusterName),
 			},
-			Sku: &compute.Sku{
-				Capacity: to.Int64Ptr(1),
+			SKU: &compute.SKU{
+				Capacity: to.Ptr[int64](1),
 			},
 		},
-		compute.VirtualMachineScaleSet{
-			Name: to.StringPtr(nodeVMSS),
+		&compute.VirtualMachineScaleSet{
+			Name: to.Ptr(nodeVMSS),
 			Tags: map[string]*string{
-				TagClusterName: to.StringPtr(clusterName),
+				TagClusterName: to.Ptr(clusterName),
 			},
-			Sku: &compute.Sku{
-				Capacity: to.Int64Ptr(2),
+			SKU: &compute.SKU{
+				Capacity: to.Ptr[int64](2),
 			},
 		},
 	)
 
 	vmClient := &mockVMScaleSetVMsClient{}
 	vmClient.vms = append(vmClient.vms,
-		compute.VirtualMachineScaleSetVM{
-			Name: to.StringPtr(masterVM),
+		&compute.VirtualMachineScaleSetVM{
+			Name: to.Ptr(masterVM),
 		},
-		compute.VirtualMachineScaleSetVM{
-			Name: to.StringPtr(nodeVM0),
+		&compute.VirtualMachineScaleSetVM{
+			Name: to.Ptr(nodeVM0),
 		},
-		compute.VirtualMachineScaleSetVM{
-			Name: to.StringPtr(nodeVM1),
+		&compute.VirtualMachineScaleSetVM{
+			Name: to.Ptr(nodeVM1),
 		},
 	)
 
@@ -206,8 +228,8 @@ func TestGetCloudGroups(t *testing.T) {
 			Name: clusterName,
 		},
 		Spec: kops.ClusterSpec{
-			CloudConfig: &kops.CloudConfiguration{
-				Azure: &kops.AzureConfiguration{
+			CloudProvider: kops.CloudProviderSpec{
+				Azure: &kops.AzureSpec{
 					ResourceGroupName: "my-rg",
 				},
 			},
@@ -220,7 +242,7 @@ func TestGetCloudGroups(t *testing.T) {
 				Name: masterIG,
 			},
 			Spec: kops.InstanceGroupSpec{
-				Role: kops.InstanceGroupRoleMaster,
+				Role: kops.InstanceGroupRoleControlPlane,
 			},
 		},
 		{
@@ -293,5 +315,198 @@ func TestGetCloudGroups(t *testing.T) {
 	}
 	if a, e := group.MaxSize, 2; a != e {
 		t.Fatalf("expected min size %d, but got %d", e, a)
+	}
+}
+
+func TestGetCloudGroupsNeedsUpdate(t *testing.T) {
+	const (
+		clusterName = "my-cluster"
+
+		nodeIG   = "nodes"
+		nodeVMSS = "nodes.my-cluster"
+		nodeVM   = "nodes.my-cluster_0"
+	)
+
+	testCases := []struct {
+		name string
+		// A nil value models Azure omitting all VM properties.
+		properties  *compute.VirtualMachineScaleSetVMProperties
+		needsUpdate bool
+	}{
+		{
+			name: "latest model applied",
+			properties: &compute.VirtualMachineScaleSetVMProperties{
+				LatestModelApplied: to.Ptr(true),
+			},
+		},
+		{
+			name: "scale set model changed",
+			properties: &compute.VirtualMachineScaleSetVMProperties{
+				LatestModelApplied: to.Ptr(false),
+			},
+			needsUpdate: true,
+		},
+		{
+			name:       "latest model applied not reported",
+			properties: &compute.VirtualMachineScaleSetVMProperties{},
+		},
+		{
+			name: "no properties reported",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			vmssClient := &mockVMScaleSetsClient{
+				vmsses: []*compute.VirtualMachineScaleSet{
+					{
+						Name: to.Ptr(nodeVMSS),
+						Tags: map[string]*string{
+							TagClusterName: to.Ptr(clusterName),
+						},
+						SKU: &compute.SKU{
+							Capacity: to.Ptr[int64](1),
+						},
+					},
+				},
+			}
+			vmClient := &mockVMScaleSetVMsClient{
+				vms: []*compute.VirtualMachineScaleSetVM{
+					{
+						Name:       to.Ptr(nodeVM),
+						Properties: tc.properties,
+					},
+				},
+			}
+
+			c := &azureCloudImplementation{
+				tags: map[string]string{
+					TagClusterName: clusterName,
+				},
+				vmscaleSetsClient:   vmssClient,
+				vmscaleSetVMsClient: vmClient,
+			}
+
+			cluster := &kops.Cluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: clusterName,
+				},
+				Spec: kops.ClusterSpec{
+					CloudProvider: kops.CloudProviderSpec{
+						Azure: &kops.AzureSpec{
+							ResourceGroupName: "my-rg",
+						},
+					},
+				},
+			}
+
+			instancegroups := []*kops.InstanceGroup{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: nodeIG,
+					},
+					Spec: kops.InstanceGroupSpec{
+						Role: kops.InstanceGroupRoleNode,
+					},
+				},
+			}
+
+			groups, err := c.GetCloudGroups(cluster, instancegroups, false /* warnUnmatched */, nil)
+			if err != nil {
+				t.Fatalf("unexpected error: %s", err)
+			}
+
+			group := groups[nodeIG]
+			if group == nil {
+				t.Fatalf("expected group %q, but found none", nodeIG)
+			}
+
+			needUpdate, ready := 1, 0
+			if !tc.needsUpdate {
+				needUpdate, ready = 0, 1
+			}
+			if a, e := len(group.NeedUpdate), needUpdate; a != e {
+				t.Errorf("expected %d instance(s) needing update, but found %d", e, a)
+			}
+			if a, e := len(group.Ready), ready; a != e {
+				t.Errorf("expected %d ready instance(s), but found %d", e, a)
+			}
+		})
+	}
+}
+
+func TestGetCloudGroupsVMScaleSetNames(t *testing.T) {
+	const clusterName = "my-cluster"
+	for _, test := range []struct {
+		name        string
+		vmssNames   []string
+		igTag       *string
+		owner       *string
+		extraIGName string
+		wantCount   int
+		wantError   bool
+	}{
+		{name: "short", vmssNames: []string{"nodes"}, owner: to.Ptr(clusterName), wantCount: 1},
+		{name: "legacy", vmssNames: []string{"nodes.my-cluster"}, owner: to.Ptr(clusterName), wantCount: 1},
+		{name: "legacy name with different casing", vmssNames: []string{"Nodes.My-Cluster"}, owner: to.Ptr(clusterName), wantCount: 1},
+		{name: "tagged", vmssNames: []string{"custom-name"}, igTag: to.Ptr("nodes"), owner: to.Ptr(clusterName), wantCount: 1},
+		{name: "tag takes precedence", vmssNames: []string{"nodes"}, igTag: to.Ptr("unknown"), owner: to.Ptr(clusterName)},
+		{name: "tag must not match a legacy alias", vmssNames: []string{"custom-name"}, igTag: to.Ptr("nodes.my-cluster"), owner: to.Ptr(clusterName)},
+		{name: "valid overlapping IG names", vmssNames: []string{"custom-name"}, igTag: to.Ptr("nodes"), owner: to.Ptr(clusterName), extraIGName: "nodes.my-cluster", wantCount: 1},
+		{name: "legacy name overlapping an IG name", vmssNames: []string{"nodes.my-cluster"}, owner: to.Ptr(clusterName), extraIGName: "nodes.my-cluster", wantCount: 1},
+		{name: "empty IG tag uses legacy name", vmssNames: []string{"nodes.my-cluster"}, igTag: to.Ptr(""), owner: to.Ptr(clusterName), wantCount: 1},
+		{name: "foreign cluster", vmssNames: []string{"nodes"}, igTag: to.Ptr("nodes"), owner: to.Ptr("other-cluster")},
+		{name: "missing ownership", vmssNames: []string{"nodes"}},
+		{name: "duplicate short and legacy", vmssNames: []string{"nodes", "nodes.my-cluster"}, owner: to.Ptr(clusterName), wantError: true},
+		{name: "duplicate tags", vmssNames: []string{"first", "second"}, igTag: to.Ptr("nodes"), owner: to.Ptr(clusterName), wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			vmsses := &mockVMScaleSetsClient{}
+			for _, name := range test.vmssNames {
+				vmsses.vmsses = append(vmsses.vmsses, &compute.VirtualMachineScaleSet{
+					Name: to.Ptr(name),
+					Tags: map[string]*string{TagClusterName: test.owner, InstanceGroupNameTag: test.igTag},
+					SKU:  &compute.SKU{Capacity: to.Ptr[int64](1)},
+				})
+			}
+			vmName := test.vmssNames[0] + "_0"
+			c := &azureCloudImplementation{
+				vmscaleSetsClient:   vmsses,
+				vmscaleSetVMsClient: &mockVMScaleSetVMsClient{vms: []*compute.VirtualMachineScaleSetVM{{Name: to.Ptr(vmName)}}},
+			}
+			cluster := &kops.Cluster{
+				ObjectMeta: metav1.ObjectMeta{Name: clusterName},
+				Spec:       kops.ClusterSpec{CloudProvider: kops.CloudProviderSpec{Azure: &kops.AzureSpec{ResourceGroupName: "my-rg"}}},
+			}
+			ig := &kops.InstanceGroup{ObjectMeta: metav1.ObjectMeta{Name: "nodes"}, Spec: kops.InstanceGroupSpec{Role: kops.InstanceGroupRoleNode}}
+			igs := []*kops.InstanceGroup{ig}
+			if test.extraIGName != "" {
+				igs = append(igs, &kops.InstanceGroup{ObjectMeta: metav1.ObjectMeta{Name: test.extraIGName}, Spec: kops.InstanceGroupSpec{Role: kops.InstanceGroupRoleNode}})
+			}
+			nodes := []v1.Node{{
+				ObjectMeta: metav1.ObjectMeta{Name: "nodes000000"},
+				Spec:       v1.NodeSpec{ProviderID: "azure:///subscriptions/sub/resourceGroups/my-rg/providers/Microsoft.Compute/virtualMachineScaleSets/" + test.vmssNames[0] + "/virtualMachines/0"},
+			}}
+			expectedNode := &nodes[0]
+			groups, err := c.GetCloudGroups(cluster, igs, false, nodes)
+			if (err != nil) != test.wantError {
+				t.Fatalf("GetCloudGroups error = %v, want error %v", err, test.wantError)
+			}
+			if test.wantError {
+				return
+			}
+			if len(groups) != test.wantCount {
+				t.Fatalf("got %d groups, want %d", len(groups), test.wantCount)
+			}
+			if test.wantCount > 0 {
+				group := groups[ig.Name]
+				if group == nil || group.HumanName != test.vmssNames[0] || group.InstanceGroup != ig {
+					t.Fatalf("unexpected cloud instance group: %+v", group)
+				}
+				if len(group.Ready) != 1 || group.Ready[0].Node != expectedNode {
+					t.Fatalf("VM was not associated with its Kubernetes node: %+v", group.Ready)
+				}
+			}
+		})
 	}
 }

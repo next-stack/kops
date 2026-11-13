@@ -17,15 +17,14 @@ limitations under the License.
 package awstasks
 
 import (
+	"context"
 	"fmt"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/awserr"
-	"github.com/aws/aws-sdk-go/service/iam"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"k8s.io/klog/v2"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
-	"k8s.io/kops/upup/pkg/fi/cloudup/cloudformation"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraform"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraformWriter"
 )
@@ -39,8 +38,9 @@ type IAMInstanceProfileRole struct {
 	Role            *IAMRole
 }
 
-func (e *IAMInstanceProfileRole) Find(c *fi.Context) (*IAMInstanceProfileRole, error) {
-	cloud := c.Cloud.(awsup.AWSCloud)
+func (e *IAMInstanceProfileRole) Find(c *fi.CloudupContext) (*IAMInstanceProfileRole, error) {
+	ctx := c.Context()
+	cloud := awsup.GetCloud(c)
 
 	if e.Role == nil || e.Role.ID == nil {
 		klog.V(2).Infof("Role/RoleID not set")
@@ -50,11 +50,9 @@ func (e *IAMInstanceProfileRole) Find(c *fi.Context) (*IAMInstanceProfileRole, e
 
 	request := &iam.GetInstanceProfileInput{InstanceProfileName: e.InstanceProfile.Name}
 
-	response, err := cloud.IAM().GetInstanceProfile(request)
-	if awsErr, ok := err.(awserr.Error); ok {
-		if awsErr.Code() == iam.ErrCodeNoSuchEntityException {
-			return nil, nil
-		}
+	response, err := cloud.IAM().GetInstanceProfile(ctx, request)
+	if awsup.IsIAMNoSuchEntityException(err) {
+		return nil, nil
 	}
 
 	if err != nil {
@@ -63,7 +61,7 @@ func (e *IAMInstanceProfileRole) Find(c *fi.Context) (*IAMInstanceProfileRole, e
 
 	ip := response.InstanceProfile
 	for _, role := range ip.Roles {
-		if aws.StringValue(role.RoleId) != roleID {
+		if aws.ToString(role.RoleId) != roleID {
 			continue
 		}
 		actual := &IAMInstanceProfileRole{}
@@ -79,8 +77,8 @@ func (e *IAMInstanceProfileRole) Find(c *fi.Context) (*IAMInstanceProfileRole, e
 	return nil, nil
 }
 
-func (e *IAMInstanceProfileRole) Run(c *fi.Context) error {
-	return fi.DefaultDeltaRunMethod(e, c)
+func (e *IAMInstanceProfileRole) Run(c *fi.CloudupContext) error {
+	return fi.CloudupDefaultDeltaRunMethod(e, c)
 }
 
 func (s *IAMInstanceProfileRole) CheckChanges(a, e, changes *IAMInstanceProfileRole) error {
@@ -96,13 +94,14 @@ func (s *IAMInstanceProfileRole) CheckChanges(a, e, changes *IAMInstanceProfileR
 }
 
 func (_ *IAMInstanceProfileRole) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *IAMInstanceProfileRole) error {
+	ctx := context.TODO()
 	if a == nil {
 		request := &iam.AddRoleToInstanceProfileInput{
 			InstanceProfileName: e.InstanceProfile.Name,
 			RoleName:            e.Role.Name,
 		}
 
-		_, err := t.Cloud.IAM().AddRoleToInstanceProfile(request)
+		_, err := t.Cloud.IAM().AddRoleToInstanceProfile(ctx, request)
 		if err != nil {
 			return fmt.Errorf("error creating IAMInstanceProfileRole: %v", err)
 		}
@@ -111,9 +110,9 @@ func (_ *IAMInstanceProfileRole) RenderAWS(t *awsup.AWSAPITarget, a, e, changes 
 }
 
 type terraformIAMInstanceProfile struct {
-	Name *string                  `json:"name" cty:"name"`
-	Role *terraformWriter.Literal `json:"role" cty:"role"`
-	Tags map[string]string        `json:"tags,omitempty" cty:"tags"`
+	Name *string                  `cty:"name"`
+	Role *terraformWriter.Literal `cty:"role"`
+	Tags map[string]string        `cty:"tags"`
 }
 
 func (_ *IAMInstanceProfileRole) RenderTerraform(t *terraform.TerraformTarget, a, e, changes *IAMInstanceProfileRole) error {
@@ -124,19 +123,4 @@ func (_ *IAMInstanceProfileRole) RenderTerraform(t *terraform.TerraformTarget, a
 	}
 
 	return t.RenderResource("aws_iam_instance_profile", *e.InstanceProfile.Name, tf)
-}
-
-type cloudformationIAMInstanceProfile struct {
-	InstanceProfileName *string                   `json:"InstanceProfileName"`
-	Roles               []*cloudformation.Literal `json:"Roles"`
-	// TODO: Add tags when Cloudformation supports them
-}
-
-func (_ *IAMInstanceProfileRole) RenderCloudformation(t *cloudformation.CloudformationTarget, a, e, changes *IAMInstanceProfileRole) error {
-	cf := &cloudformationIAMInstanceProfile{
-		InstanceProfileName: e.InstanceProfile.Name,
-		Roles:               []*cloudformation.Literal{e.Role.CloudformationLink()},
-	}
-
-	return t.RenderResource("AWS::IAM::InstanceProfile", *e.InstanceProfile.Name, cf)
 }

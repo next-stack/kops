@@ -21,7 +21,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -29,9 +28,15 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
+	"k8s.io/kops/pkg/resources"
 )
+
+// SSHAccessGranter grants short-lived SSH access to a cloud instance before the dumper connects.
+// instanceID matches resources.Instance.Name. AWS implements this with EC2 Instance Connect.
+type SSHAccessGranter func(ctx context.Context, instanceID string) error
 
 // logDumper gets all the nodes from a kubernetes cluster and dumps a well-known set of logs
 type logDumper struct {
@@ -39,20 +44,40 @@ type logDumper struct {
 
 	artifactsDir string
 
+	// nodeDumpTimeout bounds the time spent connecting to and dumping a single node.
+	nodeDumpTimeout time.Duration
+
 	services     []string
 	files        []string
 	podSelectors []string
+
+	// dumpBGP enables the Calico BIRD captures, which are meaningless on other CNIs.
+	dumpBGP bool
+
+	// sshAccessGranter grants short-lived SSH access to a node before connecting. On AWS it uses
+	// EC2 Instance Connect so Karpenter nodes, lacking the cluster SSH key pair, are reachable.
+	sshAccessGranter SSHAccessGranter
 }
 
 // NewLogDumper is the constructor for a logDumper
-func NewLogDumper(sshConfig *ssh.ClientConfig, artifactsDir string) *logDumper {
+func NewLogDumper(bastionAddress string, sshConfig *ssh.ClientConfig, keyRing agent.Agent, artifactsDir string, nodeDumpTimeout time.Duration) *logDumper {
 	sshClientFactory := &sshClientFactoryImplementation{
+		keyRing:   keyRing,
 		sshConfig: sshConfig,
+	}
+	if bastionAddress != "" {
+		klog.Infof("detected a bastion instance, with the address: %s", bastionAddress)
+		sshClientFactory.bastion = bastionAddress
+	}
+
+	if nodeDumpTimeout <= 0 {
+		nodeDumpTimeout = defaultNodeDumpTimeout
 	}
 
 	d := &logDumper{
 		sshClientFactory: sshClientFactory,
 		artifactsDir:     artifactsDir,
+		nodeDumpTimeout:  nodeDumpTimeout,
 	}
 
 	d.services = []string{
@@ -61,9 +86,9 @@ func NewLogDumper(sshConfig *ssh.ClientConfig, artifactsDir string) *logDumper {
 		"containerd",
 		"docker",
 		"kops-configuration",
-		"protokube",
 	}
 	d.files = []string{
+		"kops-controller",
 		"kube-apiserver",
 		"kube-scheduler",
 		"rescheduler",
@@ -71,6 +96,7 @@ func NewLogDumper(sshConfig *ssh.ClientConfig, artifactsDir string) *logDumper {
 		"etcd",
 		"etcd-events",
 		"etcd-cilium",
+		"etcd-leases",
 		"glbc",
 		"cluster-autoscaler",
 		"kube-addon-manager",
@@ -81,13 +107,37 @@ func NewLogDumper(sshConfig *ssh.ClientConfig, artifactsDir string) *logDumper {
 		"startupscript",
 		"kern",
 		"docker",
+		"aws-routed-eni/ipamd",
+		"aws-routed-eni/plugin",
 	}
 	d.podSelectors = []string{
 		"k8s-app=external-dns",
 		"k8s-app=dns-controller",
+		"k8s-app=kops-channels",
 	}
 
 	return d
+}
+
+// SetSSHAccessGranter registers a hook to grant SSH access to a node before connecting.
+func (d *logDumper) SetSSHAccessGranter(granter SSHAccessGranter) {
+	d.sshAccessGranter = granter
+}
+
+// SetDumpBGP enables capturing Calico BIRD session state from each node.
+func (d *logDumper) SetDumpBGP(enabled bool) {
+	d.dumpBGP = enabled
+}
+
+// grantSSHAccess best-effort grants SSH access before connecting. Failures are non-fatal: some
+// nodes already trust our key (e.g. control plane via its launch template key pair).
+func (d *logDumper) grantSSHAccess(ctx context.Context, instanceID string) {
+	if d.sshAccessGranter == nil || instanceID == "" {
+		return
+	}
+	if err := d.sshAccessGranter(ctx, instanceID); err != nil {
+		klog.Infof("could not grant SSH access to instance %s: %v", instanceID, err)
+	}
 }
 
 // DumpAllNodes connects to every node from kubectl get nodes and dumps the logs.
@@ -95,79 +145,170 @@ func NewLogDumper(sshConfig *ssh.ClientConfig, artifactsDir string) *logDumper {
 // if the IPs are not found from kubectl get nodes, then these will be dumped also.
 // This allows for dumping log on nodes even if they don't register as a kubernetes
 // node, or if a node fails to register, or if the whole cluster fails to start.
-func (d *logDumper) DumpAllNodes(ctx context.Context, nodes corev1.NodeList, additionalIPs []string) error {
-	var dumped []*corev1.Node
+func (d *logDumper) DumpAllNodes(ctx context.Context, nodes corev1.NodeList, maxNodesToDump int, cloudDump *resources.Dump) error {
+	var special, regular []*corev1.Node
+	var missingK8sNodes []*resources.Instance
+	var dumped []string
 
-	for i := range nodes.Items {
-		if ctx.Err() != nil {
-			log.Printf("stopping dumping nodes: %v", ctx.Err())
-			return ctx.Err()
-		}
+	foundInstanceNames := make(map[string]struct{})
 
-		node := &nodes.Items[i]
+	var cloudInstances []*resources.Instance
 
-		ip := ""
-		for _, address := range node.Status.Addresses {
-			if address.Type == "ExternalIP" {
-				ip = address.Address
-				break
+	if cloudDump != nil {
+		cloudInstances = cloudDump.Instances
+	}
+
+	for _, cloudNode := range cloudInstances {
+		for _, k8sNode := range nodes.Items {
+			if k8sNode.Name == cloudNode.Name {
+				foundInstanceNames[cloudNode.Name] = struct{}{}
+				if _, ok := k8sNode.Labels["node-role.kubernetes.io/master"]; ok {
+					special = append(special, &k8sNode)
+					continue
+				}
+				if _, ok := k8sNode.Labels["node-role.kubernetes.io/control-plane"]; ok {
+					special = append(special, &k8sNode)
+					continue
+				}
+				if _, ok := k8sNode.Labels["node-role.kubernetes.io/api-server"]; ok {
+					special = append(special, &k8sNode)
+					continue
+				}
+				regular = append(regular, &k8sNode)
 			}
-		}
-
-		err := d.dumpNode(ctx, node.Name, ip)
-		if err != nil {
-			log.Printf("could not dump node %s (%s): %v", node.Name, ip, err)
-		} else {
-			dumped = append(dumped, node)
 		}
 	}
 
-	notDumped := findInstancesNotDumped(additionalIPs, dumped)
-	for _, ip := range notDumped {
-		if ctx.Err() != nil {
-			log.Printf("stopping dumping nodes: %v", ctx.Err())
-			return ctx.Err()
+	for _, cloudNode := range cloudInstances {
+		if _, found := foundInstanceNames[cloudNode.Name]; !found {
+			missingK8sNodes = append(missingK8sNodes, cloudNode)
 		}
+	}
 
-		log.Printf("dumping node not registered in kubernetes: %s", ip)
-		err := d.dumpNode(ctx, ip, ip)
+	if len(missingK8sNodes) > 0 {
+		klog.V(2).Infof("number of nodes from kubernetes (%d) differs from number of instances from cloud resources (%d)", len(nodes.Items), len(cloudInstances))
+	}
+
+	// Dumping priority
+	// 1. control plane & special nodes
+	// 2. IP of nodes that haven't joined the kubernetes cluster aka unregistered nodes
+	// 3. remaining Kubernetes
+
+	klog.Infof("starting to dump %d control plane nodes fetched through the Kubernetes APIs", len(special))
+
+	for i := range special {
+		node := special[i]
+		ip, err := d.dumpRegistered(ctx, node)
 		if err != nil {
-			log.Printf("error dumping node %s: %v", ip, err)
+			klog.Infof("could not dump node %s: %v", node.Name, err)
+		} else {
+			dumped = append(dumped, ip)
+		}
+	}
+
+	for i := range missingK8sNodes {
+		if len(dumped) >= maxNodesToDump {
+			klog.Infof("stopping dumping nodes: %d nodes dumped", maxNodesToDump)
+			return nil
+		}
+		node := missingK8sNodes[i]
+		ip, err := d.dumpNotRegistered(ctx, node)
+		if err != nil {
+			klog.Infof("could not dump node %s: %v", node.Name, err)
+		} else {
+			dumped = append(dumped, ip)
+		}
+	}
+
+	for i := range regular {
+		if len(dumped) >= maxNodesToDump {
+			klog.Infof("stopping dumping nodes: %d nodes dumped", maxNodesToDump)
+			return nil
+		}
+		node := regular[i]
+		ip, err := d.dumpRegistered(ctx, node)
+		if err != nil {
+			klog.Infof("could not dump node %s: %v", node.Name, err)
+		} else {
+			dumped = append(dumped, ip)
 		}
 	}
 
 	return nil
 }
 
-// findInstancesNotDumped returns ips from the slice that do not appear as any address of the nodes
-func findInstancesNotDumped(ips []string, dumped []*corev1.Node) []string {
-	var notDumped []string
-	dumpedAddresses := make(map[string]bool)
-	for _, node := range dumped {
-		for _, address := range node.Status.Addresses {
-			dumpedAddresses[address.Address] = true
+func (d *logDumper) dumpRegistered(ctx context.Context, node *corev1.Node) (string, error) {
+	if ctx.Err() != nil {
+		klog.Infof("stopping dumping nodes: %v", ctx.Err())
+		return "", ctx.Err()
+	}
+
+	d.grantSSHAccess(ctx, node.Name)
+
+	var publicIP, privateIP string
+	for _, address := range node.Status.Addresses {
+		if address.Type == "ExternalIP" {
+			publicIP = address.Address
+			break
+		} else if address.Type == "InternalIP" {
+			if privateIP == "" {
+				privateIP = address.Address
+			}
 		}
 	}
 
-	for _, ip := range ips {
-		if !dumpedAddresses[ip] {
-			notDumped = append(notDumped, ip)
+	if publicIP != "" {
+		return publicIP, d.dumpNode(ctx, node.Name, publicIP, false)
+	} else {
+		useBastion := true
+		if !d.sshClientFactory.HasBastion() {
+			klog.Warningf("no bastion address set, will attempt to connect to node %s directly via private IP %v", node.Name, privateIP)
+			useBastion = false
 		}
+		return privateIP, d.dumpNode(ctx, node.Name, privateIP, useBastion)
 	}
-	return notDumped
 }
 
+func (d *logDumper) dumpNotRegistered(ctx context.Context, node *resources.Instance) (string, error) {
+	if ctx.Err() != nil {
+		klog.Infof("stopping dumping nodes: %v", ctx.Err())
+		return "", ctx.Err()
+	}
+
+	klog.Infof("dumping node not registered in kubernetes: %s", node.Name)
+	d.grantSSHAccess(ctx, node.Name)
+	if len(node.PublicAddresses) > 0 {
+		return node.PublicAddresses[0], d.dumpNode(ctx, node.PublicAddresses[0], node.PublicAddresses[0], false)
+	}
+
+	if len(node.PrivateAddresses) > 0 {
+		return node.PrivateAddresses[0], d.dumpNode(ctx, node.PrivateAddresses[0], node.PrivateAddresses[0], true)
+	}
+	return "", fmt.Errorf("no known addresses for node %s", node.Name)
+}
+
+// defaultNodeDumpTimeout bounds the time spent connecting to and dumping a single node.
+// A healthy node dumps in well under a minute. Without this cap, an SSH operation
+// against an unreachable node blocks until the OS TCP timeout (~15 min) expires.
+// Large clusters dump multi-GB logs per node and need a higher value, configurable
+// via the --node-dump-timeout flag, because the files are dumped sequentially and a
+// single oversized log can otherwise exhaust the budget before the rest are read.
+const defaultNodeDumpTimeout = time.Minute
+
 // DumpNode connects to a node and dumps the logs.
-func (d *logDumper) dumpNode(ctx context.Context, name string, ip string) error {
+func (d *logDumper) dumpNode(ctx context.Context, name string, ip string, useBastion bool) error {
 	if ip == "" {
 		return fmt.Errorf("could not find address for %v, ", name)
 	}
 
-	log.Printf("Dumping node %s", name)
+	klog.Infof("Dumping node %s", name)
 
-	n, err := d.connectToNode(ctx, name, ip)
+	ctx, cancel := context.WithTimeout(ctx, d.nodeDumpTimeout)
+	defer cancel()
+
+	n, err := d.connectToNode(ctx, name, ip, useBastion)
 	if err != nil {
-		return fmt.Errorf("could not connect: %v", err)
+		return fmt.Errorf("connecting: %w", err)
 	}
 
 	// As long as we connect to the node we will not return an error;
@@ -176,11 +317,11 @@ func (d *logDumper) dumpNode(ctx context.Context, name string, ip string) error 
 	// TODO(justinsb): clean up / rationalize
 	errors := n.dump(ctx)
 	for _, e := range errors {
-		log.Printf("error dumping node %s: %v", name, e)
+		klog.Warningf("error dumping node %s: %v", name, e)
 	}
 
 	if err := n.Close(); err != nil {
-		log.Printf("error closing connection: %v", err)
+		klog.Warningf("error closing connection: %v", err)
 	}
 
 	return nil
@@ -196,7 +337,12 @@ type sshClient interface {
 
 // sshClientFactory is an interface abstracting to a node over SSH
 type sshClientFactory interface {
-	Dial(ctx context.Context, host string) (sshClient, error)
+	// Dial creates a new sshClient
+	Dial(ctx context.Context, host string, useBastion bool) (sshClient, error)
+
+	// HasBastion returns true if the sshClientFactory has a bastion configured.
+	// Calling Dial with useBastion=true will return an error if there is no bastion.
+	HasBastion() bool
 }
 
 // logDumperNode holds state for a particular node we are dumping
@@ -208,8 +354,8 @@ type logDumperNode struct {
 }
 
 // connectToNode makes an SSH connection to the node and returns a logDumperNode
-func (d *logDumper) connectToNode(ctx context.Context, nodeName string, host string) (*logDumperNode, error) {
-	client, err := d.sshClientFactory.Dial(ctx, host)
+func (d *logDumper) connectToNode(ctx context.Context, nodeName string, host string, useBastion bool) (*logDumperNode, error) {
+	client, err := d.sshClientFactory.Dial(ctx, host, useBastion)
 	if err != nil {
 		return nil, fmt.Errorf("unable to SSH to %q: %v", host, err)
 	}
@@ -260,6 +406,59 @@ func (n *logDumperNode) dump(ctx context.Context) []error {
 		}
 	}
 
+	// Capture iptables configuration
+	if err := n.shellToFile(ctx, "sudo iptables -t nat --list-rules", filepath.Join(n.dir, "iptables-nat.log")); err != nil {
+		errors = append(errors, err)
+	}
+	if err := n.shellToFile(ctx, "sudo iptables -t filter --list-rules", filepath.Join(n.dir, "iptables-filter.log")); err != nil {
+		errors = append(errors, err)
+	}
+	if err := n.shellToFile(ctx, "sudo nft list ruleset", filepath.Join(n.dir, "nftables-ruleset.log")); err != nil {
+		errors = append(errors, err)
+	}
+	if err := n.shellToFile(ctx, "ip route show table all", filepath.Join(n.dir, "ip-routes.log")); err != nil {
+		errors = append(errors, err)
+	}
+	if err := n.shellToFile(ctx, "ip rule list", filepath.Join(n.dir, "ip-rules.log")); err != nil {
+		errors = append(errors, err)
+	}
+	if err := n.shellToFile(ctx, "ip -s link", filepath.Join(n.dir, "ip-link.log")); err != nil {
+		errors = append(errors, err)
+	}
+	if err := n.shellToFile(ctx, "ss -s", filepath.Join(n.dir, "netstat.log")); err != nil {
+		errors = append(errors, err)
+	}
+
+	if n.dumper.dumpBGP {
+		// calico-node is hostNetwork, so the sockets and conntrack entries are visible
+		// from the host, but birdcl and the confd-generated config only exist inside
+		// the container -- hence the hop into bird's mount namespace. Without "show
+		// protocols all" there is no record of why a session failed to establish:
+		// BIRD reports a stuck peer only in its own state, and the calico-node pod log
+		// is collected with kubectl logs and routinely truncated past the point where
+		// the session was set up. The pgrep guard still matters here: Calico in VXLAN
+		// mode runs no BIRD at all.
+		const inBirdNS = `pid=$(pgrep -x bird 2>/dev/null | head -1); if [ -n "$pid" ]; then sudo nsenter -t "$pid" -m -- `
+		if err := n.shellToFile(ctx, inBirdNS+"birdcl -s /var/run/calico/bird.ctl show protocols all; fi", filepath.Join(n.dir, "bgp-protocols.log")); err != nil {
+			errors = append(errors, err)
+		}
+		if err := n.shellToFile(ctx, inBirdNS+"cat /etc/calico/confd/config/bird.cfg; fi", filepath.Join(n.dir, "bird.cfg")); err != nil {
+			errors = append(errors, err)
+		}
+		if err := n.shellToFile(ctx, "sudo ss -tanp state all '( sport = :179 or dport = :179 )'", filepath.Join(n.dir, "bgp-sockets.log")); err != nil {
+			errors = append(errors, err)
+		}
+		// The conntrack CLI is absent from most node images, so fall back to the kernel
+		// table, which is populated whenever kube-proxy is running. It cannot be guarded
+		// with a test: /proc/net/nf_conntrack is 0440 root:root and this shell is not
+		// root, so only the privileged read itself can tell us whether it is there.
+		const conntrack179 = `if command -v conntrack &> /dev/null; then sudo conntrack -L -p tcp --dport 179; ` +
+			`else sudo grep -E 'sport=179|dport=179' /proc/net/nf_conntrack 2>/dev/null || true; fi`
+		if err := n.shellToFile(ctx, conntrack179, filepath.Join(n.dir, "bgp-conntrack.log")); err != nil {
+			errors = append(errors, err)
+		}
+	}
+
 	// Capture any file logs where the files exist
 	fileList, err := n.findFiles(ctx, "/var/log")
 	if err != nil {
@@ -271,7 +470,7 @@ func (n *logDumperNode) dump(ctx context.Context) []error {
 			if !strings.HasPrefix(f, prefix) {
 				continue
 			}
-			if err := n.shellToFile(ctx, "sudo cat '"+strings.ReplaceAll(f, "'", "'\\''")+"'", filepath.Join(n.dir, filepath.Base(f))); err != nil {
+			if err := n.shellToFile(ctx, "sudo cat '"+strings.ReplaceAll(f, "'", "'\\''")+"'", filepath.Join(n.dir, strings.ReplaceAll(strings.TrimPrefix(f, "/var/log/"), "/", "_"))); err != nil {
 				errors = append(errors, err)
 			}
 		}
@@ -288,6 +487,34 @@ func (n *logDumperNode) dump(ctx context.Context) []error {
 	if err := n.shellToFile(ctx, "cat /etc/hosts", filepath.Join(n.dir, "etchosts")); err != nil {
 		errors = append(errors, err)
 	}
+	if err := n.shellToFile(ctx, "sysctl -a", filepath.Join(n.dir, "sysctls")); err != nil {
+		errors = append(errors, err)
+	}
+
+	if err := n.shellToFile(ctx, "cat /var/lib/kubelet/kubelet.conf", filepath.Join(n.dir, "kubelet.conf")); err != nil {
+		errors = append(errors, err)
+	}
+
+	if err := n.shellToFile(ctx, "cat /proc/modules", filepath.Join(n.dir, "modules")); err != nil {
+		errors = append(errors, err)
+	}
+
+	// Capture containerd configuration files (config.toml, CNI templates, certs.d hosts.toml).
+	containerdFiles, err := n.findFiles(ctx, "/etc/containerd")
+	if err != nil {
+		errors = append(errors, fmt.Errorf("error listing /etc/containerd: %v", err))
+	}
+	for _, f := range containerdFiles {
+		if !strings.HasSuffix(f, ".toml") && !strings.HasSuffix(f, ".template") {
+			continue
+		}
+		rel := strings.TrimPrefix(f, "/etc/containerd/")
+		dest := filepath.Join(n.dir, "containerd", rel)
+		cmd := "sudo cat '" + strings.ReplaceAll(f, "'", `'\''`) + "'"
+		if err := n.shellToFile(ctx, cmd, dest); err != nil {
+			errors = append(errors, err)
+		}
+	}
 
 	return errors
 }
@@ -297,7 +524,7 @@ func (n *logDumperNode) findFiles(ctx context.Context, dir string) ([]string, er
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
-	err := n.client.ExecPiped(ctx, "sudo find "+dir+" -print0", &stdout, &stderr)
+	err := n.client.ExecPiped(ctx, "sudo find "+dir+" -type f -print0", &stdout, &stderr)
 	if err != nil {
 		return nil, fmt.Errorf("error listing %q: %v", dir, err)
 	}
@@ -336,8 +563,8 @@ func (n *logDumperNode) listSystemdUnits(ctx context.Context) ([]string, error) 
 
 // shellToFile executes a command and copies the output to a file
 func (n *logDumperNode) shellToFile(ctx context.Context, command string, destPath string) error {
-	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
-		log.Printf("unable to mkdir on %q: %v", filepath.Dir(destPath), err)
+	if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
+		klog.Warningf("unable to mkdir on %q: %v", filepath.Dir(destPath), err)
 	}
 
 	f, err := os.Create(destPath)
@@ -355,7 +582,8 @@ func (n *logDumperNode) shellToFile(ctx context.Context, command string, destPat
 
 // sshClientImplementation is the default implementation of sshClient, binding to a *ssh.Client
 type sshClientImplementation struct {
-	client *ssh.Client
+	client    *ssh.Client
+	forwardTo string
 }
 
 var _ sshClient = &sshClientImplementation{}
@@ -375,17 +603,21 @@ func (s *sshClientImplementation) ExecPiped(ctx context.Context, cmd string, std
 		}
 		defer session.Close()
 
-		klog.V(2).Infof("running SSH command: %v", cmd)
-
 		session.Stdout = stdout
 		session.Stderr = stderr
+
+		if s.forwardTo != "" {
+			cmd = fmt.Sprintf("ssh -o 'StrictHostKeyChecking no' %s %s", quoteShell(s.forwardTo), quoteShell(cmd))
+		}
+
+		klog.V(2).Infof("running SSH command: %v", cmd)
 
 		finished <- session.Run(cmd)
 	}()
 
 	select {
 	case <-ctx.Done():
-		log.Print("closing SSH tcp connection due to context completion")
+		klog.Infof("closing SSH tcp connection due to context completion")
 
 		// terminate the TCP connection to force a disconnect - we assume everyone is using the same context.
 		// We could make this better by sending a signal on the session, waiting and then closing the session,
@@ -401,6 +633,22 @@ func (s *sshClientImplementation) ExecPiped(ctx context.Context, cmd string, std
 	}
 }
 
+func quoteShell(s string) string {
+	var q strings.Builder
+	q.WriteString("'")
+	for _, c := range s {
+		if c == '\'' || c == '\\' {
+			q.WriteString("'\\")
+		}
+		q.WriteRune(c)
+		if c == '\'' || c == '\\' {
+			q.WriteRune('\'')
+		}
+	}
+	q.WriteString("'")
+	return q.String()
+}
+
 // Close implements sshClientImplementation::Close
 func (s *sshClientImplementation) Close() error {
 	return s.client.Close()
@@ -408,20 +656,38 @@ func (s *sshClientImplementation) Close() error {
 
 // sshClientFactoryImplementation is the default implementation of sshClientFactory
 type sshClientFactoryImplementation struct {
+	bastion   string
 	sshConfig *ssh.ClientConfig
+	keyRing   agent.Agent
 }
 
 var _ sshClientFactory = &sshClientFactoryImplementation{}
 
+// HasBastion implements sshClientFactory::HasBastion
+func (f *sshClientFactoryImplementation) HasBastion() bool {
+	return f.bastion != ""
+}
+
 // Dial implements sshClientFactory::Dial
-func (f *sshClientFactoryImplementation) Dial(ctx context.Context, host string) (sshClient, error) {
-	addr := host + ":22"
+func (f *sshClientFactoryImplementation) Dial(ctx context.Context, host string, useBastion bool) (sshClient, error) {
+	addr := host
+	if useBastion {
+		if f.bastion == "" {
+			return nil, fmt.Errorf("bastion is not set, but useBastion is true")
+		}
+		addr = f.bastion
+	}
+
+	if addr == "" {
+		return nil, fmt.Errorf("host is empty")
+	}
+	addr = net.JoinHostPort(addr, "22")
 	d := net.Dialer{
-		Timeout: 15 * time.Second,
+		Timeout: 5 * time.Second,
 	}
 	conn, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error dialing tcp %s: %w", addr, err)
 	}
 
 	// We have a TCP connection; we will force-close it to support context cancellation
@@ -432,13 +698,35 @@ func (f *sshClientFactoryImplementation) Dial(ctx context.Context, host string) 
 		c, chans, reqs, err := ssh.NewClientConn(conn, addr, f.sshConfig)
 		if err == nil {
 			client = ssh.NewClient(c, chans, reqs)
+			if useBastion {
+				err = agent.ForwardToAgent(client, f.keyRing)
+				if err != nil {
+					err = fmt.Errorf("forwarding ssh auth to keyring: %w", err)
+				}
+			}
 		}
+
+		if err == nil && useBastion {
+			session, err := client.NewSession()
+			if err != nil {
+				finished <- fmt.Errorf("creating ssh session: %w", err)
+				return
+			}
+			defer session.Close()
+
+			err = agent.RequestAgentForwarding(session)
+			if err != nil {
+				finished <- fmt.Errorf("requesting agent forwarding: %w", err)
+				return
+			}
+		}
+
 		finished <- err
 	}()
 
 	select {
 	case <-ctx.Done():
-		log.Print("cancelling SSH tcp connection due to context completion")
+		klog.Infof("cancelling SSH tcp connection due to context completion")
 		conn.Close() // Close the TCP connection to force cancellation
 		<-finished   // Wait for cancellation
 		return nil, ctx.Err()
@@ -446,8 +734,12 @@ func (f *sshClientFactoryImplementation) Dial(ctx context.Context, host string) 
 		if err != nil {
 			return nil, err
 		}
+		if !useBastion {
+			host = ""
+		}
 		return &sshClientImplementation{
-			client: client,
+			client:    client,
+			forwardTo: host,
 		}, nil
 	}
 }

@@ -16,6 +16,54 @@ limitations under the License.
 
 package main // import "k8s.io/kops/cmd/kops"
 
+import (
+	"context"
+	"fmt"
+	"os"
+
+	"github.com/google/go-containerregistry/pkg/authn"
+	"github.com/google/go-containerregistry/pkg/crane"
+	"k8s.io/kops"
+	"k8s.io/kops/pkg/assets"
+)
+
 func main() {
-	Execute()
+	ctx := context.Background()
+	if err := run(ctx); err != nil {
+		os.Exit(1)
+	}
+}
+
+func run(ctx context.Context) error {
+	// Resolving image digests queries container registries, so only the CLI wires it up; runtime
+	// binaries (kops-controller, nodeup) deliberately do not link the registry client libraries.
+	assets.SetImageDigestResolver(func(image string) (string, error) {
+		return crane.Digest(image, crane.WithAuthFromKeychain(authn.DefaultKeychain))
+	})
+
+	// Set up OpenTelemetry.
+	serviceName := "kops"
+	serviceVersion := kops.Version
+	if kops.GitVersion != "" {
+		serviceVersion += ".git-" + kops.GitVersion
+	}
+
+	otelShutdown, err := setupOTelSDK(ctx, serviceName, serviceVersion)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return err
+	}
+	// Handle shutdown properly so nothing leaks.
+	defer func() {
+		// We use a background context because the main context has probably been shut down.
+		if err := otelShutdown(context.Background()); err != nil {
+			fmt.Fprintf(os.Stderr, "error shutting down otel: %v\n", err)
+		}
+	}()
+
+	if err := Execute(ctx); err != nil {
+		return err
+	}
+
+	return nil
 }

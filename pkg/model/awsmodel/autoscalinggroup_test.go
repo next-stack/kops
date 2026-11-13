@@ -35,8 +35,7 @@ const (
 )
 
 func buildMinimalCluster() *kops.Cluster {
-	return testutils.BuildMinimalCluster("testcluster.test.com")
-
+	return testutils.BuildMinimalClusterAWS("testcluster.test.com")
 }
 
 func buildNodeInstanceGroup(subnets ...string) *kops.InstanceGroup {
@@ -51,8 +50,11 @@ func buildNodeInstanceGroup(subnets ...string) *kops.InstanceGroup {
 // Tests that RootVolumeOptimization flag gets added to the awstasks
 func TestRootVolumeOptimizationFlag(t *testing.T) {
 	cluster := buildMinimalCluster()
-	ig := buildNodeInstanceGroup("subnet-us-mock-1a")
-	ig.Spec.RootVolumeOptimization = fi.Bool(true)
+	ig := buildNodeInstanceGroup("subnet-us-test-1a")
+	if ig.Spec.RootVolume == nil {
+		ig.Spec.RootVolume = &kops.InstanceRootVolumeSpec{}
+	}
+	ig.Spec.RootVolume.Optimization = new(true)
 
 	k := [][]byte{}
 	k = append(k, []byte(sshPublicKeyEntry))
@@ -63,31 +65,38 @@ func TestRootVolumeOptimizationFlag(t *testing.T) {
 	b := AutoscalingGroupModelBuilder{
 		AWSModelContext: &AWSModelContext{
 			KopsModelContext: &model.KopsModelContext{
-				IAMModelContext: iam.IAMModelContext{Cluster: cluster},
-				SSHPublicKeys:   k,
-				InstanceGroups:  igs,
+				IAMModelContext:   iam.IAMModelContext{Cluster: cluster},
+				SSHPublicKeys:     k,
+				AllInstanceGroups: igs,
+				InstanceGroups:    igs,
 			},
 		},
 		BootstrapScriptBuilder: &model.BootstrapScriptBuilder{
 			Lifecycle: fi.LifecycleSync,
-			Cluster: &kops.Cluster{
-				Spec: kops.ClusterSpec{
-					CloudProvider:     "aws",
-					Networking:        &kops.NetworkingSpec{},
-					KubernetesVersion: "1.20.0",
+			KopsModelContext: &model.KopsModelContext{
+				IAMModelContext: iam.IAMModelContext{
+					Cluster: &kops.Cluster{
+						Spec: kops.ClusterSpec{
+							CloudProvider: kops.CloudProviderSpec{
+								AWS: &kops.AWSSpec{},
+							},
+							Networking:        kops.NetworkingSpec{},
+							KubernetesVersion: "1.20.0",
+						},
+					},
 				},
 			},
 		},
 		Cluster: cluster,
 	}
 
-	c := &fi.ModelBuilderContext{
-		Tasks: make(map[string]fi.Task),
+	c := &fi.CloudupModelBuilderContext{
+		Tasks: make(map[string]fi.CloudupTask),
 	}
 
 	// We need the CA for the bootstrap script
 	caTask := &fitasks.Keypair{
-		Name:    fi.String(fi.CertificateIDCA),
+		Name:    new(fi.CertificateIDCA),
 		Subject: "cn=kubernetes",
 		Type:    "ca",
 	}
@@ -96,7 +105,7 @@ func TestRootVolumeOptimizationFlag(t *testing.T) {
 		"etcd-clients-ca",
 	} {
 		task := &fitasks.Keypair{
-			Name:    fi.String(keypair),
+			Name:    new(keypair),
 			Subject: "cn=" + keypair,
 			Type:    "ca",
 		}
@@ -118,7 +127,7 @@ func TestAPIServerAdditionalSecurityGroupsWithNLB(t *testing.T) {
 	const sgIDAPIServer = "sg-01234567890abcdef"
 
 	cluster := buildMinimalCluster()
-	cluster.Spec.API = &kops.AccessSpec{
+	cluster.Spec.API = kops.APISpec{
 		LoadBalancer: &kops.LoadBalancerAccessSpec{
 			Class:                    kops.LoadBalancerClassNetwork,
 			AdditionalSecurityGroups: []string{sgIDAPIServer},
@@ -134,7 +143,7 @@ func TestAPIServerAdditionalSecurityGroupsWithNLB(t *testing.T) {
 	igs := make([]*kops.InstanceGroup, _roleCount)
 	// NB: (*AutoscalingGroupModelBuilder).buildLaunchTemplateTask expects there to be at least
 	// one subnet specified in each InstanceGroup.
-	subnets := []string{cluster.Spec.Subnets[0].Name}
+	subnets := []string{cluster.Spec.Networking.Subnets[0].Name}
 	igs[roleBastion] = &kops.InstanceGroup{
 		ObjectMeta: v1.ObjectMeta{
 			Name: "bastion1",
@@ -150,7 +159,7 @@ func TestAPIServerAdditionalSecurityGroupsWithNLB(t *testing.T) {
 			Name: "master1",
 		},
 		Spec: kops.InstanceGroupSpec{
-			Role:                     kops.InstanceGroupRoleMaster,
+			Role:                     kops.InstanceGroupRoleControlPlane,
 			Subnets:                  subnets,
 			AdditionalSecurityGroups: []string{"sg-234567890abcdef01"},
 		},
@@ -169,29 +178,30 @@ func TestAPIServerAdditionalSecurityGroupsWithNLB(t *testing.T) {
 	b := AutoscalingGroupModelBuilder{
 		AWSModelContext: &AWSModelContext{
 			KopsModelContext: &model.KopsModelContext{
-				IAMModelContext: iam.IAMModelContext{Cluster: cluster},
-				SSHPublicKeys:   [][]byte{[]byte(sshPublicKeyEntry)},
-				InstanceGroups:  igs,
+				IAMModelContext:   iam.IAMModelContext{Cluster: cluster},
+				SSHPublicKeys:     [][]byte{[]byte(sshPublicKeyEntry)},
+				AllInstanceGroups: igs,
+				InstanceGroups:    igs,
 			},
 		},
 		BootstrapScriptBuilder: &model.BootstrapScriptBuilder{
 			KopsModelContext: &model.KopsModelContext{
-				IAMModelContext: iam.IAMModelContext{Cluster: cluster},
-				InstanceGroups:  igs,
+				IAMModelContext:   iam.IAMModelContext{Cluster: cluster},
+				AllInstanceGroups: igs,
+				InstanceGroups:    igs,
 			},
 			Lifecycle: fi.LifecycleSync,
-			Cluster:   cluster,
 		},
 		Cluster: cluster,
 	}
 
-	c := &fi.ModelBuilderContext{
-		Tasks: make(map[string]fi.Task),
+	c := &fi.CloudupModelBuilderContext{
+		Tasks: make(map[string]fi.CloudupTask),
 	}
 
 	// We need the CA for the bootstrap script
 	caTask := &fitasks.Keypair{
-		Name:    fi.String(fi.CertificateIDCA),
+		Name:    new(fi.CertificateIDCA),
 		Subject: "cn=kubernetes",
 		Type:    "ca",
 	}
@@ -200,13 +210,15 @@ func TestAPIServerAdditionalSecurityGroupsWithNLB(t *testing.T) {
 		"apiserver-aggregator-ca",
 		"etcd-clients-ca",
 		"etcd-manager-ca-events",
+		"etcd-manager-ca-leases",
 		"etcd-manager-ca-main",
 		"etcd-peers-ca-events",
+		"etcd-peers-ca-leases",
 		"etcd-peers-ca-main",
 		"service-account",
 	} {
 		task := &fitasks.Keypair{
-			Name:    fi.String(keypair),
+			Name:    new(keypair),
 			Subject: "cn=" + keypair,
 			Type:    "ca",
 		}
@@ -217,7 +229,7 @@ func TestAPIServerAdditionalSecurityGroupsWithNLB(t *testing.T) {
 		"kube-proxy",
 	} {
 		task := &fitasks.Keypair{
-			Name:    fi.String(keypair),
+			Name:    new(keypair),
 			Subject: "cn=" + keypair,
 			Signer:  caTask,
 			Type:    "client",
@@ -241,7 +253,7 @@ func TestAPIServerAdditionalSecurityGroupsWithNLB(t *testing.T) {
 	launchTemplateForGroup := func(t *testing.T, ig *kops.InstanceGroup) *awstasks.LaunchTemplate {
 		t.Helper()
 		subdomain := ig.Name
-		if ig.Spec.Role == kops.InstanceGroupRoleMaster {
+		if ig.Spec.Role.HasControlPlane() {
 			subdomain = ig.Name + ".masters"
 		}
 		task, ok := c.Tasks[fmt.Sprintf("LaunchTemplate/%s.%s", subdomain, cluster.Name)]
@@ -272,6 +284,152 @@ func TestAPIServerAdditionalSecurityGroupsWithNLB(t *testing.T) {
 				if want, got := true, hasSecurityGroup(lt, sg); got != want {
 					t.Errorf("%q (role %q): launch template includes additional security group %q: want %t, got %t", test.ig.Name, role, sg, want, got)
 				}
+			}
+		})
+	}
+}
+
+func TestPrimaryIPv6(t *testing.T) {
+	cluster := buildMinimalCluster()
+	subnets := cluster.Spec.Networking.Subnets
+	const (
+		subnetIPv4 = iota
+		subnetDualstack
+		subnetIPv6
+		_subnetCount
+	)
+	subnets[subnetDualstack] = kops.ClusterSubnetSpec{
+		Name:     subnets[subnetDualstack].Name,
+		CIDR:     subnets[subnetDualstack].CIDR,
+		IPv6CIDR: "2001:db8:aaaa:2::/64",
+		Zone:     subnets[subnetDualstack].Zone,
+		Type:     subnets[subnetDualstack].Type,
+	}
+	subnets[subnetIPv6] = kops.ClusterSubnetSpec{
+		Name:     subnets[subnetIPv6].Name,
+		CIDR:     "",
+		IPv6CIDR: "2001:db8:aaaa:3::/64",
+		Zone:     subnets[subnetIPv6].Zone,
+		Type:     subnets[subnetIPv6].Type,
+	}
+	cluster.Spec.Networking.Subnets = subnets
+
+	igs := make([]*kops.InstanceGroup, _subnetCount)
+	igs[subnetIPv4] = &kops.InstanceGroup{
+		ObjectMeta: v1.ObjectMeta{
+			Name: "IPv4",
+		},
+		Spec: kops.InstanceGroupSpec{
+			Role:    kops.InstanceGroupRoleNode,
+			Subnets: []string{subnets[subnetIPv4].Name},
+		},
+	}
+	igs[subnetDualstack] = &kops.InstanceGroup{
+		ObjectMeta: v1.ObjectMeta{
+			Name: "DualStack",
+		},
+		Spec: kops.InstanceGroupSpec{
+			Role:    kops.InstanceGroupRoleNode,
+			Subnets: []string{subnets[subnetDualstack].Name},
+		},
+	}
+	igs[subnetIPv6] = &kops.InstanceGroup{
+		ObjectMeta: v1.ObjectMeta{
+			Name: "IPv6",
+		},
+		Spec: kops.InstanceGroupSpec{
+			Role:    kops.InstanceGroupRoleNode,
+			Subnets: []string{subnets[subnetIPv6].Name},
+		},
+	}
+
+	b := AutoscalingGroupModelBuilder{
+		AWSModelContext: &AWSModelContext{
+			KopsModelContext: &model.KopsModelContext{
+				IAMModelContext:   iam.IAMModelContext{Cluster: cluster},
+				AllInstanceGroups: igs,
+				InstanceGroups:    igs,
+			},
+		},
+		BootstrapScriptBuilder: &model.BootstrapScriptBuilder{
+			Lifecycle: fi.LifecycleSync,
+			KopsModelContext: &model.KopsModelContext{
+				IAMModelContext: iam.IAMModelContext{
+					Cluster: &kops.Cluster{
+						Spec: kops.ClusterSpec{
+							CloudProvider: kops.CloudProviderSpec{
+								AWS: &kops.AWSSpec{},
+							},
+							Networking:        kops.NetworkingSpec{},
+							KubernetesVersion: "1.20.0",
+						},
+					},
+				},
+			},
+		},
+		Cluster: cluster,
+	}
+
+	c := &fi.CloudupModelBuilderContext{
+		Tasks: make(map[string]fi.CloudupTask),
+	}
+
+	// We need the CA for the bootstrap script
+	caTask := &fitasks.Keypair{
+		Name:    new(fi.CertificateIDCA),
+		Subject: "cn=kubernetes",
+		Type:    "ca",
+	}
+	c.AddTask(caTask)
+	for _, keypair := range []string{
+		"etcd-clients-ca",
+	} {
+		task := &fitasks.Keypair{
+			Name:    new(keypair),
+			Subject: "cn=" + keypair,
+			Type:    "ca",
+		}
+		c.AddTask(task)
+	}
+
+	if err := b.Build(c); err != nil {
+		t.Fatalf("error from Build: %v", err)
+	}
+
+	isPrimaryIPv6Enabled := func(lt *awstasks.LaunchTemplate) bool {
+		if lt.PrimaryIPv6 == nil {
+			return false
+		}
+		return *lt.PrimaryIPv6
+	}
+	launchTemplateForGroup := func(t *testing.T, ig *kops.InstanceGroup) *awstasks.LaunchTemplate {
+		t.Helper()
+		subdomain := ig.Name
+		if ig.Spec.Role.HasControlPlane() {
+			subdomain = ig.Name + ".masters"
+		}
+		task, ok := c.Tasks[fmt.Sprintf("LaunchTemplate/%s.%s", subdomain, cluster.Name)]
+		if !ok {
+			t.Fatalf("No task available in model build context for InstanceGroup %q", ig.Name)
+		}
+		if task == nil {
+			t.Fatalf("Task pointer in model build context for InstanceGroup %q is nil", ig.Name)
+		}
+		return task.(*awstasks.LaunchTemplate)
+	}
+	tests := []struct {
+		ig              *kops.InstanceGroup
+		expectIsEnabled bool
+	}{
+		{igs[subnetIPv4], false},
+		{igs[subnetDualstack], true},
+		{igs[subnetIPv6], true},
+	}
+	for _, test := range tests {
+		t.Run(test.ig.Name, func(t *testing.T) {
+			lt := launchTemplateForGroup(t, test.ig)
+			if want, got := test.expectIsEnabled, isPrimaryIPv6Enabled(lt); got != want {
+				t.Errorf("%q (subnet %q): launch template sets PrimaryIPv6: want %t, got %t", test.ig.Name, test.ig.Spec.Subnets[0], want, got)
 			}
 		})
 	}

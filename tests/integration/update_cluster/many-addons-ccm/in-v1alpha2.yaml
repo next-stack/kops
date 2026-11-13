@@ -6,9 +6,15 @@ metadata:
 spec:
   awsLoadBalancerController:
     enabled: true
+    cpuRequest: "150m"
+    cpuLimit: "300m"
+    memoryRequest: "300Mi"
+    memoryLimit: "600Mi"
   certManager:
     enabled: true
   clusterAutoscaler:
+    enabled: true
+  metricsServer:
     enabled: true
   kubernetesApiAccess:
   - 0.0.0.0/0
@@ -16,6 +22,7 @@ spec:
   cloudConfig:
     awsEBSCSIDriver:
       enabled: true
+      hostNetwork: true
   cloudControllerManager:
     cloudProvider: aws
   cloudProvider: aws
@@ -32,23 +39,22 @@ spec:
   iam: {}
   kubelet:
     anonymousAuth: false
-  kubernetesVersion: v1.21.0
-  masterInternalName: api.internal.minimal.example.com
+  kubernetesVersion: v1.32.0
   masterPublicName: api.minimal.example.com
   networkCIDR: 172.20.0.0/16
   networking:
-    amazonvpc: {}
+    amazonvpc:
+      imageName: image:123
+      initImageName: initimage:123
+      networkPolicyAgentImage: networkpolicyagentimage:123
   nodeTerminationHandler:
     enabled: true
-    enableSQSTerminationDraining: false
+    enableRebalanceDraining: true
   nonMasqueradeCIDR: 172.20.0.0/16
   snapshotController:
     enabled: true
   sshAccess:
     - 0.0.0.0/0
-  topology:
-    masters: public
-    nodes: public
   subnets:
   - cidr: 172.20.32.0/19
     name: us-test-1a
@@ -66,7 +72,7 @@ metadata:
     kops.k8s.io/cluster: minimal.example.com
 spec:
   associatePublicIp: true
-  image: kope.io/k8s-1.4-debian-jessie-amd64-hvm-ebs-2016-10-21
+  image: ubuntu/images/hvm-ssd-gp3/ubuntu-resolute-26.04-amd64-server-20220404
   machineType: t2.medium
   maxSize: 2
   minSize: 2
@@ -85,7 +91,7 @@ metadata:
     kops.k8s.io/cluster: minimal.example.com
 spec:
   associatePublicIp: true
-  image: kope.io/k8s-1.4-debian-jessie-amd64-hvm-ebs-2016-10-21
+  image: ubuntu/images/hvm-ssd-gp3/ubuntu-resolute-26.04-amd64-server-20220404
   machineType: m3.medium
   maxSize: 1
   minSize: 1

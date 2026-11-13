@@ -27,7 +27,7 @@ import (
 
 // LB
 
-var _ fi.HasLifecycle = &LB{}
+var _ fi.HasLifecycle = (*LB)(nil)
 
 // GetLifecycle returns the Lifecycle of the object, implementing fi.HasLifecycle
 func (o *LB) GetLifecycle() fi.Lifecycle {
@@ -39,7 +39,7 @@ func (o *LB) SetLifecycle(lifecycle fi.Lifecycle) {
 	o.Lifecycle = lifecycle
 }
 
-var _ fi.HasName = &LB{}
+var _ fi.HasName = (*LB)(nil)
 
 // GetName returns the Name of the object, implementing fi.HasName
 func (o *LB) GetName() *string {
@@ -48,5 +48,5 @@ func (o *LB) GetName() *string {
 
 // String is the stringer function for the task, producing readable output using fi.TaskAsString
 func (o *LB) String() string {
-	return fi.TaskAsString(o)
+	return fi.CloudupTaskAsString(o)
 }

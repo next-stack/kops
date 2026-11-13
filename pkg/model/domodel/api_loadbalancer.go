@@ -18,10 +18,9 @@ package domodel
 
 import (
 	"fmt"
-	"strings"
 
 	"k8s.io/kops/pkg/apis/kops"
-	"k8s.io/kops/pkg/dns"
+	"k8s.io/kops/pkg/wellknownservices"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/do"
 	"k8s.io/kops/upup/pkg/fi/cloudup/dotasks"
@@ -33,9 +32,9 @@ type APILoadBalancerModelBuilder struct {
 	Lifecycle fi.Lifecycle
 }
 
-var _ fi.ModelBuilder = &APILoadBalancerModelBuilder{}
+var _ fi.CloudupModelBuilder = &APILoadBalancerModelBuilder{}
 
-func (b *APILoadBalancerModelBuilder) Build(c *fi.ModelBuilderContext) error {
+func (b *APILoadBalancerModelBuilder) Build(c *fi.CloudupModelBuilderContext) error {
 	// Configuration where a load balancer fronts the API
 	if !b.UseLoadBalancerForAPI() {
 		return nil
@@ -56,26 +55,28 @@ func (b *APILoadBalancerModelBuilder) Build(c *fi.ModelBuilderContext) error {
 		return fmt.Errorf("unhandled LoadBalancer type %q", lbSpec.Type)
 	}
 
-	clusterName := strings.Replace(b.ClusterName(), ".", "-", -1)
+	clusterName := do.SafeClusterName(b.ClusterName())
 	loadbalancerName := "api-" + clusterName
 	clusterMasterTag := do.TagKubernetesClusterMasterPrefix + ":" + clusterName
 
 	// Create LoadBalancer for API LB
 	loadbalancer := &dotasks.LoadBalancer{
-		Name:       fi.String(loadbalancerName),
-		Region:     fi.String(b.Cluster.Spec.Subnets[0].Region),
-		DropletTag: fi.String(clusterMasterTag),
-		Lifecycle:  b.Lifecycle,
+		Name:              new(loadbalancerName),
+		Region:            new(b.Cluster.Spec.Networking.Subnets[0].Region),
+		DropletTag:        new(clusterMasterTag),
+		Lifecycle:         b.Lifecycle,
+		WellKnownServices: []wellknownservices.WellKnownService{wellknownservices.KopsController, wellknownservices.KubeAPIServer},
 	}
+
+	if b.Cluster.Spec.Networking.NetworkID != "" {
+		loadbalancer.VPCUUID = new(b.Cluster.Spec.Networking.NetworkID)
+	} else if b.Cluster.Spec.Networking.NetworkCIDR != "" {
+		vpcName := "vpc-" + clusterName
+		loadbalancer.VPCName = new(vpcName)
+		loadbalancer.NetworkCIDR = new(b.Cluster.Spec.Networking.NetworkCIDR)
+	}
+
 	c.AddTask(loadbalancer)
 
-	// Temporarily do not know the role of the following function
-	if dns.IsGossipHostname(b.Cluster.Name) || b.UsePrivateDNS() {
-		// Ensure the LB hostname is included in the TLS certificate,
-		// if we're not going to use an alias for it
-		loadbalancer.ForAPIServer = true
-	}
-
 	return nil
-
 }

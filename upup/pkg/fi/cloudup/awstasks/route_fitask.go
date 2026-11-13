@@ -27,7 +27,7 @@ import (
 
 // Route
 
-var _ fi.HasLifecycle = &Route{}
+var _ fi.HasLifecycle = (*Route)(nil)
 
 // GetLifecycle returns the Lifecycle of the object, implementing fi.HasLifecycle
 func (o *Route) GetLifecycle() fi.Lifecycle {
@@ -39,7 +39,7 @@ func (o *Route) SetLifecycle(lifecycle fi.Lifecycle) {
 	o.Lifecycle = lifecycle
 }
 
-var _ fi.HasName = &Route{}
+var _ fi.HasName = (*Route)(nil)
 
 // GetName returns the Name of the object, implementing fi.HasName
 func (o *Route) GetName() *string {
@@ -48,5 +48,5 @@ func (o *Route) GetName() *string {
 
 // String is the stringer function for the task, producing readable output using fi.TaskAsString
 func (o *Route) String() string {
-	return fi.TaskAsString(o)
+	return fi.CloudupTaskAsString(o)
 }

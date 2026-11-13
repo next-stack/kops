@@ -36,6 +36,19 @@ func RegisterDefaults(scheme *runtime.Scheme) error {
 
 func SetObjectDefaults_Cluster(in *Cluster) {
 	SetDefaults_ClusterSpec(&in.Spec)
+	if in.Spec.KubeAPIServer != nil {
+		for i := range in.Spec.KubeAPIServer.Env {
+			a := &in.Spec.KubeAPIServer.Env[i]
+			if a.ValueFrom != nil {
+				if a.ValueFrom.FileKeyRef != nil {
+					if a.ValueFrom.FileKeyRef.Optional == nil {
+						var ptrVar1 bool = false
+						a.ValueFrom.FileKeyRef.Optional = &ptrVar1
+					}
+				}
+			}
+		}
+	}
 }
 
 func SetObjectDefaults_ClusterList(in *ClusterList) {

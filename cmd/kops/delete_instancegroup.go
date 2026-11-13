@@ -19,8 +19,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"strings"
-
 	"io"
 	"os"
 
@@ -86,9 +84,9 @@ func NewCmdDeleteInstanceGroup(f *util.Factory, out io.Writer) *cobra.Command {
 
 			return nil
 		},
-		ValidArgsFunction: completeInstanceGroup(f, nil, &[]string{strings.ToLower(string(kops.InstanceGroupRoleMaster))}),
+		ValidArgsFunction: completeInstanceGroup(f, nil, &[]string{kops.InstanceGroupRoleControlPlane.ToLowerString()}),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := context.TODO()
+			ctx := cmd.Context()
 
 			if !options.Yes {
 				message := fmt.Sprintf("Do you really want to delete instance group %q? This action cannot be undone.", options.GroupName)
@@ -122,7 +120,6 @@ func NewCmdDeleteInstanceGroup(f *util.Factory, out io.Writer) *cobra.Command {
 
 // RunDeleteInstanceGroup runs the deletion of an instance group
 func RunDeleteInstanceGroup(ctx context.Context, f *util.Factory, out io.Writer, options *DeleteInstanceGroupOptions) error {
-
 	// TODO make this drain and validate the ig?
 	// TODO implement drain and validate logic
 	groupName := options.GroupName
@@ -135,7 +132,7 @@ func RunDeleteInstanceGroup(ctx context.Context, f *util.Factory, out io.Writer,
 		return err
 	}
 
-	clientset, err := f.Clientset()
+	clientset, err := f.KopsClient()
 	if err != nil {
 		return err
 	}
@@ -150,7 +147,7 @@ func RunDeleteInstanceGroup(ctx context.Context, f *util.Factory, out io.Writer,
 
 	fmt.Fprintf(out, "InstanceGroup %q found for deletion\n", groupName)
 
-	if group.Spec.Role == kops.InstanceGroupRoleMaster {
+	if group.Spec.Role.HasControlPlane() {
 		groups, err := clientset.InstanceGroupsFor(cluster).List(ctx, metav1.ListOptions{})
 		if err != nil {
 			return fmt.Errorf("listing InstanceGroups: %v", err)
@@ -158,7 +155,7 @@ func RunDeleteInstanceGroup(ctx context.Context, f *util.Factory, out io.Writer,
 
 		onlyMaster := true
 		for _, ig := range groups.Items {
-			if ig.Name != groupName && ig.Spec.Role == kops.InstanceGroupRoleMaster {
+			if ig.Name != groupName && ig.Spec.Role.HasControlPlane() {
 				onlyMaster = false
 				break
 			}

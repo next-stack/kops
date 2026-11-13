@@ -26,21 +26,19 @@ type NvidiaBuilder struct {
 	*NodeupModelContext
 }
 
-var _ fi.ModelBuilder = &NvidiaBuilder{}
+var _ fi.NodeupModelBuilder = &NvidiaBuilder{}
 
 // Build is responsible for installing packages.
-func (b *NvidiaBuilder) Build(c *fi.ModelBuilderContext) error {
+func (b *NvidiaBuilder) Build(c *fi.NodeupModelBuilderContext) error {
 	if b.InstallNvidiaRuntime() && b.Distribution.IsUbuntu() {
 		c.AddTask(&nodetasks.AptSource{
-			Name:    "nvidia-container-runtime",
-			Keyring: "https://nvidia.github.io/nvidia-container-runtime/gpgkey",
+			Name:    "nvidia-container-toolkit",
+			Keyring: "https://nvidia.github.io/libnvidia-container/gpgkey",
 			Sources: []string{
-				"deb https://nvidia.github.io/nvidia-container-runtime/stable/ubuntu18.04/$(ARCH) /",
-				"deb https://nvidia.github.io/libnvidia-container/stable/ubuntu18.04/$(ARCH) /",
-				"deb https://nvidia.github.io/nvidia-docker/ubuntu18.04/$(ARCH) /",
+				"deb https://nvidia.github.io/libnvidia-container/stable/deb/$(ARCH) /",
 			},
 		})
-		c.AddTask(&nodetasks.Package{Name: "nvidia-container-runtime"})
+		c.AddTask(&nodetasks.Package{Name: "nvidia-container-toolkit"})
 		c.AddTask(&nodetasks.Package{Name: b.NodeupConfig.NvidiaGPU.DriverPackage})
 	}
 	return nil

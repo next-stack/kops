@@ -18,9 +18,9 @@ package components
 
 import (
 	"k8s.io/apimachinery/pkg/api/resource"
+
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/wellknownports"
-	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/loader"
 )
 
@@ -29,21 +29,25 @@ type CiliumOptionsBuilder struct {
 	Context *OptionsContext
 }
 
-var _ loader.OptionsBuilder = &CiliumOptionsBuilder{}
+var _ loader.ClusterOptionsBuilder = &CiliumOptionsBuilder{}
 
-func (b *CiliumOptionsBuilder) BuildOptions(o interface{}) error {
-	clusterSpec := o.(*kops.ClusterSpec)
+func (b *CiliumOptionsBuilder) BuildOptions(o *kops.Cluster) error {
+	clusterSpec := &o.Spec
 	c := clusterSpec.Networking.Cilium
 	if c == nil {
 		return nil
 	}
 
 	if c.Version == "" {
-		c.Version = "v1.10.4"
+		c.Version = "v1.18.16"
 	}
 
 	if c.EnableEndpointHealthChecking == nil {
-		c.EnableEndpointHealthChecking = fi.Bool(true)
+		c.EnableEndpointHealthChecking = new(true)
+	}
+
+	if c.EnableHostFirewall == nil {
+		c.EnableHostFirewall = new(false)
 	}
 
 	if c.IdentityAllocationMode == "" {
@@ -56,7 +60,6 @@ func (b *CiliumOptionsBuilder) BuildOptions(o interface{}) error {
 
 	if c.BPFCTGlobalAnyMax == 0 {
 		c.BPFCTGlobalAnyMax = 262144
-
 	}
 
 	if c.BPFCTGlobalTCPMax == 0 {
@@ -99,28 +102,24 @@ func (b *CiliumOptionsBuilder) BuildOptions(o interface{}) error {
 		c.SidecarIstioProxyImage = "cilium/istio_proxy"
 	}
 
-	if c.ToFqdnsDNSRejectResponseCode == "" {
-		c.ToFqdnsDNSRejectResponseCode = "refused"
-	}
-
-	if c.ContainerRuntimeLabels == "" {
-		c.ContainerRuntimeLabels = "none"
+	if c.ToFQDNsDNSRejectResponseCode == "" {
+		c.ToFQDNsDNSRejectResponseCode = "refused"
 	}
 
 	if c.AgentPrometheusPort == 0 {
 		c.AgentPrometheusPort = wellknownports.CiliumPrometheusPort
 	}
 
-	if c.Ipam == "" {
-		c.Ipam = "kubernetes"
+	if c.IPAM == "" {
+		c.IPAM = "kubernetes"
 	}
 
-	if c.DisableMasquerade == nil {
-		c.DisableMasquerade = fi.Bool(c.Ipam == "eni")
+	if c.Masquerade == nil {
+		c.Masquerade = new(!clusterSpec.IsIPv6Only())
 	}
 
 	if c.Tunnel == "" {
-		if c.Ipam == "eni" || clusterSpec.PodCIDRFromCloud {
+		if c.IPAM == "eni" || clusterSpec.IsIPv6Only() {
 			c.Tunnel = "disabled"
 		} else {
 			c.Tunnel = "vxlan"
@@ -128,19 +127,27 @@ func (b *CiliumOptionsBuilder) BuildOptions(o interface{}) error {
 	}
 
 	if c.EnableRemoteNodeIdentity == nil {
-		c.EnableRemoteNodeIdentity = fi.Bool(true)
+		c.EnableRemoteNodeIdentity = new(true)
+	}
+
+	if c.EnableUnreachableRoutes == nil {
+		c.EnableUnreachableRoutes = new(false)
 	}
 
 	if c.EnableBPFMasquerade == nil {
-		c.EnableBPFMasquerade = fi.Bool(false)
+		c.EnableBPFMasquerade = new(c.IPAM == "eni")
 	}
 
 	if c.EnableL7Proxy == nil {
-		c.EnableL7Proxy = fi.Bool(true)
+		c.EnableL7Proxy = new(true)
+	}
+
+	if c.EnableLocalRedirectPolicy == nil {
+		c.EnableLocalRedirectPolicy = new(false)
 	}
 
 	if c.DisableCNPStatusUpdates == nil {
-		c.DisableCNPStatusUpdates = fi.Bool(true)
+		c.DisableCNPStatusUpdates = new(true)
 	}
 
 	if c.CPURequest == nil {
@@ -157,17 +164,42 @@ func (b *CiliumOptionsBuilder) BuildOptions(o interface{}) error {
 		c.EncryptionType = kops.CiliumEncryptionTypeIPSec
 	}
 
+	if c.CniExclusive == nil {
+		c.CniExclusive = new(true)
+	}
+
 	hubble := c.Hubble
 	if hubble != nil {
 		if hubble.Enabled == nil {
-			hubble.Enabled = fi.Bool(true)
+			hubble.Enabled = new(true)
 		}
 	} else {
 		c.Hubble = &kops.HubbleSpec{
-			Enabled: fi.Bool(false),
+			Enabled: new(false),
+		}
+	}
+
+	ingress := c.Ingress
+	if ingress != nil {
+		if ingress.Enabled == nil {
+			ingress.Enabled = new(true)
+		}
+	} else {
+		c.Ingress = &kops.CiliumIngressSpec{
+			Enabled: new(false),
+		}
+	}
+
+	gatewayAPI := c.GatewayAPI
+	if gatewayAPI != nil {
+		if gatewayAPI.Enabled == nil {
+			gatewayAPI.Enabled = new(true)
+		}
+	} else {
+		c.GatewayAPI = &kops.CiliumGatewayAPISpec{
+			Enabled: new(false),
 		}
 	}
 
 	return nil
-
 }

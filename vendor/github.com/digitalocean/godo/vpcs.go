@@ -10,7 +10,7 @@ const vpcsBasePath = "/v2/vpcs"
 
 // VPCsService is an interface for managing Virtual Private Cloud configurations with the
 // DigitalOcean API.
-// See: https://developers.digitalocean.com/documentation/v2#vpcs
+// See: https://docs.digitalocean.com/reference/api/api-reference/#tag/VPCs
 type VPCsService interface {
 	Create(context.Context, *VPCCreateRequest) (*VPC, *Response, error)
 	Get(context.Context, string) (*VPC, *Response, error)
@@ -19,6 +19,14 @@ type VPCsService interface {
 	Update(context.Context, string, *VPCUpdateRequest) (*VPC, *Response, error)
 	Set(context.Context, string, ...VPCSetField) (*VPC, *Response, error)
 	Delete(context.Context, string) (*Response, error)
+	CreateVPCPeering(context.Context, *VPCPeeringCreateRequest) (*VPCPeering, *Response, error)
+	GetVPCPeering(context.Context, string) (*VPCPeering, *Response, error)
+	ListVPCPeerings(context.Context, *ListOptions) ([]*VPCPeering, *Response, error)
+	UpdateVPCPeering(context.Context, string, *VPCPeeringUpdateRequest) (*VPCPeering, *Response, error)
+	DeleteVPCPeering(context.Context, string) (*Response, error)
+	CreateVPCPeeringByVPCID(context.Context, string, *VPCPeeringCreateRequestByVPCID) (*VPCPeering, *Response, error)
+	ListVPCPeeringsByVPCID(context.Context, string, *ListOptions) ([]*VPCPeering, *Response, error)
+	UpdateVPCPeeringByVPCID(context.Context, string, string, *VPCPeeringUpdateRequest) (*VPCPeering, *Response, error)
 }
 
 var _ VPCsService = &VPCsServiceOp{}

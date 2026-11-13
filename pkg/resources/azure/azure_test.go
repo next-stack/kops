@@ -19,15 +19,15 @@ package azure
 import (
 	"fmt"
 	"reflect"
+	"slices"
 	"testing"
 
-	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2020-06-01/compute"
-	"github.com/Azure/azure-sdk-for-go/services/network/mgmt/2020-06-01/network"
-	authz "github.com/Azure/azure-sdk-for-go/services/preview/authorization/mgmt/2018-01-01-preview/authorization"
-	azureresources "github.com/Azure/azure-sdk-for-go/services/resources/mgmt/2020-06-01/resources"
-	"github.com/Azure/go-autorest/autorest/to"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/kops/pkg/apis/kops"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
+	authz "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/authorization/armauthorization/v3"
+	compute "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v7"
+	network "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork/v7"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources/v3"
 	"k8s.io/kops/pkg/resources"
 	"k8s.io/kops/upup/pkg/fi/cloudup/azure"
 	"k8s.io/kops/upup/pkg/fi/cloudup/azuretasks"
@@ -36,107 +36,131 @@ import (
 func TestListResourcesAzure(t *testing.T) {
 	const (
 		clusterName    = "cluster"
-		rgName         = "rg"
-		vnetName       = "vnet"
-		vmssName       = "vmss"
-		vmName         = "vmss/0"
-		diskName       = "disk"
-		subnetName     = "sub"
-		rtName         = "rt"
-		raName         = "ra"
 		irrelevantName = "irrelevant"
 		principalID    = "pid"
-		lbName         = "lb"
+		subscriptionID = "00000000-0000-0000-0000-000000000000"
+		rgID           = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg"
+		vnetID         = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg/providers/Microsoft.Network/virtualNetworks/vnet"
+		subnetID       = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg/providers/Microsoft.Network/virtualNetworks/vnet/subnets/subnet"
+		rtID           = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg/providers/Microsoft.Network/routeTables/rt"
+		vmssID         = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg/providers/Microsoft.Compute/virtualMachineScaleSets/vmss"
+		vmID           = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg/providers/Microsoft.Compute/virtualMachineScaleSets/vmss/virtualmachines/0"
+		diskID         = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg/providers/Microsoft.Compute/disks/disk"
+		raID           = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg/providers/Microsoft.Authorization/roleAssignments/ra"
+		lbID           = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg/providers/Microsoft.Network/loadBalancers/lb"
 	)
+
+	rg, _ := arm.ParseResourceID(rgID)
+	rgName := rg.Name
+	vnet, _ := arm.ParseResourceID(vnetID)
+	vnetName := vnet.Name
+	vmss, _ := arm.ParseResourceID(vmssID)
+	vmssName := vmss.Name
+	vm, _ := arm.ParseResourceID(vmID)
+	vmName := vm.Name
+	disk, _ := arm.ParseResourceID(diskID)
+	diskName := disk.Name
+	subnet, _ := arm.ParseResourceID(subnetID)
+	subnetName := subnet.Name
+	rt, _ := arm.ParseResourceID(rtID)
+	rtName := rt.Name
+	ra, _ := arm.ParseResourceID(raID)
+	raName := ra.Name
+	lb, _ := arm.ParseResourceID(lbID)
+	lbName := lb.Name
+
 	clusterTags := map[string]*string{
-		azure.TagClusterName: to.StringPtr(clusterName),
+		azure.TagClusterName: to.Ptr(clusterName),
 	}
 
 	cloud := azuretasks.NewMockAzureCloud("eastus")
 	// Set up resources in the mock clients.
 	rgs := cloud.ResourceGroupsClient.RGs
-	rgs[rgName] = azureresources.Group{
-		Name: to.StringPtr(rgName),
+	rgs[rgName] = &armresources.ResourceGroup{
+		ID:   to.Ptr(rgID),
+		Name: to.Ptr(rgName),
 		Tags: clusterTags,
 	}
-	rgs[irrelevantName] = azureresources.Group{
-		Name: to.StringPtr(irrelevantName),
+	rgs[irrelevantName] = &armresources.ResourceGroup{
+		Name: to.Ptr(irrelevantName),
 	}
 
 	vnets := cloud.VirtualNetworksClient.VNets
-	vnets[vnetName] = network.VirtualNetwork{
-		Name: to.StringPtr(vnetName),
-		Tags: clusterTags,
+	vnets[vnetName] = &network.VirtualNetwork{
+		ID:         to.Ptr(vnetID),
+		Name:       to.Ptr(vnetName),
+		Tags:       clusterTags,
+		Properties: &network.VirtualNetworkPropertiesFormat{},
 	}
-	vnets[irrelevantName] = network.VirtualNetwork{
-		Name: to.StringPtr(irrelevantName),
+	vnets[irrelevantName] = &network.VirtualNetwork{
+		Name: to.Ptr(irrelevantName),
 	}
 
 	subnets := cloud.SubnetsClient.Subnets
-	subnets[rgName] = network.Subnet{
-		Name: to.StringPtr(subnetName),
+	subnets[rgName] = &network.Subnet{
+		ID:         to.Ptr(subnetID),
+		Name:       to.Ptr(subnetName),
+		Properties: &network.SubnetPropertiesFormat{},
 	}
-	vnets[irrelevantName] = network.VirtualNetwork{
-		Name: to.StringPtr(irrelevantName),
+	vnets[irrelevantName] = &network.VirtualNetwork{
+		Name: to.Ptr(irrelevantName),
 	}
 
 	rts := cloud.RouteTablesClient.RTs
-	rts[rtName] = network.RouteTable{
-		Name: to.StringPtr(rtName),
+	rts[rtName] = &network.RouteTable{
+		ID:   to.Ptr(rtID),
+		Name: to.Ptr(rtName),
 		Tags: clusterTags,
 	}
-	rts[irrelevantName] = network.RouteTable{
-		Name: to.StringPtr(irrelevantName),
+	rts[irrelevantName] = &network.RouteTable{
+		Name: to.Ptr(irrelevantName),
 	}
 
 	vmsses := cloud.VMScaleSetsClient.VMSSes
-	subnetID := azuretasks.SubnetID{
-		SubscriptionID:     "sid",
-		ResourceGroupName:  rgName,
-		VirtualNetworkName: vnetName,
-		SubnetName:         subnetName,
-	}
-	networkConfig := compute.VirtualMachineScaleSetNetworkConfiguration{
-		VirtualMachineScaleSetNetworkConfigurationProperties: &compute.VirtualMachineScaleSetNetworkConfigurationProperties{
-			IPConfigurations: &[]compute.VirtualMachineScaleSetIPConfiguration{
+	networkConfig := &compute.VirtualMachineScaleSetNetworkConfiguration{
+		Properties: &compute.VirtualMachineScaleSetNetworkConfigurationProperties{
+			IPConfigurations: []*compute.VirtualMachineScaleSetIPConfiguration{
 				{
-					VirtualMachineScaleSetIPConfigurationProperties: &compute.VirtualMachineScaleSetIPConfigurationProperties{
+					Properties: &compute.VirtualMachineScaleSetIPConfigurationProperties{
 						Subnet: &compute.APIEntityReference{
-							ID: to.StringPtr(subnetID.String()),
+							ID: to.Ptr(subnetID),
 						},
 					},
 				},
 			},
 		},
 	}
-	vmsses[vmssName] = compute.VirtualMachineScaleSet{
-		Name: to.StringPtr(vmssName),
+	vmsses[vmssName] = &compute.VirtualMachineScaleSet{
+		ID:   to.Ptr(vmssID),
+		Name: to.Ptr(vmssName),
 		Tags: clusterTags,
-		VirtualMachineScaleSetProperties: &compute.VirtualMachineScaleSetProperties{
+		Properties: &compute.VirtualMachineScaleSetProperties{
 			VirtualMachineProfile: &compute.VirtualMachineScaleSetVMProfile{
 				NetworkProfile: &compute.VirtualMachineScaleSetNetworkProfile{
-					NetworkInterfaceConfigurations: &[]compute.VirtualMachineScaleSetNetworkConfiguration{
+					NetworkInterfaceConfigurations: []*compute.VirtualMachineScaleSetNetworkConfiguration{
 						networkConfig,
 					},
 				},
 			},
 		},
 		Identity: &compute.VirtualMachineScaleSetIdentity{
-			Type:        compute.ResourceIdentityTypeSystemAssigned,
-			PrincipalID: to.StringPtr(principalID),
+			Type:        to.Ptr(compute.ResourceIdentityTypeSystemAssigned),
+			PrincipalID: to.Ptr(principalID),
 		},
 	}
-	vmsses[irrelevantName] = compute.VirtualMachineScaleSet{
-		Name: to.StringPtr(irrelevantName),
+	vmsses[irrelevantName] = &compute.VirtualMachineScaleSet{
+		Name: to.Ptr(irrelevantName),
 	}
 
 	vms := cloud.VMScaleSetVMsClient.VMs
-	vms[vmName] = compute.VirtualMachineScaleSetVM{
-		VirtualMachineScaleSetVMProperties: &compute.VirtualMachineScaleSetVMProperties{
+	vms[vmName] = &compute.VirtualMachineScaleSetVM{
+		ID:   to.Ptr(vmID),
+		Name: to.Ptr(vmName),
+		Properties: &compute.VirtualMachineScaleSetVMProperties{
 			StorageProfile: &compute.StorageProfile{
-				DataDisks: &[]compute.DataDisk{
+				DataDisks: []*compute.DataDisk{
 					{
-						Name: to.StringPtr(diskName),
+						Name: to.Ptr(diskName),
 					},
 				},
 			},
@@ -144,49 +168,48 @@ func TestListResourcesAzure(t *testing.T) {
 	}
 
 	disks := cloud.DisksClient.Disks
-	disks[diskName] = compute.Disk{
-		Name: to.StringPtr(diskName),
-		Tags: clusterTags,
+	disks[diskName] = &compute.Disk{
+		ID:        to.Ptr(diskID),
+		Name:      to.Ptr(diskName),
+		ManagedBy: to.Ptr(vmID),
+		Tags:      clusterTags,
 	}
-	disks[irrelevantName] = compute.Disk{
-		Name: to.StringPtr(irrelevantName),
+	disks[irrelevantName] = &compute.Disk{
+		Name: to.Ptr(irrelevantName),
 	}
 
 	ras := cloud.RoleAssignmentsClient.RAs
-	ras[raName] = authz.RoleAssignment{
-		Name: to.StringPtr(raName),
-		RoleAssignmentPropertiesWithScope: &authz.RoleAssignmentPropertiesWithScope{
-			Scope:       to.StringPtr("scope"),
-			PrincipalID: to.StringPtr(principalID),
+	ras[raName] = &authz.RoleAssignment{
+		ID:   to.Ptr(raID),
+		Name: to.Ptr(raName),
+		Properties: &authz.RoleAssignmentProperties{
+			Scope:       to.Ptr("scope"),
+			PrincipalID: to.Ptr(principalID),
 		},
 	}
-	disks[irrelevantName] = compute.Disk{
-		Name: to.StringPtr(irrelevantName),
+	disks[irrelevantName] = &compute.Disk{
+		Name: to.Ptr(irrelevantName),
 	}
 
 	lbs := cloud.LoadBalancersClient.LBs
-	lbs[lbName] = network.LoadBalancer{
-		Name: to.StringPtr(lbName),
-		Tags: clusterTags,
+	lbs[lbName] = &network.LoadBalancer{
+		ID:         to.Ptr(lbID),
+		Name:       to.Ptr(lbName),
+		Tags:       clusterTags,
+		Properties: &network.LoadBalancerPropertiesFormat{},
 	}
-	lbs[irrelevantName] = network.LoadBalancer{
-		Name: to.StringPtr(irrelevantName),
+	lbs[irrelevantName] = &network.LoadBalancer{
+		Name: to.Ptr(irrelevantName),
 	}
 
 	// Call listResourcesAzure.
 	g := resourceGetter{
 		cloud: cloud,
-		cluster: &kops.Cluster{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: clusterName,
-			},
-			Spec: kops.ClusterSpec{
-				CloudConfig: &kops.CloudConfiguration{
-					Azure: &kops.AzureConfiguration{
-						ResourceGroupName: rgName,
-					},
-				},
-			},
+		clusterInfo: resources.ClusterInfo{
+			Name:                     clusterName,
+			AzureSubscriptionID:      subscriptionID,
+			AzureResourceGroupName:   rgName,
+			AzureResourceGroupShared: true,
 		},
 	}
 	actual, err := g.listResourcesAzure()
@@ -205,11 +228,15 @@ func TestListResourcesAzure(t *testing.T) {
 	toDigests := func(rs map[string]*resources.Resource) map[string]*resourceDigest {
 		d := map[string]*resourceDigest{}
 		for k, r := range rs {
+			blocks := slices.Clone(r.Blocks)
+			blocked := slices.Clone(r.Blocked)
+			slices.Sort(blocks)
+			slices.Sort(blocked)
 			d[k] = &resourceDigest{
 				rtype:   r.Type,
 				name:    r.Name,
-				blocks:  r.Blocks,
-				blocked: r.Blocked,
+				blocks:  blocks,
+				blocked: blocked,
 				shared:  r.Shared,
 			}
 		}
@@ -217,60 +244,109 @@ func TestListResourcesAzure(t *testing.T) {
 	}
 	a := toDigests(actual)
 	e := map[string]*resourceDigest{
-		toKey(typeResourceGroup, rgName): {
+		toKey(typeResourceGroup, rgID): {
 			rtype:  typeResourceGroup,
 			name:   rgName,
 			shared: true,
 		},
-		toKey(typeVirtualNetwork, vnetName): {
+		toKey(typeVirtualNetwork, vnetID): {
 			rtype:  typeVirtualNetwork,
 			name:   vnetName,
-			blocks: []string{toKey(typeResourceGroup, rgName)},
+			blocks: []string{toKey(typeResourceGroup, rgID)},
 		},
-		toKey(typeSubnet, subnetName): {
+		toKey(typeSubnet, subnetID): {
 			rtype: typeSubnet,
 			name:  subnetName,
 			blocks: []string{
-				toKey(typeVirtualNetwork, vnetName),
-				toKey(typeResourceGroup, rgName),
+				toKey(typeResourceGroup, rgID),
+				toKey(typeVirtualNetwork, vnetID),
 			},
 		},
-		toKey(typeRouteTable, rtName): {
+		toKey(typeRouteTable, rtID): {
 			rtype:  typeRouteTable,
 			name:   rtName,
-			blocks: []string{toKey(typeResourceGroup, rgName)},
+			blocks: []string{toKey(typeResourceGroup, rgID)},
 		},
-		toKey(typeVMScaleSet, vmssName): {
+		toKey(typeVMScaleSet, vmssID): {
 			rtype: typeVMScaleSet,
 			name:  vmssName,
 			blocks: []string{
-				toKey(typeResourceGroup, rgName),
-				toKey(typeVirtualNetwork, vnetName),
-				toKey(typeSubnet, subnetName),
-				toKey(typeDisk, diskName),
+				toKey(typeResourceGroup, rgID),
+				toKey(typeSubnet, subnetID),
+				toKey(typeVirtualNetwork, vnetID),
+			},
+			blocked: []string{
+				toKey(typeVMScaleSetVM, vmID),
 			},
 		},
-		toKey(typeDisk, diskName): {
-			rtype:  typeDisk,
-			name:   diskName,
-			blocks: []string{toKey(typeResourceGroup, rgName)},
+		toKey(typeDisk, diskID): {
+			rtype:   typeDisk,
+			name:    diskName,
+			blocks:  []string{toKey(typeResourceGroup, rgID)},
+			blocked: []string{toKey(typeVMScaleSet, vmssID)},
 		},
-		toKey(typeRoleAssignment, raName): {
-			rtype: typeRoleAssignment,
-			name:  raName,
-			blocks: []string{
-				toKey(typeResourceGroup, rgName),
-				toKey(typeVMScaleSet, vmssName),
-			},
+		toKey(typeRoleAssignment, raID): {
+			rtype:   typeRoleAssignment,
+			name:    raName,
+			blocks:  []string{toKey(typeResourceGroup, rgID)},
+			blocked: []string{toKey(typeVMScaleSet, vmssID)},
 		},
-		toKey(typeLoadBalancer, lbName): {
+		toKey(typeLoadBalancer, lbID): {
 			rtype:  typeLoadBalancer,
 			name:   lbName,
-			blocks: []string{toKey(typeResourceGroup, rgName)},
+			blocks: []string{toKey(typeResourceGroup, rgID)},
+		},
+		toKey(typeVMScaleSetVM, vmID): {
+			rtype:  typeVMScaleSetVM,
+			name:   vmName,
+			blocks: []string{toKey(typeResourceGroup, rgID), toKey(typeVMScaleSet, vmssID)},
 		},
 	}
 	if !reflect.DeepEqual(a, e) {
 		t.Errorf("expected %+v, but got %+v", e, a)
+	}
+}
+
+func TestToDiskResource_ManagedBy(t *testing.T) {
+	g := resourceGetter{
+		clusterInfo: resources.ClusterInfo{
+			AzureSubscriptionID:    "sub",
+			AzureResourceGroupName: "rg",
+		},
+	}
+
+	diskID := "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/disks/disk"
+	diskName := "disk"
+	vmssID := "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/virtualMachineScaleSets/vmss"
+
+	tests := []struct {
+		name        string
+		managedBy   *string
+		wantBlocked []string
+	}{
+		{
+			name:      "nil ManagedBy",
+			managedBy: nil,
+		},
+		{
+			name:        "valid ManagedBy blocks on parent VMSS",
+			managedBy:   to.Ptr(vmssID + "/virtualMachines/0"),
+			wantBlocked: []string{toKey(typeVMScaleSet, vmssID)},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			disk := &compute.Disk{
+				ID:        to.Ptr(diskID),
+				Name:      to.Ptr(diskName),
+				ManagedBy: tc.managedBy,
+			}
+			r := g.toDiskResource(disk)
+			if !reflect.DeepEqual(r.Blocked, tc.wantBlocked) {
+				t.Errorf("got Blocked=%v, want %v", r.Blocked, tc.wantBlocked)
+			}
+		})
 	}
 }
 
@@ -283,26 +359,26 @@ func TestIsOwnedByCluster(t *testing.T) {
 	}{
 		{
 			tags: map[string]*string{
-				azure.TagClusterName: to.StringPtr(clusterName),
+				azure.TagClusterName: to.Ptr(clusterName),
 			},
 			expected: true,
 		},
 		{
 			tags: map[string]*string{
-				azure.TagClusterName: to.StringPtr(clusterName),
-				"other-key":          to.StringPtr("other-tag"),
+				azure.TagClusterName: to.Ptr(clusterName),
+				"other-key":          to.Ptr("other-tag"),
 			},
 			expected: true,
 		},
 		{
 			tags: map[string]*string{
-				"other-key": to.StringPtr("other-tag"),
+				"other-key": to.Ptr("other-tag"),
 			},
 			expected: false,
 		},
 		{
 			tags: map[string]*string{
-				azure.TagClusterName: to.StringPtr("different-cluster"),
+				azure.TagClusterName: to.Ptr("different-cluster"),
 			},
 			expected: false,
 		},
@@ -310,10 +386,8 @@ func TestIsOwnedByCluster(t *testing.T) {
 	for i, tc := range testCases {
 		t.Run(fmt.Sprintf("test case %d", i), func(t *testing.T) {
 			g := &resourceGetter{
-				cluster: &kops.Cluster{
-					ObjectMeta: metav1.ObjectMeta{
-						Name: clusterName,
-					},
+				clusterInfo: resources.ClusterInfo{
+					Name: clusterName,
 				},
 			}
 			a := g.isOwnedByCluster(tc.tags)

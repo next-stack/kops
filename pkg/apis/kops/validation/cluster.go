@@ -23,10 +23,11 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/upup/pkg/fi"
+	"k8s.io/kops/util/pkg/vfs"
 )
 
-func ValidateClusterUpdate(obj *kops.Cluster, status *kops.ClusterStatus, old *kops.Cluster) field.ErrorList {
-	allErrs := ValidateCluster(obj, false)
+func ValidateClusterUpdate(obj *kops.Cluster, status *kops.ClusterStatus, old *kops.Cluster, vfsContext *vfs.VFSContext) field.ErrorList {
+	allErrs := ValidateCluster(obj, false, vfsContext)
 
 	// Validate etcd cluster changes
 	{
@@ -78,6 +79,13 @@ func validateEtcdClusterUpdate(fp *field.Path, obj kops.EtcdClusterSpec, status 
 
 	// If the etcd cluster has been created (i.e. if we have status) then we can't support some changes
 	if etcdClusterStatus != nil {
+		if obj.Image != old.Image {
+			allErrs = append(allErrs, field.Forbidden(fp.Child("image"), "image can only be set when creating a new etcd cluster"))
+		}
+		if obj.Image != "" && obj.Version != old.Version {
+			allErrs = append(allErrs, field.Forbidden(fp.Child("version"), "version cannot be changed when image is set"))
+		}
+
 		newMembers := make(map[string]kops.EtcdMemberSpec)
 		for _, member := range obj.Members {
 			newMembers[member.Name] = member
@@ -106,7 +114,7 @@ func validateEtcdMemberUpdate(fp *field.Path, obj kops.EtcdMemberSpec, old kops.
 		allErrs = append(allErrs, field.Forbidden(fp.Child("name"), "name cannot be changed"))
 	}
 
-	if fi.StringValue(obj.InstanceGroup) != fi.StringValue(old.InstanceGroup) {
+	if fi.ValueOf(obj.InstanceGroup) != fi.ValueOf(old.InstanceGroup) {
 		allErrs = append(allErrs, field.Forbidden(fp.Child("instanceGroup"), "instanceGroup cannot be changed"))
 	}
 
@@ -144,7 +152,6 @@ func validateCloudLabels(labels map[string]string, fldPath *field.Path) (allErrs
 		for label := range labels {
 			if strings.HasPrefix(label, reservedPrefix) {
 				allErrs = append(allErrs, field.Forbidden(fldPath.Child(label), fmt.Sprintf("%q is a reserved label prefix and cannot be used as a custom label", reservedPrefix)))
-
 			}
 		}
 	}

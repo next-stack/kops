@@ -17,6 +17,7 @@ limitations under the License.
 package server
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -24,71 +25,139 @@ import (
 	"encoding/pem"
 	"fmt"
 	"hash/fnv"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"runtime/debug"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 	"k8s.io/kops/cmd/kops-controller/pkg/config"
+	"k8s.io/kops/cmd/kops-controller/pkg/controllerclientset"
+	"k8s.io/kops/pkg/apis/kops"
+	"k8s.io/kops/pkg/apis/kops/model"
 	"k8s.io/kops/pkg/apis/nodeup"
 	"k8s.io/kops/pkg/bootstrap"
+	"k8s.io/kops/pkg/client/simple"
 	"k8s.io/kops/pkg/pki"
 	"k8s.io/kops/pkg/rbac"
 	"k8s.io/kops/upup/pkg/fi"
+	"k8s.io/kops/upup/pkg/fi/secrets"
 	"k8s.io/kops/util/pkg/vfs"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
 type Server struct {
-	opt        *config.Options
-	certNames  sets.String
-	keypairIDs map[string]string
-	server     *http.Server
-	verifier   bootstrap.Verifier
-	keystore   pki.Keystore
+	opt         *config.Options
+	certNames   sets.Set[string]
+	keypairIDs  map[string]string
+	server      *http.Server
+	verifier    bootstrap.Verifier
+	keystore    *keystore
+	secretStore fi.SecretStore
+
+	clientset simple.Clientset
 
 	// configBase is the base of the configuration storage.
 	configBase vfs.Path
+
+	// uncachedClient is an uncached client for the kube apiserver
+	uncachedClient client.Client
+
+	// challengeClient performs our callback-challenge into the node
+	challengeClient *bootstrap.ChallengeClient
 }
 
-func NewServer(opt *config.Options, verifier bootstrap.Verifier) (*Server, error) {
+var _ manager.LeaderElectionRunnable = &Server{}
+
+func NewServer(vfsContext *vfs.VFSContext, opt *config.Options, verifier bootstrap.Verifier, uncachedClient client.Client) (*Server, error) {
 	server := &http.Server{
 		Addr: opt.Server.Listen,
 		TLSConfig: &tls.Config{
-			MinVersion:               tls.VersionTLS12,
-			PreferServerCipherSuites: true,
+			MinVersion: tls.VersionTLS12,
 		},
 	}
 
 	s := &Server{
-		opt:       opt,
-		certNames: sets.NewString(opt.Server.CertNames...),
-		server:    server,
-		verifier:  verifier,
+		opt:            opt,
+		certNames:      sets.New(opt.Server.CertNames...),
+		server:         server,
+		verifier:       verifier,
+		uncachedClient: uncachedClient,
 	}
 
-	configBase, err := vfs.Context.BuildVfsPath(opt.ConfigBase)
+	configBase, err := vfsContext.BuildVfsPath(opt.ConfigBase)
 	if err != nil {
-		return nil, fmt.Errorf("cannot parse ConfigBase %q: %v", opt.ConfigBase, err)
+		return nil, fmt.Errorf("cannot parse ConfigBase %q: %w", opt.ConfigBase, err)
 	}
 	s.configBase = configBase
 
+	s.keystore, s.keypairIDs, err = newKeystore(opt.Server.CABasePath, opt.Server.SigningCAs)
+	if err != nil {
+		return nil, err
+	}
+
+	p, err := vfsContext.BuildVfsPath(opt.SecretStore)
+	if err != nil {
+		return nil, fmt.Errorf("cannot parse SecretStore %q: %w", opt.SecretStore, err)
+	}
+	s.secretStore = secrets.NewVFSSecretStore(nil, p)
+
+	clientset, err := controllerclientset.New(vfsContext, configBase, opt.ClusterName, s.keystore, s.secretStore)
+	if err != nil {
+		return nil, fmt.Errorf("building controller clientset: %w", err)
+	}
+	s.clientset = clientset
+
+	challengeClient, err := bootstrap.NewChallengeClient(s.keystore)
+	if err != nil {
+		return nil, err
+	}
+	s.challengeClient = challengeClient
+
 	r := http.NewServeMux()
+	r.Handle("/healthz", http.HandlerFunc(healthCheck))
 	r.Handle("/bootstrap", http.HandlerFunc(s.bootstrap))
 	server.Handler = recovery(r)
 
 	return s, nil
 }
 
-func (s *Server) Start() error {
-	var err error
-	s.keystore, s.keypairIDs, err = newKeystore(s.opt.Server.CABasePath, s.opt.Server.SigningCAs)
-	if err != nil {
-		return err
-	}
+func (s *Server) GetClientset() simple.Clientset {
+	return s.clientset
+}
 
+func (s *Server) NeedLeaderElection() bool {
+	return false
+}
+
+func (s *Server) Start(ctx context.Context) error {
+	go func() {
+		<-ctx.Done()
+
+		shutdownContext, cleanup := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanup()
+
+		if err := s.server.Shutdown(shutdownContext); err != nil {
+			klog.Warningf("error during HTTP server shutdown: %v", err)
+		}
+
+		if err := s.server.Close(); err != nil {
+			klog.Warningf("error from HTTP server close: %v", err)
+		}
+	}()
+
+	klog.Infof("kops-controller listening on %s", s.opt.Server.Listen)
 	return s.server.ListenAndServeTLS(s.opt.Server.ServerCertificatePath, s.opt.Server.ServerKeyPath)
+}
+
+func healthCheck(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("ok"))
 }
 
 func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
@@ -98,29 +167,58 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := ioutil.ReadAll(r.Body)
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		klog.Infof("bootstrap %s read err: %v", r.RemoteAddr, err)
 		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(fmt.Sprintf("bootstrap %s failed to read body: %v", r.RemoteAddr, err)))
+		_, _ = fmt.Fprintf(w, "bootstrap %s failed to read body: %v", r.RemoteAddr, err)
 		return
 	}
 
 	ctx := r.Context()
 
-	id, err := s.verifier.VerifyToken(ctx, r.Header.Get("Authorization"), body)
+	id, err := s.verifier.VerifyToken(ctx, r, r.Header.Get("Authorization"), body)
 	if err != nil {
+		// means that we should exit nodeup gracefully
+		if err == bootstrap.ErrAlreadyExists {
+			w.WriteHeader(http.StatusConflict)
+			klog.Infof("%s: %v", r.RemoteAddr, err)
+			return
+		}
 		klog.Infof("bootstrap %s verify err: %v", r.RemoteAddr, err)
 		w.WriteHeader(http.StatusForbidden)
-		_, _ = w.Write([]byte(fmt.Sprintf("failed to verify token: %v", err)))
+		// don't return the error; this allows us to have richer errors without security implications
+		_, _ = w.Write([]byte("failed to verify token"))
 		return
+	}
+
+	// Once the node is registered, we don't allow further registrations, this protects against a pod or escaped workload attempting to impersonate the node.
+	{
+		node := &corev1.Node{}
+		err := s.uncachedClient.Get(ctx, types.NamespacedName{Name: id.NodeName}, node)
+		if err == nil {
+			for _, condition := range node.Status.Conditions {
+				if condition.Type == corev1.NodeReady && condition.Status == corev1.ConditionTrue {
+					klog.Infof("bootstrap %s node %q already exists; denying to avoid node-impersonation attacks", r.RemoteAddr, id.NodeName)
+					w.WriteHeader(http.StatusConflict)
+					_, _ = w.Write([]byte("node already registered"))
+					return
+				}
+			}
+		}
+		if err != nil && !errors.IsNotFound(err) {
+			klog.Infof("bootstrap %s error querying for node %q: %v", r.RemoteAddr, id.NodeName, err)
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte("internal error"))
+			return
+		}
 	}
 
 	req := &nodeup.BootstrapRequest{}
 	if err := json.Unmarshal(body, req); err != nil {
 		klog.Infof("bootstrap %s decode err: %v", r.RemoteAddr, err)
 		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(fmt.Sprintf("failed to decode: %v", err)))
+		_, _ = fmt.Fprintf(w, "failed to decode: %v", err)
 		return
 	}
 
@@ -129,6 +227,23 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = w.Write([]byte("unexpected APIVersion"))
 		return
+	}
+
+	if model.UseChallengeCallback(kops.CloudProviderID(s.opt.Cloud)) {
+		if id.ChallengeEndpoint == "" {
+			klog.Infof("cannot determine endpoint for bootstrap callback challenge from %q", r.RemoteAddr)
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte("callback failed"))
+			return
+		}
+		if err := s.challengeClient.DoCallbackChallenge(ctx, s.opt.ClusterName, id.ChallengeEndpoint, req); err != nil {
+			klog.Infof("bootstrap %s callback challenge failed: %v", r.RemoteAddr, err)
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte("callback failed"))
+			return
+		}
+
+		klog.Infof("performed successful callback challenge with %s; identified as %s", id.ChallengeEndpoint, id.NodeName)
 	}
 
 	resp := &nodeup.BootstrapResponse{
@@ -150,16 +265,18 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 	// Skew the certificate lifetime by up to 30 days based on information about the requesting node.
 	// This is so that different nodes created at the same time have the certificates they generated
 	// expire at different times, but all certificates on a given node expire around the same time.
+	// We salt on the verified NodeName so nodes sharing a NAT/load balancer (same RemoteAddr) still
+	// get independent skews.
 	hash := fnv.New32()
-	_, _ = hash.Write([]byte(r.RemoteAddr))
+	_, _ = hash.Write([]byte(id.NodeName))
 	validHours := (455 * 24) + (hash.Sum32() % (30 * 24))
 
 	for name, pubKey := range req.Certs {
-		cert, err := s.issueCert(name, pubKey, id, validHours, req.KeypairIDs)
+		cert, err := s.issueCert(ctx, name, pubKey, id, validHours, req.KeypairIDs)
 		if err != nil {
 			klog.Infof("bootstrap %s cert %q issue err: %v", r.RemoteAddr, name, err)
 			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte(fmt.Sprintf("failed to issue %q: %v", name, err)))
+			_, _ = fmt.Fprintf(w, "failed to issue %q: %v", name, err)
 			return
 		}
 		resp.Certs[name] = cert
@@ -167,11 +284,14 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
-	klog.Infof("bootstrap %s %s success", r.RemoteAddr, id.NodeName)
+	klog.Infof("bootstrap %s (req.includeNodeConfig: %t, req.certs.#: %d, req.keypairs.#: %d) success", r.RemoteAddr, req.IncludeNodeConfig, len(req.Certs), len(req.KeypairIDs))
 }
 
-func (s *Server) issueCert(name string, pubKey string, id *bootstrap.VerifyResult, validHours uint32, keypairIDs map[string]string) (string, error) {
+func (s *Server) issueCert(ctx context.Context, name string, pubKey string, id *bootstrap.VerifyResult, validHours uint32, keypairIDs map[string]string) (string, error) {
 	block, _ := pem.Decode([]byte(pubKey))
+	if block == nil {
+		return "", fmt.Errorf("decoding pem public key")
+	}
 	if block.Type != "RSA PUBLIC KEY" {
 		return "", fmt.Errorf("unexpected key type %q", block.Type)
 	}
@@ -226,7 +346,7 @@ func (s *Server) issueCert(name string, pubKey string, id *bootstrap.VerifyResul
 		}
 	}
 
-	cert, _, _, err := pki.IssueCert(issueReq, s.keystore)
+	cert, _, _, err := pki.IssueCert(ctx, issueReq, s.keystore)
 	if err != nil {
 		return "", fmt.Errorf("issuing certificate: %v", err)
 	}

@@ -24,7 +24,7 @@ import (
 	compute "google.golang.org/api/compute/v1"
 	"k8s.io/klog/v2"
 	"k8s.io/kops/pkg/apis/kops"
-	"k8s.io/kops/protokube/pkg/etcd"
+	"k8s.io/kops/pkg/etcd"
 	"k8s.io/kops/upup/pkg/fi"
 )
 
@@ -112,7 +112,7 @@ func (c *gceCloudImplementation) findEtcdStatus(cluster *kops.Cluster) ([]kops.E
 				etcdClusterSpec = spec
 			} else if strings.HasPrefix(k, GceLabelNameRolePrefix) {
 				roleName := strings.TrimPrefix(k, GceLabelNameRolePrefix)
-				if roleName == "master" {
+				if roleName == "master" || roleName == "control-plane" {
 					master = true
 				}
 			}
@@ -131,7 +131,7 @@ func (c *gceCloudImplementation) findEtcdStatus(cluster *kops.Cluster) ([]kops.E
 
 		status.Members = append(status.Members, &kops.EtcdMemberStatus{
 			Name:     etcdClusterSpec.NodeName,
-			VolumeId: disk.Name,
+			VolumeID: disk.Name,
 		})
 	}
 

@@ -149,7 +149,6 @@ func (z *zones) New(name string) (dnsprovider.Zone, error) {
 		name:   name,
 		client: z.client,
 	}, nil
-
 }
 
 // zone implements dnsprovider.Zone
@@ -186,24 +185,30 @@ func (r *resourceRecordSets) List() ([]dnsprovider.ResourceRecordSet, error) {
 		return nil, err
 	}
 
-	var rrset *resourceRecordSet
 	var rrsets []dnsprovider.ResourceRecordSet
+	rrsetsWithoutDups := make(map[string]*resourceRecordSet)
+
 	for _, record := range records {
 		// digitalocean API returns the record without the zone
 		// but the consumers of this interface expect the zone to be included
 		recordName := dns.EnsureDotSuffix(record.Name) + r.Zone().Name()
-		rrset = &resourceRecordSet{
-			name:       recordName,
-			data:       record.Data,
-			ttl:        record.TTL,
-			recordType: rrstype.RrsType(record.Type),
+		if set, ok := rrsetsWithoutDups[recordName]; !ok {
+			rrsetsWithoutDups[recordName] = &resourceRecordSet{
+				name:       recordName,
+				data:       []string{record.Data},
+				ttl:        record.TTL,
+				recordType: rrstype.RrsType(record.Type),
+			}
+		} else {
+			set.data = append(set.data, record.Data)
 		}
+	}
 
-		rrsets = append(rrsets, rrset)
+	for _, set := range rrsetsWithoutDups {
+		rrsets = append(rrsets, set)
 	}
 
 	return rrsets, nil
-
 }
 
 // Get returns a list of dnsprovider.ResourceRecordSet that matches the name parameter
@@ -225,13 +230,13 @@ func (r *resourceRecordSets) Get(name string) ([]dnsprovider.ResourceRecordSet, 
 
 // New returns an implementation of dnsprovider.ResourceRecordSet
 func (r *resourceRecordSets) New(name string, rrdatas []string, ttl int64, rrstype rrstype.RrsType) dnsprovider.ResourceRecordSet {
-	if len(rrdatas) > 1 {
+	if len(rrdatas) == 0 {
 		return nil
 	}
 
 	return &resourceRecordSet{
 		name:       name,
-		data:       rrdatas[0],
+		data:       rrdatas,
 		ttl:        int(ttl),
 		recordType: rrstype,
 	}
@@ -258,7 +263,7 @@ func (r *resourceRecordSets) Zone() dnsprovider.Zone {
 // a single record associated with a zone
 type resourceRecordSet struct {
 	name       string
-	data       string
+	data       []string
 	ttl        int
 	recordType rrstype.RrsType
 }
@@ -271,7 +276,7 @@ func (r *resourceRecordSet) Name() string {
 // Rrdatas returns a list of data associated with a resource record set
 // in DO this is almost always the IP of a record
 func (r *resourceRecordSet) Rrdatas() []string {
-	return []string{r.data}
+	return r.data
 }
 
 // Ttl returns the time-to-live of a record

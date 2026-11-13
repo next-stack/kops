@@ -15,8 +15,8 @@ type Service interface {
 	serviceKubernetes
 	serviceECS
 	serviceCommon
+	serviceExtendedResourceDefinition
 }
-
 type serviceKubernetes interface {
 	ListClusters(context.Context, *ListClustersInput) (*ListClustersOutput, error)
 	CreateCluster(context.Context, *CreateClusterInput) (*CreateClusterOutput, error)
@@ -43,6 +43,16 @@ type serviceKubernetes interface {
 	// Deprecated: Roll is obsolete, exists for backward compatibility only,
 	// and should not be used. Please use CreateRoll instead.
 	Roll(context.Context, *RollClusterInput) (*RollClusterOutput, error)
+
+	GetClusterAggregatedCosts(context.Context, *ClusterAggregatedCostInput) (*ClusterAggregatedCostOutput, error)
+
+	ReadClusterNodes(context.Context, *ReadClusterNodeInput) (*ReadClusterNodeOutput, error)
+
+	ListMigrations(context.Context, *ReadMigrationInput) (*ReadMigrationOutput, error)
+
+	MigrationStatus(context.Context, *ReadMigrationStatusInput) (*ReadMigrationStatusOutput, error)
+	AttachLoadBalancer(context.Context, *AttachLoadbalancerInput) (*AttachLoadbalancerOutput, error)
+	DetachLoadBalancer(context.Context, *DetachLoadbalancerInput) (*DetachLoadbalancerOutput, error)
 }
 
 type serviceECS interface {
@@ -62,7 +72,19 @@ type serviceECS interface {
 }
 
 type serviceCommon interface {
+	ListOceanResourceSuggestions(context.Context, *ListOceanResourceSuggestionsInput) (*ListOceanResourceSuggestionsOutput, error)
+
+	// Deprecated: ListResourceSuggestions is obsolete, exists for backward compatibility only,
+	// and should not be used. Please use ListOceanResourceSuggestions instead.
 	ListResourceSuggestions(context.Context, *ListResourceSuggestionsInput) (*ListResourceSuggestionsOutput, error)
+}
+
+type serviceExtendedResourceDefinition interface {
+	ListExtendedResourceDefinition(context.Context, *ListExtendedResourceDefinitionsInput) (*ListExtendedResourceDefinitionsOutput, error)
+	CreateExtendedResourceDefinition(context.Context, *CreateExtendedResourceDefinitionInput) (*CreateExtendedResourceDefinitionOutput, error)
+	ReadExtendedResourceDefinition(context.Context, *ReadExtendedResourceDefinitionInput) (*ReadExtendedResourceDefinitionOutput, error)
+	UpdateExtendedResourceDefinition(context.Context, *UpdateExtendedResourceDefinitionInput) (*UpdateExtendedResourceDefinitionOutput, error)
+	DeleteExtendedResourceDefinition(context.Context, *DeleteExtendedResourceDefinitionInput) (*DeleteExtendedResourceDefinitionOutput, error)
 }
 
 type ServiceOp struct {

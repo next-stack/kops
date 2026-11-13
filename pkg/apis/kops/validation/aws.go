@@ -17,12 +17,16 @@ limitations under the License.
 package validation
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"strconv"
 	"strings"
 
-	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/aws/aws-sdk-go-v2/aws/arn"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/kops/pkg/apis/kops"
@@ -30,35 +34,96 @@ import (
 	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
 )
 
-func awsValidateCluster(c *kops.Cluster) field.ErrorList {
+func awsValidateCluster(c *kops.Cluster, strict bool) field.ErrorList {
 	allErrs := field.ErrorList{}
 
-	if c.Spec.API != nil {
-		if c.Spec.API.LoadBalancer != nil {
-			allErrs = append(allErrs, awsValidateAdditionalSecurityGroups(field.NewPath("spec", "api", "loadBalancer", "additionalSecurityGroups"), c.Spec.API.LoadBalancer.AdditionalSecurityGroups)...)
-			allErrs = append(allErrs, awsValidateSSLPolicy(field.NewPath("spec", "api", "loadBalancer", "sslPolicy"), c.Spec.API.LoadBalancer)...)
-			allErrs = append(allErrs, awsValidateLoadBalancerSubnets(field.NewPath("spec", "api", "loadBalancer", "subnets"), c.Spec)...)
+	if c.Spec.API.LoadBalancer != nil {
+		lbPath := field.NewPath("spec", "api", "loadBalancer")
+		lbSpec := c.Spec.API.LoadBalancer
+		if lbSpec.Class == kops.LoadBalancerClassClassic {
+			allErrs = append(allErrs, field.Forbidden(lbPath.Child("class"), "AWS Classic Load Balancer for API is no longer supported; migrate to a Network Load Balancer using kOps 1.36 or earlier. See https://github.com/kubernetes/kops/blob/master/permalinks/acm_nlb.md"))
+		} else if strict || lbSpec.Class != "" {
+			allErrs = append(allErrs, IsValidValue(lbPath.Child("class"), &lbSpec.Class, kops.SupportedLoadBalancerClasses)...)
 		}
+		allErrs = append(allErrs, awsValidateTopologyDNS(lbPath.Child("type"), c)...)
+		allErrs = append(allErrs, awsValidateSecurityGroupOverride(lbPath.Child("securityGroupOverride"), lbSpec)...)
+		allErrs = append(allErrs, awsValidateAdditionalSecurityGroups(lbPath.Child("additionalSecurityGroups"), lbSpec.AdditionalSecurityGroups)...)
+		if lbSpec.Class == kops.LoadBalancerClassNetwork && lbSpec.UseForInternalAPI && lbSpec.Type == kops.LoadBalancerTypeInternal {
+			allErrs = append(allErrs, field.Forbidden(lbPath.Child("useForInternalAPI"), "useForInternalAPI cannot be used with internal NLB due lack of hairpinning support"))
+		}
+		if lbSpec.SSLCertificate != "" && lbSpec.Class != kops.LoadBalancerClassNetwork {
+			allErrs = append(allErrs, field.Forbidden(lbPath.Child("sslCertificate"), "sslCertificate requires a network load balancer. See https://github.com/kubernetes/kops/blob/master/permalinks/acm_nlb.md"))
+		}
+		allErrs = append(allErrs, awsValidateSSLPolicy(lbPath.Child("sslPolicy"), lbSpec)...)
+		allErrs = append(allErrs, awsValidateLoadBalancerSubnets(lbPath.Child("subnets"), c.Spec)...)
 	}
 
-	allErrs = append(allErrs, awsValidateExternalCloudControllerManager(c)...)
+	allErrs = append(allErrs, awsValidateEBSCSIDriver(c)...)
+
+	allErrs = append(allErrs, awsValidateNLBSecurityGroupMode(c)...)
+
+	allErrs = append(allErrs, awsValidateUseIPBasedNodeNames(c)...)
+
+	allErrs = append(allErrs, awsValidateS3FileRepositoryPartition(c)...)
+
+	if c.Spec.Authentication != nil && c.Spec.Authentication.AWS != nil {
+		allErrs = append(allErrs, awsValidateIAMAuthenticator(field.NewPath("spec", "authentication", "aws"), c.Spec.Authentication.AWS)...)
+	}
 
 	return allErrs
 }
 
-func awsValidateExternalCloudControllerManager(cluster *kops.Cluster) (allErrs field.ErrorList) {
+func awsValidateS3FileRepositoryPartition(cluster *kops.Cluster) field.ErrorList {
+	assets := cluster.Spec.Assets
+	if assets == nil || assets.FileRepository == nil || !strings.HasPrefix(*assets.FileRepository, "s3://") {
+		return nil
+	}
+
+	region, err := awsup.FindRegion(cluster)
+	if err != nil {
+		// Subnet validation reports invalid or missing zones separately.
+		return nil
+	}
+
+	fldPath := field.NewPath("spec", "assets", "fileRepository")
+	supported, err := awsup.SupportsS3BootstrapEndpoint(context.TODO(), region)
+	if err != nil {
+		return field.ErrorList{field.Invalid(fldPath, *assets.FileRepository, err.Error())}
+	}
+	if !supported {
+		return field.ErrorList{field.Forbidden(fldPath, fmt.Sprintf("s3:// fileRepository is not supported in AWS region %q", region))}
+	}
+	return nil
+}
+
+func awsValidateEBSCSIDriver(cluster *kops.Cluster) (allErrs field.ErrorList) {
 	c := cluster.Spec
 
-	if c.ExternalCloudControllerManager == nil {
-		return allErrs
-	}
-	fldPath := field.NewPath("spec", "externalCloudControllerManager")
-	if !hasAWSEBSCSIDriver(c) {
-		allErrs = append(allErrs, field.Forbidden(fldPath,
-			"AWS external CCM cannot be used without enabling spec.cloudConfig.AWSEBSCSIDriver."))
+	fldPath := field.NewPath("spec", "cloudProvider", "aws", "ebsCSIDriver", "enabled")
+	if c.CloudProvider.AWS.EBSCSIDriver != nil && c.CloudProvider.AWS.EBSCSIDriver.Enabled != nil && !*c.CloudProvider.AWS.EBSCSIDriver.Enabled {
+		allErrs = append(allErrs, field.Forbidden(fldPath, "must not be disabled"))
 	}
 	return allErrs
+}
 
+func awsValidateNLBSecurityGroupMode(cluster *kops.Cluster) (allErrs field.ErrorList) {
+	c := cluster.Spec
+
+	fldPath := field.NewPath("spec", "cloudProvider", "aws", "nlbSecurityGroupMode")
+	if c.CloudProvider.AWS.NLBSecurityGroupMode != nil {
+		allErrs = append(allErrs, IsValidValue(fldPath, c.CloudProvider.AWS.NLBSecurityGroupMode, []string{"Managed"})...)
+	}
+	return allErrs
+}
+
+func awsValidateUseIPBasedNodeNames(cluster *kops.Cluster) (allErrs field.ErrorList) {
+	c := cluster.Spec
+
+	fldPath := field.NewPath("spec", "cloudProvider", "aws", "useIPBasedNodeNames")
+	if fi.ValueOf(c.CloudProvider.AWS.UseIPBasedNodeNames) && c.IsIPv6Only() {
+		allErrs = append(allErrs, field.Forbidden(fldPath, "IP-based node names are not supported on IPv6-only clusters"))
+	}
+	return allErrs
 }
 
 func awsValidateInstanceGroup(ig *kops.InstanceGroup, cloud awsup.AWSCloud) field.ErrorList {
@@ -84,6 +149,21 @@ func awsValidateInstanceGroup(ig *kops.InstanceGroup, cloud awsup.AWSCloud) fiel
 		allErrs = append(allErrs, awsValidateCPUCredits(field.NewPath("spec"), &ig.Spec, cloud)...)
 	}
 
+	if ig.Spec.MaxInstanceLifetime != nil {
+		allErrs = append(allErrs, awsValidateMaximumInstanceLifetime(field.NewPath(ig.GetName(), "spec"), ig.Spec.MaxInstanceLifetime)...)
+	}
+
+	return allErrs
+}
+
+func awsValidateMaximumInstanceLifetime(fieldPath *field.Path, maxInstanceLifetime *metav1.Duration) field.ErrorList {
+	allErrs := field.ErrorList{}
+	const minMaxInstanceLifetime = 86400
+	lifetimeSec := int64(maxInstanceLifetime.Seconds())
+	if lifetimeSec != 0 && lifetimeSec < minMaxInstanceLifetime {
+		allErrs = append(allErrs, field.Invalid(fieldPath.Child("maxInstanceLifetime"), maxInstanceLifetime, fmt.Sprintf("max instance lifetime must be greater than %d or equal to 0", int64(minMaxInstanceLifetime))))
+	}
+
 	return allErrs
 }
 
@@ -95,7 +175,7 @@ func awsValidateInstanceMetadata(fieldPath *field.Path, instanceMetadata *kops.I
 	}
 
 	if instanceMetadata.HTTPPutResponseHopLimit != nil {
-		httpPutResponseHopLimit := fi.Int64Value(instanceMetadata.HTTPPutResponseHopLimit)
+		httpPutResponseHopLimit := fi.ValueOf(instanceMetadata.HTTPPutResponseHopLimit)
 		if httpPutResponseHopLimit < 1 || httpPutResponseHopLimit > 64 {
 			allErrs = append(allErrs, field.Invalid(fieldPath.Child("httpPutResponseHopLimit"), instanceMetadata.HTTPPutResponseHopLimit,
 				"HTTPPutResponseLimit must be a value between 1 and 64"))
@@ -126,6 +206,24 @@ func awsValidateAdditionalSecurityGroups(fieldPath *field.Path, groups []string)
 	return allErrs
 }
 
+func awsValidateSecurityGroupOverride(fieldPath *field.Path, lbSpec *kops.LoadBalancerAccessSpec) field.ErrorList {
+	if lbSpec.SecurityGroupOverride == nil {
+		return nil
+	}
+
+	allErrs := field.ErrorList{}
+
+	override := *lbSpec.SecurityGroupOverride
+	if strings.TrimSpace(override) == "" {
+		return append(allErrs, field.Invalid(fieldPath, override, "security group override cannot be empty, if specified"))
+	}
+	if !strings.HasPrefix(override, "sg-") {
+		allErrs = append(allErrs, field.Invalid(fieldPath, override, "security group override does not match the expected AWS format"))
+	}
+
+	return allErrs
+}
+
 func awsValidateInstanceTypeAndImage(instanceTypeFieldPath *field.Path, imageFieldPath *field.Path, instanceTypes string, image string, cloud awsup.AWSCloud) field.ErrorList {
 	if cloud == nil || instanceTypes == "" {
 		return nil
@@ -136,33 +234,35 @@ func awsValidateInstanceTypeAndImage(instanceTypeFieldPath *field.Path, imageFie
 	imageInfo, err := cloud.ResolveImage(image)
 	if err != nil {
 		return append(allErrs, field.Invalid(imageFieldPath, image,
-			fmt.Sprintf("image specified is invalid: %q", image)))
+			fmt.Sprintf("specified image %q is invalid: %s", image, err)))
 	}
-	imageArch := fi.StringValue(imageInfo.Architecture)
+	imageArch := string(imageInfo.Architecture)
 
 	// Spotinst uses the instance type field to keep a "," separated list of instance types
 	for _, instanceType := range strings.Split(instanceTypes, ",") {
 		machineInfo, err := cloud.DescribeInstanceType(instanceType)
 		if err != nil {
-			allErrs = append(allErrs, field.Invalid(instanceTypeFieldPath, instanceTypes, fmt.Sprintf("machine type specified is invalid: %q", instanceType)))
+			allErrs = append(allErrs, field.Invalid(instanceTypeFieldPath, instanceTypes, fmt.Sprintf("machine type %q is invalid: %v", instanceType, err)))
 			continue
 		}
 
 		found := false
 		if machineInfo != nil && machineInfo.ProcessorInfo != nil {
 			for _, machineArch := range machineInfo.ProcessorInfo.SupportedArchitectures {
-				if imageArch == fi.StringValue(machineArch) {
+				if imageArch == string(machineArch) {
 					found = true
 				}
 			}
 		}
 		if !found {
-			var machineArch []string
+			machineArch := make([]string, 0)
 			if machineInfo != nil && machineInfo.ProcessorInfo != nil && machineInfo.ProcessorInfo.SupportedArchitectures != nil {
-				machineArch = fi.StringSliceValue(machineInfo.ProcessorInfo.SupportedArchitectures)
+				for _, arch := range machineInfo.ProcessorInfo.SupportedArchitectures {
+					machineArch = append(machineArch, string(arch))
+				}
 			}
 			allErrs = append(allErrs, field.Invalid(instanceTypeFieldPath, instanceTypes,
-				fmt.Sprintf("machine type architecture does not match image architecture: %q - %q", strings.Join(machineArch, ","), imageArch)))
+				fmt.Sprintf("machine type architecture %q does not match image architecture %q", strings.Join(machineArch, ","), imageArch)))
 		}
 	}
 
@@ -182,8 +282,8 @@ func awsValidateSpotDurationInMinute(fieldPath *field.Path, ig *kops.InstanceGro
 func awsValidateInstanceInterruptionBehavior(fieldPath *field.Path, ig *kops.InstanceGroup) field.ErrorList {
 	allErrs := field.ErrorList{}
 	if ig.Spec.InstanceInterruptionBehavior != nil {
-		instanceInterruptionBehavior := *ig.Spec.InstanceInterruptionBehavior
-		allErrs = append(allErrs, IsValidValue(fieldPath, &instanceInterruptionBehavior, ec2.InstanceInterruptionBehavior_Values())...)
+		instanceInterruptionBehavior := ec2types.InstanceInterruptionBehavior(*ig.Spec.InstanceInterruptionBehavior)
+		allErrs = append(allErrs, IsValidValue(fieldPath, &instanceInterruptionBehavior, ec2types.InstanceInterruptionBehavior("").Values())...)
 	}
 	return allErrs
 }
@@ -192,46 +292,52 @@ func awsValidateInstanceInterruptionBehavior(fieldPath *field.Path, ig *kops.Ins
 func awsValidateMixedInstancesPolicy(path *field.Path, spec *kops.MixedInstancesPolicySpec, ig *kops.InstanceGroup, cloud awsup.AWSCloud) field.ErrorList {
 	var errs field.ErrorList
 
-	mainMachineTypeInfo, err := awsup.GetMachineTypeInfo(cloud, ig.Spec.MachineType)
-	if err != nil {
-		errs = append(errs, field.Invalid(field.NewPath("spec", "machineType"), ig.Spec.MachineType, fmt.Sprintf("machine type specified is invalid: %q", ig.Spec.MachineType)))
-		return errs
-	}
-
-	hasGPU := mainMachineTypeInfo.GPU
-
-	// @step: check the instance types are valid
-	for i, instanceTypes := range spec.Instances {
-		fld := path.Child("instances").Index(i)
-		errs = append(errs, awsValidateInstanceTypeAndImage(path.Child("instances").Index(i), path.Child("image"), instanceTypes, ig.Spec.Image, cloud)...)
-
-		for _, instanceType := range strings.Split(instanceTypes, ",") {
-			machineTypeInfo, err := awsup.GetMachineTypeInfo(cloud, instanceType)
-			if err != nil {
-				errs = append(errs, field.Invalid(field.NewPath("spec", "machineType"), ig.Spec.MachineType, fmt.Sprintf("machine type specified is invalid: %q", ig.Spec.MachineType)))
-				return errs
-			}
-			if machineTypeInfo.GPU != hasGPU {
-				errs = append(errs, field.Forbidden(fld, "Cannot mix GPU and non-GPU machine types in the same Instance Group"))
-			}
+	if ig.Spec.Manager == kops.InstanceManagerKarpenter {
+		for i, instanceTypes := range spec.Instances {
+			fld := path.Child("instances").Index(i)
+			errs = append(errs, awsValidateInstanceTypeAndImage(fld, path.Child("image"), instanceTypes, ig.Spec.Image, cloud)...)
+		}
+	} else {
+		mainMachineTypeInfo, err := awsup.GetMachineTypeInfo(cloud, ec2types.InstanceType(ig.Spec.MachineType))
+		if err != nil {
+			errs = append(errs, field.Invalid(field.NewPath("spec", "machineType"), ig.Spec.MachineType, fmt.Sprintf("machine type specified is invalid: %q", ig.Spec.MachineType)))
+			return errs
 		}
 
+		hasGPU := mainMachineTypeInfo.GPU
+
+		// @step: check the instance types are valid
+		for i, instanceTypes := range spec.Instances {
+			fld := path.Child("instances").Index(i)
+			errs = append(errs, awsValidateInstanceTypeAndImage(path.Child("instances").Index(i), path.Child("image"), instanceTypes, ig.Spec.Image, cloud)...)
+
+			for _, instanceType := range strings.Split(instanceTypes, ",") {
+				machineTypeInfo, err := awsup.GetMachineTypeInfo(cloud, ec2types.InstanceType(instanceType))
+				if err != nil {
+					errs = append(errs, field.Invalid(field.NewPath("spec", "machineType"), ig.Spec.MachineType, fmt.Sprintf("machine type specified is invalid: %q", ig.Spec.MachineType)))
+					return errs
+				}
+				if machineTypeInfo.GPU != hasGPU {
+					errs = append(errs, field.Forbidden(fld, "Cannot mix GPU and non-GPU machine types in the same Instance Group"))
+				}
+			}
+		}
 	}
 
 	if spec.OnDemandBase != nil {
-		if fi.Int64Value(spec.OnDemandBase) < 0 {
+		if fi.ValueOf(spec.OnDemandBase) < 0 {
 			errs = append(errs, field.Invalid(path.Child("onDemandBase"), spec.OnDemandBase, "cannot be less than zero"))
 		}
-		if fi.Int64Value(spec.OnDemandBase) > int64(fi.Int32Value(ig.Spec.MaxSize)) {
+		if fi.ValueOf(spec.OnDemandBase) > int64(fi.ValueOf(ig.Spec.MaxSize)) {
 			errs = append(errs, field.Invalid(path.Child("onDemandBase"), spec.OnDemandBase, "cannot be greater than max size"))
 		}
 	}
 
 	if spec.OnDemandAboveBase != nil {
-		if fi.Int64Value(spec.OnDemandAboveBase) < 0 {
+		if fi.ValueOf(spec.OnDemandAboveBase) < 0 {
 			errs = append(errs, field.Invalid(path.Child("onDemandAboveBase"), spec.OnDemandAboveBase, "cannot be less than 0"))
 		}
-		if fi.Int64Value(spec.OnDemandAboveBase) > 100 {
+		if fi.ValueOf(spec.OnDemandAboveBase) > 100 {
 			errs = append(errs, field.Invalid(path.Child("onDemandAboveBase"), spec.OnDemandAboveBase, "cannot be greater than 100"))
 		}
 	}
@@ -239,6 +345,16 @@ func awsValidateMixedInstancesPolicy(path *field.Path, spec *kops.MixedInstances
 	errs = append(errs, IsValidValue(path.Child("spotAllocationStrategy"), spec.SpotAllocationStrategy, kops.SpotAllocationStrategies)...)
 
 	return errs
+}
+
+func awsValidateTopologyDNS(fieldPath *field.Path, c *kops.Cluster) field.ErrorList {
+	allErrs := field.ErrorList{}
+
+	if c.UsesNoneDNS() && c.Spec.API.LoadBalancer != nil && c.Spec.API.LoadBalancer.Class != kops.LoadBalancerClassNetwork {
+		allErrs = append(allErrs, field.Forbidden(fieldPath, "topology.dns.type=none requires Network Load Balancer"))
+	}
+
+	return allErrs
 }
 
 func awsValidateSSLPolicy(fieldPath *field.Path, spec *kops.LoadBalancerAccessSpec) field.ErrorList {
@@ -266,7 +382,7 @@ func awsValidateLoadBalancerSubnets(fieldPath *field.Path, spec kops.ClusterSpec
 		if subnet.Name == "" {
 			allErrs = append(allErrs, field.Required(fieldPath.Index(i).Child("name"), "subnet name can't be empty"))
 		} else {
-			for _, cs := range spec.Subnets {
+			for _, cs := range spec.Networking.Subnets {
 				if subnet.Name == cs.Name {
 					clusterSubnet = &cs
 					break
@@ -319,11 +435,63 @@ func awsValidateCPUCredits(fieldPath *field.Path, spec *kops.InstanceGroupSpec, 
 	return allErrs
 }
 
-func hasAWSEBSCSIDriver(c kops.ClusterSpec) bool {
-	// AWSEBSCSIDriver will have a default value, so if this is all false, it will be populated on next pass
-	if c.CloudConfig == nil || c.CloudConfig.AWSEBSCSIDriver == nil || c.CloudConfig.AWSEBSCSIDriver.Enabled == nil {
-		return true
+func awsValidateIAMAuthenticator(fieldPath *field.Path, spec *kops.AWSAuthenticationSpec) field.ErrorList {
+	allErrs := field.ErrorList{}
+
+	if !strings.Contains(spec.BackendMode, "CRD") && len(spec.IdentityMappings) > 0 {
+		allErrs = append(allErrs, field.Forbidden(fieldPath.Child("backendMode"), "backendMode must be CRD if identityMappings is set"))
+	}
+	for i, mapping := range spec.IdentityMappings {
+		parsedARN, err := arn.Parse(mapping.ARN)
+		if err != nil || (!strings.HasPrefix(parsedARN.Resource, "role/") && !strings.HasPrefix(parsedARN.Resource, "user/")) {
+			allErrs = append(allErrs, field.Invalid(fieldPath.Child("identityMappings").Index(i).Child("arn"), mapping.ARN,
+				"arn must be a valid IAM Role or User ARN such as arn:aws:iam::123456789012:role/KopsExampleRole"))
+		}
+	}
+	return allErrs
+}
+
+func awsValidateAdditionalRoutes(fieldPath *field.Path, routes []kops.RouteSpec, networkCIDRs []*net.IPNet) field.ErrorList {
+	allErrs := field.ErrorList{}
+
+	for i, r := range routes {
+		f := fieldPath.Index(i)
+
+		// Check if target is a known type
+		if !strings.HasPrefix(r.Target, "pcx-") &&
+			!strings.HasPrefix(r.Target, "i-") &&
+			!strings.HasPrefix(r.Target, "nat-") &&
+			!strings.HasPrefix(r.Target, "tgw-") &&
+			!strings.HasPrefix(r.Target, "igw-") &&
+			!strings.HasPrefix(r.Target, "eigw-") {
+			allErrs = append(allErrs, field.Invalid(f.Child("target"), r, "unknown target type for route"))
+		}
+
+		routeCIDR, errs := parseCIDR(f.Child("cidr"), r.CIDR)
+		allErrs = append(allErrs, errs...)
+		if routeCIDR != nil {
+			for _, clusterNet := range networkCIDRs {
+				if clusterNet.Contains(routeCIDR.IP) && strings.HasPrefix(r.Target, "pcx-") {
+					allErrs = append(allErrs, field.Forbidden(f.Child("target"), "target is more specific than a network CIDR block. This route can target only an interface or an instance."))
+				}
+			}
+		}
 	}
 
-	return *c.CloudConfig.AWSEBSCSIDriver.Enabled
+	// Check for duplicated CIDR
+	{
+		cidrs := sets.NewString()
+		for _, cidr := range networkCIDRs {
+			cidrs.Insert(cidr.String())
+		}
+		for i := range routes {
+			rCidr := routes[i].CIDR
+			if cidrs.Has(rCidr) {
+				allErrs = append(allErrs, field.Duplicate(fieldPath.Index(i).Child("cidr"), rCidr))
+			}
+			cidrs.Insert(rCidr)
+		}
+	}
+
+	return allErrs
 }

@@ -17,13 +17,13 @@ limitations under the License.
 package components
 
 import (
-	"fmt"
-
-	"github.com/blang/semver/v4"
-	"github.com/pelletier/go-toml"
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/loader"
+)
+
+const (
+	DefaultSandboxImage = "registry.k8s.io/pause:3.10.1"
 )
 
 // ContainerdOptionsBuilder adds options for containerd to the model
@@ -31,11 +31,11 @@ type ContainerdOptionsBuilder struct {
 	*OptionsContext
 }
 
-var _ loader.OptionsBuilder = &ContainerdOptionsBuilder{}
+var _ loader.ClusterOptionsBuilder = &ContainerdOptionsBuilder{}
 
 // BuildOptions is responsible for filling in the default setting for containerd daemon
-func (b *ContainerdOptionsBuilder) BuildOptions(o interface{}) error {
-	clusterSpec := o.(*kops.ClusterSpec)
+func (b *ContainerdOptionsBuilder) BuildOptions(o *kops.Cluster) error {
+	clusterSpec := &o.Spec
 
 	if clusterSpec.Containerd == nil {
 		clusterSpec.Containerd = &kops.ContainerdConfig{}
@@ -43,48 +43,38 @@ func (b *ContainerdOptionsBuilder) BuildOptions(o interface{}) error {
 
 	containerd := clusterSpec.Containerd
 
-	if clusterSpec.ContainerRuntime == "containerd" {
-		// Set version based on Kubernetes version
-		if fi.StringValue(containerd.Version) == "" {
-			if b.IsKubernetesGTE("1.19") {
-				containerd.Version = fi.String("1.4.11")
-			} else {
-				containerd.Version = fi.String("1.3.10")
-			}
+	// Set the default version
+	if fi.ValueOf(containerd.Version) == "" {
+		// Do not use containerd 2.3.0-2.3.3: a sandbox-image lookup regression breaks
+		// digest-pinned references (https://github.com/containerd/containerd/issues/13529),
+		// which kops emits by default; fixed in 2.3.4.
+		containerd.Version = new("2.3.6")
+		containerd.Runc = &kops.Runc{
+			Version: new("1.5.1"),
 		}
-		// Set default log level to INFO
-		containerd.LogLevel = fi.String("info")
+	}
+	// Set the default log level to INFO
+	containerd.LogLevel = new("info")
 
-	} else if clusterSpec.ContainerRuntime == "docker" {
-		// Docker version should always be available
-		dockerVersion := fi.StringValue(clusterSpec.Docker.Version)
-		if dockerVersion == "" {
-			return fmt.Errorf("docker version is required")
-		} else {
-			// Skip containerd setup for older versions without containerd service
-			sv, err := semver.ParseTolerant(dockerVersion)
-			if err != nil {
-				return fmt.Errorf("unable to parse version string: %q", dockerVersion)
-			}
-			if sv.LT(semver.MustParse("18.9.0")) {
-				containerd.SkipInstall = true
-				return nil
-			}
-		}
-		// Set default log level to INFO
-		containerd.LogLevel = fi.String("info")
-		// Build config file for containerd running in Docker mode
-		config, _ := toml.Load("")
-		config.SetPath([]string{"disabled_plugins"}, []string{"cri"})
-		containerd.ConfigOverride = fi.String(config.String())
-
-	} else {
-		// Unknown container runtime, should not install containerd
-		containerd.SkipInstall = true
+	// Set the sandbox image used to scope pod shared resources used by the pod's containers.
+	if fi.ValueOf(containerd.SandboxImage) == "" {
+		containerd.SandboxImage = new(b.AssetBuilder.RemapImage(DefaultSandboxImage))
 	}
 
-	if containerd.NvidiaGPU != nil && fi.BoolValue(containerd.NvidiaGPU.Enabled) && containerd.NvidiaGPU.DriverPackage == "" {
-		containerd.NvidiaGPU.DriverPackage = "nvidia-headless-460-server"
+	if containerd.NvidiaGPU != nil && fi.ValueOf(containerd.NvidiaGPU.Enabled) {
+		if containerd.NvidiaGPU.DriverPackage == "" {
+			containerd.NvidiaGPU.DriverPackage = kops.NvidiaDefaultDriverPackage
+		}
+
+		if containerd.NvidiaGPU.DevicePluginImage == "" {
+			containerd.NvidiaGPU.DevicePluginImage = kops.NvidiaDevicePluginImage
+		}
+	}
+
+	if containerd.GVisor != nil && fi.ValueOf(containerd.GVisor.Enabled) {
+		if containerd.GVisor.Platform == "" {
+			containerd.GVisor.Platform = kops.GVisorDefaultPlatform
+		}
 	}
 
 	return nil

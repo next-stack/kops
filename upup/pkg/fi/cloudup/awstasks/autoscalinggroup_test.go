@@ -17,14 +17,19 @@ limitations under the License.
 package awstasks
 
 import (
+	"context"
+	"fmt"
 	"sort"
 	"testing"
 
+	"k8s.io/kops/cloudmock/aws/mockautoscaling"
 	"k8s.io/kops/pkg/diff"
 	"k8s.io/kops/upup/pkg/fi"
+	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/autoscaling"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
+	autoscalingtypes "github.com/aws/aws-sdk-go-v2/service/autoscaling/types"
 	"sigs.k8s.io/yaml"
 )
 
@@ -39,27 +44,27 @@ func TestGetASGTagsToDelete(t *testing.T) {
 
 	cases := []struct {
 		CurrentTags          map[string]string
-		ExpectedTagsToDelete []*autoscaling.Tag
+		ExpectedTagsToDelete []autoscalingtypes.Tag
 	}{
 		{
 			CurrentTags: map[string]string{
 				"KubernetesCluster": "MyCluster",
 				"Name":              "nodes.cluster.k8s.local",
 			},
-			ExpectedTagsToDelete: []*autoscaling.Tag{},
+			ExpectedTagsToDelete: []autoscalingtypes.Tag{},
 		},
 		{
 			CurrentTags: map[string]string{
 				"KubernetesCluster": "MyCluster",
 				"Name":              "nodes.cluster.k8s.locall",
 			},
-			ExpectedTagsToDelete: []*autoscaling.Tag{},
+			ExpectedTagsToDelete: []autoscalingtypes.Tag{},
 		},
 		{
 			CurrentTags: map[string]string{
 				"KubernetesCluster": "MyCluster",
 			},
-			ExpectedTagsToDelete: []*autoscaling.Tag{},
+			ExpectedTagsToDelete: []autoscalingtypes.Tag{},
 		},
 		{
 			CurrentTags: map[string]string{
@@ -67,7 +72,7 @@ func TestGetASGTagsToDelete(t *testing.T) {
 				"Name":              "nodes.cluster.k8s.local",
 				"OldTag":            "OldValue",
 			},
-			ExpectedTagsToDelete: []*autoscaling.Tag{
+			ExpectedTagsToDelete: []autoscalingtypes.Tag{
 				{
 					Key:          aws.String("OldTag"),
 					Value:        aws.String("OldValue"),
@@ -83,7 +88,7 @@ func TestGetASGTagsToDelete(t *testing.T) {
 				"MyCustomTag":       "MyCustomValue",
 				"k8s.io/cluster-autoscaler/node-template/taint/sometaint": "somevalue:NoSchedule",
 			},
-			ExpectedTagsToDelete: []*autoscaling.Tag{
+			ExpectedTagsToDelete: []autoscalingtypes.Tag{
 				{
 					Key:          aws.String("MyCustomTag"),
 					Value:        aws.String("MyCustomValue"),
@@ -201,16 +206,16 @@ func TestAutoscalingGroupTerraformRender(t *testing.T) {
 	cases := []*renderTest{
 		{
 			Resource: &AutoscalingGroup{
-				Name:           fi.String("test"),
-				Granularity:    fi.String("5min"),
-				LaunchTemplate: &LaunchTemplate{Name: fi.String("test_lc")},
-				MaxSize:        fi.Int64(10),
+				Name:           new("test"),
+				Granularity:    new("5min"),
+				LaunchTemplate: &LaunchTemplate{Name: new("test_lc")},
+				MaxSize:        new(int32(10)),
 				Metrics:        []string{"test"},
-				MinSize:        fi.Int64(1),
+				MinSize:        new(int32(1)),
 				Subnets: []*Subnet{
 					{
-						Name: fi.String("test-sg"),
-						ID:   fi.String("sg-1111"),
+						Name: new("test-sg"),
+						ID:   new("sg-1111"),
 					},
 				},
 				Tags: map[string]string{
@@ -249,9 +254,8 @@ terraform {
   required_version = ">= 0.15.0"
   required_providers {
     aws = {
-      "configuration_aliases" = [aws.files]
-      "source"                = "hashicorp/aws"
-      "version"               = ">= 3.59.0"
+      "source"  = "hashicorp/aws"
+      "version" = ">= 6.57.1"
     }
   }
 }
@@ -259,19 +263,19 @@ terraform {
 		},
 		{
 			Resource: &AutoscalingGroup{
-				Name:                        fi.String("test1"),
-				LaunchTemplate:              &LaunchTemplate{Name: fi.String("test_lt")},
-				MaxSize:                     fi.Int64(10),
+				Name:                        new("test1"),
+				LaunchTemplate:              &LaunchTemplate{Name: new("test_lt")},
+				MaxSize:                     new(int32(10)),
 				Metrics:                     []string{"test"},
-				MinSize:                     fi.Int64(5),
+				MinSize:                     new(int32(5)),
 				MixedInstanceOverrides:      []string{"t2.medium", "t2.large"},
-				MixedOnDemandBase:           fi.Int64(4),
-				MixedOnDemandAboveBase:      fi.Int64(30),
-				MixedSpotAllocationStrategy: fi.String("capacity-optimized"),
+				MixedOnDemandBase:           new(int32(4)),
+				MixedOnDemandAboveBase:      new(int32(30)),
+				MixedSpotAllocationStrategy: new("capacity-optimized"),
 				Subnets: []*Subnet{
 					{
-						Name: fi.String("test-sg"),
-						ID:   fi.String("sg-1111"),
+						Name: new("test-sg"),
+						ID:   new("sg-1111"),
 					},
 				},
 				Tags: map[string]string{
@@ -324,9 +328,91 @@ terraform {
   required_version = ">= 0.15.0"
   required_providers {
     aws = {
-      "configuration_aliases" = [aws.files]
-      "source"                = "hashicorp/aws"
-      "version"               = ">= 3.59.0"
+      "source"  = "hashicorp/aws"
+      "version" = ">= 6.57.1"
+    }
+  }
+}
+`,
+		},
+		{
+			Resource: &AutoscalingGroup{
+				Name:                        new("test1"),
+				LaunchTemplate:              &LaunchTemplate{Name: new("test_lt")},
+				MaxSize:                     new(int32(10)),
+				Metrics:                     []string{"test"},
+				MinSize:                     new(int32(5)),
+				MixedInstanceOverrides:      []string{"t2.medium", "t2.large"},
+				MixedOnDemandBase:           new(int32(4)),
+				MixedOnDemandAboveBase:      new(int32(30)),
+				MixedSpotAllocationStrategy: new("capacity-optimized"),
+				WarmPool: &WarmPool{
+					Enabled: new(true),
+					MinSize: 3,
+					MaxSize: new(int32(5)),
+				},
+				Subnets: []*Subnet{
+					{
+						Name: new("test-sg"),
+						ID:   new("sg-1111"),
+					},
+				},
+				Tags: map[string]string{
+					"test":    "tag",
+					"cluster": "test",
+				},
+			},
+			Expected: `provider "aws" {
+  region = "eu-west-2"
+}
+
+resource "aws_autoscaling_group" "test1" {
+  enabled_metrics = ["test"]
+  max_size        = 10
+  min_size        = 5
+  mixed_instances_policy {
+    instances_distribution {
+      on_demand_base_capacity                  = 4
+      on_demand_percentage_above_base_capacity = 30
+      spot_allocation_strategy                 = "capacity-optimized"
+    }
+    launch_template {
+      launch_template_specification {
+        launch_template_id = aws_launch_template.test_lt.id
+        version            = aws_launch_template.test_lt.latest_version
+      }
+      override {
+        instance_type = "t2.medium"
+      }
+      override {
+        instance_type = "t2.large"
+      }
+    }
+  }
+  name = "test1"
+  tag {
+    key                 = "cluster"
+    propagate_at_launch = true
+    value               = "test"
+  }
+  tag {
+    key                 = "test"
+    propagate_at_launch = true
+    value               = "tag"
+  }
+  vpc_zone_identifier = [aws_subnet.test-sg.id]
+  warm_pool {
+    max_group_prepared_capacity = 5
+    min_size                    = 3
+  }
+}
+
+terraform {
+  required_version = ">= 0.15.0"
+  required_providers {
+    aws = {
+      "source"  = "hashicorp/aws"
+      "version" = ">= 6.57.1"
     }
   }
 }
@@ -337,95 +423,180 @@ terraform {
 	doRenderTests(t, "RenderTerraform", cases)
 }
 
-func TestAutoscalingGroupCloudformationRender(t *testing.T) {
-	cases := []*renderTest{
+func TestTGsARNsChunks(t *testing.T) {
+	var tgsARNs []string
+	for i := 0; i < 30; i++ {
+		tgsARNs = append(tgsARNs, fmt.Sprintf("arn:aws:elasticloadbalancing:us-west-2:123456789012:targetgroup/my-targets/00000000000000%02d", i))
+	}
+
+	tests := []struct {
+		tgsARNs   []string
+		chunkSize int
+		expected  [][]string
+	}{
 		{
-			Resource: &AutoscalingGroup{
-				Name:                   fi.String("test1"),
-				LaunchTemplate:         &LaunchTemplate{Name: fi.String("test_lt")},
-				MaxSize:                fi.Int64(10),
-				Metrics:                []string{"test"},
-				MinSize:                fi.Int64(5),
-				MixedInstanceOverrides: []string{"t2.medium", "t2.large"},
-				MixedOnDemandBase:      fi.Int64(4),
-				MixedOnDemandAboveBase: fi.Int64(30),
-				Subnets: []*Subnet{
-					{
-						Name: fi.String("test-sg"),
-						ID:   fi.String("sg-1111"),
-					},
-				},
-				Tags: map[string]string{
-					"test":    "tag",
-					"cluster": "test",
-				},
-			},
-			Expected: `{
-  "Resources": {
-    "AWSAutoScalingAutoScalingGrouptest1": {
-      "Type": "AWS::AutoScaling::AutoScalingGroup",
-      "Properties": {
-        "AutoScalingGroupName": "test1",
-        "MaxSize": "10",
-        "MinSize": "5",
-        "VPCZoneIdentifier": [
-          {
-            "Ref": "AWSEC2Subnettestsg"
-          }
-        ],
-        "Tags": [
-          {
-            "Key": "cluster",
-            "Value": "test",
-            "PropagateAtLaunch": true
-          },
-          {
-            "Key": "test",
-            "Value": "tag",
-            "PropagateAtLaunch": true
-          }
-        ],
-        "MetricsCollection": [
-          {
-            "Granularity": null,
-            "Metrics": [
-              "test"
-            ]
-          }
-        ],
-        "MixedInstancesPolicy": {
-          "LaunchTemplate": {
-            "LaunchTemplateSpecification": {
-              "LaunchTemplateId": {
-                "Ref": "AWSEC2LaunchTemplatetest_lt"
-              },
-              "Version": {
-                "Fn::GetAtt": [
-                  "AWSEC2LaunchTemplatetest_lt",
-                  "LatestVersionNumber"
-                ]
-              }
-            },
-            "Overrides": [
-              {
-                "InstanceType": "t2.medium"
-              },
-              {
-                "InstanceType": "t2.large"
-              }
-            ]
-          },
-          "InstancesDistribution": {
-            "OnDemandBaseCapacity": 4,
-            "OnDemandPercentageAboveBaseCapacity": 30
-          }
-        }
-      }
-    }
-  }
-}`,
+			tgsARNs:   tgsARNs[0:1],
+			chunkSize: 10,
+			expected:  [][]string{tgsARNs[0:1]},
+		},
+		{
+			tgsARNs:   tgsARNs[0:5],
+			chunkSize: 10,
+			expected:  [][]string{tgsARNs[0:5]},
+		},
+		{
+			tgsARNs:   tgsARNs[0:10],
+			chunkSize: 10,
+			expected:  [][]string{tgsARNs[0:10]},
+		},
+		{
+			tgsARNs:   tgsARNs[0:11],
+			chunkSize: 10,
+			expected:  [][]string{tgsARNs[0:10], tgsARNs[10:11]},
+		},
+		{
+			tgsARNs:   tgsARNs[0:15],
+			chunkSize: 10,
+			expected:  [][]string{tgsARNs[0:10], tgsARNs[10:15]},
+		},
+		{
+			tgsARNs:   tgsARNs[0:20],
+			chunkSize: 10,
+			expected:  [][]string{tgsARNs[0:10], tgsARNs[10:20]},
+		},
+		{
+			tgsARNs:   tgsARNs[0:21],
+			chunkSize: 10,
+			expected:  [][]string{tgsARNs[0:10], tgsARNs[10:20], tgsARNs[20:21]},
+		},
+		{
+			tgsARNs:   tgsARNs[0:25],
+			chunkSize: 10,
+			expected:  [][]string{tgsARNs[0:10], tgsARNs[10:20], tgsARNs[20:25]},
+		},
+		{
+			tgsARNs:   tgsARNs[0:30],
+			chunkSize: 10,
+			expected:  [][]string{tgsARNs[0:10], tgsARNs[10:20], tgsARNs[20:30]},
 		},
 	}
 
-	doRenderTests(t, "RenderCloudformation", cases)
+	for i, test := range tests {
+		result := sliceChunks(test.tgsARNs, test.chunkSize)
+
+		expected, err := yaml.Marshal(test.expected)
+		if err != nil {
+			t.Errorf("case %d: failed to convert expected to yaml: %v", i, err)
+			continue
+		}
+
+		actual, err := yaml.Marshal(result)
+		if err != nil {
+			t.Errorf("case %d: failed to convert actual to yaml: %v", i, err)
+			continue
+		}
+
+		if string(expected) != string(actual) {
+			diffString := diff.FormatDiff(string(expected), string(actual))
+			t.Errorf("case %d: actual output differed from expected", i)
+			t.Logf("diff:\n%s\n", diffString)
+		}
+	}
+}
+
+func TestAutoscalingGroupMaxInstanceLifetime(t *testing.T) {
+	const asgName = "nodes.cluster.example.com"
+
+	cases := []struct {
+		name string
+		// existing is the MaxInstanceLifetime already set on the ASG, nil when unset.
+		existing *int32
+		// expected is the task value; the model sets 0 when spec.maxInstanceLifetime is unset.
+		expected int32
+		tags     map[string]string
+		want     int32
+	}{
+		{
+			name:     "tag-only change keeps the lifetime",
+			existing: aws.Int32(174000),
+			expected: 174000,
+			tags:     map[string]string{"foo": "baz"},
+			want:     174000,
+		},
+		{
+			name:     "lifetime change sets the new value",
+			existing: aws.Int32(174000),
+			expected: 200000,
+			tags:     map[string]string{"foo": "bar"},
+			want:     200000,
+		},
+		{
+			name:     "lifetime added to an ASG without one",
+			existing: nil,
+			expected: 174000,
+			tags:     map[string]string{"foo": "bar"},
+			want:     174000,
+		},
+		{
+			name:     "lifetime removed from spec clears it",
+			existing: aws.Int32(174000),
+			expected: 0,
+			tags:     map[string]string{"foo": "bar"},
+			want:     0,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.TODO()
+
+			cloud := awsup.BuildMockAWSCloud("us-east-1", "abc")
+			c := &mockautoscaling.MockAutoscaling{}
+			cloud.MockAutoscaling = c
+
+			_, err := c.CreateAutoScalingGroup(ctx, &autoscaling.CreateAutoScalingGroupInput{
+				AutoScalingGroupName: aws.String(asgName),
+				MinSize:              aws.Int32(1),
+				MaxSize:              aws.Int32(1),
+				MaxInstanceLifetime:  tc.existing,
+				Tags: []autoscalingtypes.Tag{
+					{
+						Key:               aws.String("foo"),
+						Value:             aws.String("bar"),
+						ResourceId:        aws.String(asgName),
+						ResourceType:      aws.String("auto-scaling-group"),
+						PropagateAtLaunch: aws.Bool(true),
+					},
+				},
+			})
+			if err != nil {
+				t.Fatalf("error creating test ASG: %v", err)
+			}
+
+			// We define a function so we can rebuild the tasks, because we modify in-place when running
+			buildTasks := func() map[string]fi.CloudupTask {
+				return map[string]fi.CloudupTask{
+					"asg": &AutoscalingGroup{
+						Name:                aws.String(asgName),
+						Lifecycle:           fi.LifecycleSync,
+						MinSize:             aws.Int32(1),
+						MaxSize:             aws.Int32(1),
+						MaxInstanceLifetime: aws.Int32(tc.expected),
+						LoadBalancers:       []*ClassicLoadBalancer{},
+						TargetGroups:        []*TargetGroup{},
+						SuspendProcesses:    &[]string{},
+						Tags:                tc.tags,
+					},
+				}
+			}
+
+			runTasks(t, cloud, buildTasks())
+
+			if got := aws.ToInt32(c.Groups[asgName].MaxInstanceLifetime); got != tc.want {
+				t.Errorf("unexpected MaxInstanceLifetime: got %d, want %d", got, tc.want)
+			}
+
+			checkNoChanges(t, ctx, cloud, buildTasks())
+		})
+	}
 }

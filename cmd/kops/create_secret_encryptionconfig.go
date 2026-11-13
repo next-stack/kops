@@ -20,7 +20,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
+	"os"
 
 	"github.com/spf13/cobra"
 	"k8s.io/kops/cmd/kops/util"
@@ -70,7 +70,7 @@ func NewCmdCreateSecretEncryptionConfig(f *util.Factory, out io.Writer) *cobra.C
 		Args:              rootCommand.clusterNameArgs(&options.ClusterName),
 		ValidArgsFunction: commandutils.CompleteClusterName(f, true, false),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return RunCreateSecretEncryptionConfig(context.TODO(), f, out, options)
+			return RunCreateSecretEncryptionConfig(cmd.Context(), f, out, options)
 		},
 	}
 
@@ -84,13 +84,13 @@ func NewCmdCreateSecretEncryptionConfig(f *util.Factory, out io.Writer) *cobra.C
 	return cmd
 }
 
-func RunCreateSecretEncryptionConfig(ctx context.Context, f *util.Factory, out io.Writer, options *CreateSecretEncryptionConfigOptions) error {
+func RunCreateSecretEncryptionConfig(ctx context.Context, f commandutils.Factory, out io.Writer, options *CreateSecretEncryptionConfigOptions) error {
 	cluster, err := GetCluster(ctx, f, options.ClusterName)
 	if err != nil {
 		return err
 	}
 
-	clientset, err := f.Clientset()
+	clientset, err := f.KopsClient()
 	if err != nil {
 		return err
 	}
@@ -106,7 +106,7 @@ func RunCreateSecretEncryptionConfig(ctx context.Context, f *util.Factory, out i
 			return fmt.Errorf("reading encryption config from stdin: %v", err)
 		}
 	} else {
-		data, err = ioutil.ReadFile(options.EncryptionConfigPath)
+		data, err = os.ReadFile(options.EncryptionConfigPath)
 		if err != nil {
 			return fmt.Errorf("reading encryption config %v: %v", options.EncryptionConfigPath, err)
 		}
@@ -123,7 +123,7 @@ func RunCreateSecretEncryptionConfig(ctx context.Context, f *util.Factory, out i
 	}
 
 	if !options.Force {
-		_, created, err := secretStore.GetOrCreateSecret("encryptionconfig", secret)
+		_, created, err := secretStore.GetOrCreateSecret(ctx, "encryptionconfig", secret)
 		if err != nil {
 			return fmt.Errorf("adding encryptionconfig secret: %v", err)
 		}

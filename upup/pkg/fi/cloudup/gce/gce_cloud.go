@@ -23,41 +23,54 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 
+	"maps"
+
+	"cloud.google.com/go/storage"
 	"golang.org/x/oauth2/google"
+	"google.golang.org/api/cloudresourcemanager/v1"
 	compute "google.golang.org/api/compute/v1"
-	"google.golang.org/api/iam/v1"
 	oauth2 "google.golang.org/api/oauth2/v2"
-	"google.golang.org/api/storage/v1"
 	"k8s.io/klog/v2"
 	"k8s.io/kops/dnsprovider/pkg/dnsprovider"
 	"k8s.io/kops/dnsprovider/pkg/dnsprovider/providers/google/clouddns"
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/upup/pkg/fi"
+	"k8s.io/kops/upup/pkg/fi/cloudup/gce/gcemetadata"
 )
 
 type GCECloud interface {
 	fi.Cloud
 	Compute() ComputeClient
-	Storage() *storage.Service
-	IAM() *iam.Service
+	Storage() *storage.Client
+	IAM() IamClient
 	CloudDNS() DNSClient
-
 	Project() string
 	WaitForOp(op *compute.Operation) error
 	Labels() map[string]string
-
 	Zones() ([]string, error)
 
 	// ServiceAccount returns the email for the service account that the instances will run under
 	ServiceAccount() (string, error)
+
+	// CloudResourceManager returns the client for the cloudresourcemanager API
+	CloudResourceManager() *cloudresourcemanager.Service
+}
+
+// MutexForProjectIAM returns a mutex to prevent local concurrent operations on project IAM.
+func MutexForProjectIAM(projectID string) LocalMutex {
+	return InProcessMutex.Get("iam/projects/" + projectID)
 }
 
 type gceCloudImplementation struct {
 	compute *computeClientImpl
-	storage *storage.Service
-	iam     *iam.Service
+	storage *storage.Client
+	iam     *iamClientImpl
 	dns     *dnsClientImpl
+
+	// cloudResourceManager is the client for the cloudresourcemanager API
+	cloudResourceManager *cloudresourcemanager.Service
 
 	region  string
 	project string
@@ -68,13 +81,14 @@ type gceCloudImplementation struct {
 	labels map[string]string
 }
 
-var _ fi.Cloud = &gceCloudImplementation{}
+var _ fi.Cloud = (*gceCloudImplementation)(nil)
 
 func (c *gceCloudImplementation) ProviderID() kops.CloudProviderID {
 	return kops.CloudProviderGCE
 }
 
 var gceCloudInstances map[string]GCECloud = make(map[string]GCECloud)
+var gceCloudInstancesMapMutex = sync.RWMutex{}
 
 // DefaultProject returns the current project configured in the gcloud SDK, ("", nil) if no project was set
 func DefaultProject() (string, error) {
@@ -108,10 +122,14 @@ func DefaultProject() (string, error) {
 }
 
 func NewGCECloud(region string, project string, labels map[string]string) (GCECloud, error) {
+	gceCloudInstancesMapMutex.RLock()
 	i := gceCloudInstances[region+"::"+project]
+	gceCloudInstancesMapMutex.RUnlock()
 	if i != nil {
 		return i.(gceCloudInternal).WithLabels(labels), nil
 	}
+
+	klog.V(2).Infof("Building new GCE cloud instance for region %q and project %q", region, project)
 
 	c := &gceCloudImplementation{region: region, project: project}
 
@@ -127,13 +145,13 @@ func NewGCECloud(region string, project string, labels map[string]string) (GCECl
 	}
 	c.compute = computeClient
 
-	storageService, err := storage.NewService(ctx)
+	storageClient, err := storage.NewClient(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("error building storage API client: %v", err)
 	}
-	c.storage = storageService
+	c.storage = storageClient
 
-	iamService, err := iam.NewService(ctx)
+	iamService, err := newIamClientImpl(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("error building IAM API client: %v", err)
 	}
@@ -144,6 +162,12 @@ func NewGCECloud(region string, project string, labels map[string]string) (GCECl
 		return nil, fmt.Errorf("error building DNS API client: %v", err)
 	}
 	c.dns = dnsClient
+
+	cloudResourceManager, err := cloudresourcemanager.NewService(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("error building cloudresourcemanager API client: %w", err)
+	}
+	c.cloudResourceManager = cloudResourceManager
 
 	CacheGCECloudInstance(region, project, c)
 
@@ -162,6 +186,8 @@ func NewGCECloud(region string, project string, labels map[string]string) (GCECl
 }
 
 func CacheGCECloudInstance(region string, project string, c GCECloud) {
+	gceCloudInstancesMapMutex.Lock()
+	defer gceCloudInstancesMapMutex.Unlock()
 	gceCloudInstances[region+"::"+project] = c
 }
 
@@ -185,18 +211,23 @@ func (c *gceCloudImplementation) Compute() ComputeClient {
 }
 
 // Storage returns private struct element storage.
-func (c *gceCloudImplementation) Storage() *storage.Service {
+func (c *gceCloudImplementation) Storage() *storage.Client {
 	return c.storage
 }
 
 // IAM returns the IAM client
-func (c *gceCloudImplementation) IAM() *iam.Service {
+func (c *gceCloudImplementation) IAM() IamClient {
 	return c.iam
 }
 
-// NameService returns the DNS client
+// CloudDNS returns the DNS client
 func (c *gceCloudImplementation) CloudDNS() DNSClient {
 	return c.dns
+}
+
+// CloudResourceManager returns the client for the cloudresourcemanager API
+func (c *gceCloudImplementation) CloudResourceManager() *cloudresourcemanager.Service {
+	return c.cloudResourceManager
 }
 
 // Region returns private struct element region.
@@ -245,17 +276,11 @@ func (c *gceCloudImplementation) FindVPCInfo(id string) (*fi.VPCInfo, error) {
 func (c *gceCloudImplementation) Labels() map[string]string {
 	// Defensive copy
 	tags := make(map[string]string)
-	for k, v := range c.labels {
-		tags[k] = v
-	}
+	maps.Copy(tags, c.labels)
 	return tags
 }
 
-// TODO refactor this out of resources
-// this is needed for delete groups and other new methods
-
-// Zones returns the zones in a region
-func (c *gceCloudImplementation) Zones() ([]string, error) {
+func GetZones(c GCECloud) ([]string, error) {
 	var zones []string
 	// TODO: Only zones in api.Cluster object, if we have one?
 	gceZones, err := c.Compute().Zones().List(context.Background(), c.Project())
@@ -280,33 +305,69 @@ func (c *gceCloudImplementation) Zones() ([]string, error) {
 	return zones, nil
 }
 
+// TODO refactor this out of resources
+// this is needed for delete groups and other new methods
+
+// Zones returns the zones in a region
+func (c *gceCloudImplementation) Zones() ([]string, error) {
+	return GetZones(c)
+}
+
 func (c *gceCloudImplementation) WaitForOp(op *compute.Operation) error {
 	return WaitForOp(c.compute.srv, op)
 }
 
 func (c *gceCloudImplementation) GetApiIngressStatus(cluster *kops.Cluster) ([]fi.ApiIngressStatus, error) {
+	// TODO: Add context to GetApiIngressStatus
+
 	var ingresses []fi.ApiIngressStatus
 
-	// Note that this must match GCEModelContext::NameForForwardingRule
-	name := SafeObjectName("api", cluster.ObjectMeta.Name)
+	klog.V(2).Infof("Querying GCE to find forwardingRules for API")
+	// These are the ingress rules, so we search for them in the network project.
+	_, project, err := ParseNameAndProjectFromNetworkID(cluster.Spec.Networking.NetworkID)
+	if err != nil {
+		return nil, err
+	} else if project == "" {
+		project = c.Project()
+	}
 
-	klog.V(2).Infof("Querying GCE to find ForwardingRules for API (%q)", name)
-	forwardingRule, err := c.compute.ForwardingRules().Get(c.project, c.region, name)
+	forwardingRules, err := c.compute.ForwardingRules().List(context.Background(), project, c.region)
 	if err != nil {
 		if !IsNotFound(err) {
-			forwardingRule = nil
+			forwardingRules = nil
 		} else {
-			return nil, fmt.Errorf("error getting ForwardingRule %q: %v", name, err)
+			return nil, fmt.Errorf("error listing forwardingRules: %v", err)
 		}
 	}
 
-	if forwardingRule != nil {
+	clusterLabel := LabelForCluster(cluster.Name)
+
+	for _, forwardingRule := range forwardingRules {
+		if !strings.HasPrefix(forwardingRule.Name, "api-") {
+			continue
+		}
+
+		if clusterLabel.Value != forwardingRule.Labels[clusterLabel.Key] {
+			continue
+		}
+
 		if forwardingRule.IPAddress == "" {
-			return nil, fmt.Errorf("found forward rule %q, but it did not have an IPAddress", name)
+			return nil, fmt.Errorf("found forwardingRule %q, but it did not have an IPAddress", forwardingRule.Name)
+		}
+
+		internalEndpoint := false
+		switch forwardingRule.LoadBalancingScheme {
+		case "INTERNAL", "INTERNAL_MANAGED", "INTERNAL_SELF_MANAGED":
+			internalEndpoint = true
+		case "EXTERNAL", "EXTERNAL_MANAGED":
+			internalEndpoint = false
+		default:
+			return nil, fmt.Errorf("found forwardingRule %q, but it has unknown loadBalancingScheme=%q", forwardingRule.Name, forwardingRule.LoadBalancingScheme)
 		}
 
 		ingresses = append(ingresses, fi.ApiIngressStatus{
-			IP: forwardingRule.IPAddress,
+			InternalEndpoint: internalEndpoint,
+			IP:               forwardingRule.IPAddress,
 		})
 	}
 
@@ -325,20 +386,7 @@ func FindInstanceTemplates(c GCECloud, clusterName string) ([]*compute.InstanceT
 
 	var matches []*compute.InstanceTemplate
 	for _, t := range ts {
-		match := false
-		for _, item := range t.Properties.Metadata.Items {
-			if item.Key == "cluster-name" {
-				value := fi.StringValue(item.Value)
-				if strings.TrimSpace(value) == findClusterName {
-					match = true
-				} else {
-					match = false
-					break
-				}
-			}
-		}
-
-		if !match {
+		if !gcemetadata.MetadataMatchesClusterName(findClusterName, t.Properties.Metadata) {
 			continue
 		}
 
@@ -373,4 +421,23 @@ func (c *gceCloudImplementation) getTokenInfo(ctx context.Context) (*oauth2.Toke
 	}
 
 	return tokenInfo, nil
+}
+
+// SplitServiceAccountEmail splits service account email
+func SplitServiceAccountEmail(email string) (string, string, error) {
+	accountID := ""
+	projectID := ""
+
+	tokens := strings.Split(email, "@")
+	if len(tokens) == 2 {
+		accountID = tokens[0]
+		if strings.HasSuffix(tokens[1], ".iam.gserviceaccount.com") {
+			projectID = strings.TrimSuffix(tokens[1], ".iam.gserviceaccount.com")
+		}
+	}
+
+	if accountID == "" || projectID == "" {
+		return "", "", fmt.Errorf("unexpected format for ServiceAccount email %q", email)
+	}
+	return accountID, projectID, nil
 }

@@ -24,17 +24,18 @@ import (
 	"k8s.io/kops/upup/pkg/fi/cloudup/openstacktasks"
 
 	"k8s.io/klog/v2"
-	"k8s.io/kops/pkg/dns"
 	"k8s.io/kops/pkg/wellknownports"
+	"k8s.io/utils/net"
 
-	sg "github.com/gophercloud/gophercloud/openstack/networking/v2/extensions/security/groups"
-	"github.com/gophercloud/gophercloud/openstack/networking/v2/extensions/security/rules"
+	sg "github.com/gophercloud/gophercloud/v2/openstack/networking/v2/extensions/security/groups"
+	"github.com/gophercloud/gophercloud/v2/openstack/networking/v2/extensions/security/rules"
 )
 
 const (
 	IPProtocolTCP   = string(rules.ProtocolTCP)
 	IPProtocolUDP   = string(rules.ProtocolUDP)
 	IPV4            = string(rules.EtherType4)
+	IPV6            = string(rules.EtherType6)
 	ProtocolIPEncap = "4" // IP in IPv4/IPv6
 )
 
@@ -45,22 +46,28 @@ type FirewallModelBuilder struct {
 	Rules     map[string]*openstacktasks.SecurityGroupRule
 }
 
-var _ fi.ModelBuilder = &FirewallModelBuilder{}
+var _ fi.CloudupModelBuilder = &FirewallModelBuilder{}
 
 func (b *FirewallModelBuilder) usesOctavia() bool {
-	if b.Cluster.Spec.CloudConfig != nil &&
-		b.Cluster.Spec.CloudConfig.Openstack != nil &&
-		b.Cluster.Spec.CloudConfig.Openstack.Loadbalancer != nil {
-		return fi.BoolValue(b.Cluster.Spec.CloudConfig.Openstack.Loadbalancer.UseOctavia)
+	if b.Cluster.Spec.CloudProvider.Openstack.Loadbalancer != nil {
+		return fi.ValueOf(b.Cluster.Spec.CloudProvider.Openstack.Loadbalancer.UseOctavia)
 	}
 	return false
 }
 
+func (b *FirewallModelBuilder) getOctaviaProvider() string {
+	if b.Cluster.Spec.CloudProvider.Openstack.Loadbalancer != nil {
+		return fi.ValueOf(b.Cluster.Spec.CloudProvider.Openstack.Loadbalancer.Provider)
+	}
+	return ""
+}
+
 // addDirectionalGroupRule - create a rule on the source group to the dest group provided a securityGroupRuleTask
-//  Example
-//  Create an Ingress rule on source allowing traffic from dest with the options in the SecurityGroupRule
-//  Create an Egress rule on source allowing traffic to dest with the options in the SecurityGroupRule
-func (b *FirewallModelBuilder) addDirectionalGroupRule(c *fi.ModelBuilderContext, source, dest *openstacktasks.SecurityGroup, sgr *openstacktasks.SecurityGroupRule) {
+//
+//	Example
+//	Create an Ingress rule on source allowing traffic from dest with the options in the SecurityGroupRule
+//	Create an Egress rule on source allowing traffic to dest with the options in the SecurityGroupRule
+func (b *FirewallModelBuilder) addDirectionalGroupRule(c *fi.CloudupModelBuilderContext, source, dest *openstacktasks.SecurityGroup, sgr *openstacktasks.SecurityGroupRule) {
 	t := &openstacktasks.SecurityGroupRule{
 		Direction:      sgr.Direction,
 		EtherType:      sgr.EtherType,
@@ -71,18 +78,16 @@ func (b *FirewallModelBuilder) addDirectionalGroupRule(c *fi.ModelBuilderContext
 		RemoteGroup:    dest,
 		RemoteIPPrefix: sgr.RemoteIPPrefix,
 		SecGroup:       source,
-		Delete:         fi.Bool(false),
+		Delete:         new(false),
 	}
 
-	klog.V(8).Infof("Adding rule %v", fi.StringValue(t.GetName()))
-	b.Rules[fi.StringValue(t.GetName())] = t
-
+	klog.V(8).Infof("Adding rule %v", fi.ValueOf(t.GetName()))
+	b.Rules[fi.ValueOf(t.GetName())] = t
 }
 
 // addSSHRules - sets the ssh rules based on the presence of a bastion
-func (b *FirewallModelBuilder) addSSHRules(c *fi.ModelBuilderContext, sgMap map[string]*openstacktasks.SecurityGroup) error {
-
-	masterName := b.SecurityGroupName(kops.InstanceGroupRoleMaster)
+func (b *FirewallModelBuilder) addSSHRules(c *fi.CloudupModelBuilderContext, sgMap map[string]*openstacktasks.SecurityGroup) error {
+	masterName := b.SecurityGroupName(kops.InstanceGroupRoleControlPlane)
 	nodeName := b.SecurityGroupName(kops.InstanceGroupRoleNode)
 	bastionName := b.SecurityGroupName(kops.InstanceGroupRoleBastion)
 	masterSG := sgMap[masterName]
@@ -100,27 +105,35 @@ func (b *FirewallModelBuilder) addSSHRules(c *fi.ModelBuilderContext, sgMap map[
 
 	if b.UsesSSHBastion() {
 		for _, sshAccess := range b.Cluster.Spec.SSHAccess {
+			etherType := IPV4
+			if !net.IsIPv4CIDRString(sshAccess) {
+				etherType = IPV6
+			}
 			sshRule := &openstacktasks.SecurityGroupRule{
 				Lifecycle:      b.Lifecycle,
 				Direction:      s(string(rules.DirIngress)),
 				Protocol:       s(string(rules.ProtocolTCP)),
-				EtherType:      s(string(rules.EtherType4)),
+				EtherType:      s(string(etherType)),
 				PortRangeMin:   i(22),
 				PortRangeMax:   i(22),
 				RemoteIPPrefix: s(sshAccess),
 			}
 			b.addDirectionalGroupRule(c, bastionSG, nil, sshRule)
 		}
-		//Allow ingress ssh from the bastion on the masters and nodes
+		// Allow ingress ssh from the bastion on the masters and nodes
 		b.addDirectionalGroupRule(c, masterSG, bastionSG, sshIngress)
 		b.addDirectionalGroupRule(c, nodeSG, bastionSG, sshIngress)
 	} else {
 		for _, sshAccess := range b.Cluster.Spec.SSHAccess {
+			etherType := IPV4
+			if !net.IsIPv4CIDRString(sshAccess) {
+				etherType = IPV6
+			}
 			sshRule := &openstacktasks.SecurityGroupRule{
 				Lifecycle:      b.Lifecycle,
 				Direction:      s(string(rules.DirIngress)),
 				Protocol:       s(string(rules.ProtocolTCP)),
-				EtherType:      s(string(rules.EtherType4)),
+				EtherType:      s(string(etherType)),
 				PortRangeMin:   i(22),
 				PortRangeMax:   i(22),
 				RemoteIPPrefix: s(sshAccess),
@@ -133,12 +146,21 @@ func (b *FirewallModelBuilder) addSSHRules(c *fi.ModelBuilderContext, sgMap map[
 }
 
 // addETCDRules - Add ETCD access rules based on which CNI might need to access __ETCD_ENDPOINTS__
-func (b *FirewallModelBuilder) addETCDRules(c *fi.ModelBuilderContext, sgMap map[string]*openstacktasks.SecurityGroup) error {
-
-	masterName := b.SecurityGroupName(kops.InstanceGroupRoleMaster)
-	nodeName := b.SecurityGroupName(kops.InstanceGroupRoleNode)
+func (b *FirewallModelBuilder) addETCDRules(c *fi.CloudupModelBuilderContext, sgMap map[string]*openstacktasks.SecurityGroup) error {
+	masterName := b.SecurityGroupName(kops.InstanceGroupRoleControlPlane)
 	masterSG := sgMap[masterName]
+	nodeName := b.SecurityGroupName(kops.InstanceGroupRoleNode)
 	nodeSG := sgMap[nodeName]
+
+	etcdClientMax := wellknownports.EtcdEventsClientPort
+	etcdPeerMax := wellknownports.EtcdEventsPeerPort
+	for _, c := range b.Cluster.Spec.EtcdClusters {
+		if c.Name == "leases" {
+			etcdClientMax = wellknownports.EtcdLeasesClientPort
+			etcdPeerMax = wellknownports.EtcdLeasesPeerPort
+			break
+		}
+	}
 
 	// ETCD Peer Discovery
 	etcdRule := &openstacktasks.SecurityGroupRule{
@@ -146,19 +168,59 @@ func (b *FirewallModelBuilder) addETCDRules(c *fi.ModelBuilderContext, sgMap map
 		Direction:    s(string(rules.DirIngress)),
 		Protocol:     s(string(rules.ProtocolTCP)),
 		EtherType:    s(IPV4),
-		PortRangeMin: i(4001),
-		PortRangeMax: i(4002),
+		PortRangeMin: i(wellknownports.EtcdMainClientPort),
+		PortRangeMax: i(etcdClientMax),
 	}
 	etcdPeerRule := &openstacktasks.SecurityGroupRule{
 		Lifecycle:    b.Lifecycle,
 		Direction:    s(string(rules.DirIngress)),
 		Protocol:     s(string(rules.ProtocolTCP)),
 		EtherType:    s(IPV4),
-		PortRangeMin: i(2380),
-		PortRangeMax: i(2381),
+		PortRangeMin: i(wellknownports.EtcdMainPeerPort),
+		PortRangeMax: i(etcdPeerMax),
 	}
 	b.addDirectionalGroupRule(c, masterSG, masterSG, etcdRule)
 	b.addDirectionalGroupRule(c, masterSG, masterSG, etcdPeerRule)
+
+	if b.Cluster.Spec.Networking.Cilium != nil && b.Cluster.Spec.Networking.Cilium.EtcdManaged {
+		etcdCiliumPeerRule := &openstacktasks.SecurityGroupRule{
+			Lifecycle:    b.Lifecycle,
+			Direction:    s(string(rules.DirIngress)),
+			Protocol:     s(string(rules.ProtocolTCP)),
+			EtherType:    s(IPV4),
+			PortRangeMin: i(wellknownports.EtcdCiliumPeerPort),
+			PortRangeMax: i(wellknownports.EtcdCiliumPeerPort),
+		}
+		etcdCiliumGRPCRule := &openstacktasks.SecurityGroupRule{
+			Lifecycle:    b.Lifecycle,
+			Direction:    s(string(rules.DirIngress)),
+			Protocol:     s(string(rules.ProtocolTCP)),
+			EtherType:    s(IPV4),
+			PortRangeMin: i(wellknownports.EtcdCiliumGRPC),
+			PortRangeMax: i(wellknownports.EtcdCiliumGRPC),
+		}
+		etcdCiliumQuarantinedClient := &openstacktasks.SecurityGroupRule{
+			Lifecycle:    b.Lifecycle,
+			Direction:    s(string(rules.DirIngress)),
+			Protocol:     s(string(rules.ProtocolTCP)),
+			EtherType:    s(IPV4),
+			PortRangeMin: i(wellknownports.EtcdCiliumQuarantinedClientPort),
+			PortRangeMax: i(wellknownports.EtcdCiliumQuarantinedClientPort),
+		}
+		etcdCiliumClientRule := &openstacktasks.SecurityGroupRule{
+			Lifecycle:    b.Lifecycle,
+			Direction:    s(string(rules.DirIngress)),
+			Protocol:     s(string(rules.ProtocolTCP)),
+			EtherType:    s(IPV4),
+			PortRangeMin: i(wellknownports.EtcdCiliumClientPort),
+			PortRangeMax: i(wellknownports.EtcdCiliumClientPort),
+		}
+		b.addDirectionalGroupRule(c, masterSG, masterSG, etcdCiliumPeerRule)
+		b.addDirectionalGroupRule(c, masterSG, masterSG, etcdCiliumGRPCRule)
+		b.addDirectionalGroupRule(c, masterSG, masterSG, etcdCiliumClientRule)
+		b.addDirectionalGroupRule(c, masterSG, masterSG, etcdCiliumQuarantinedClient)
+		b.addDirectionalGroupRule(c, nodeSG, masterSG, etcdCiliumClientRule)
+	}
 
 	for _, portRange := range wellknownports.ETCDPortRanges() {
 		etcdMgmrRule := &openstacktasks.SecurityGroupRule{
@@ -171,27 +233,11 @@ func (b *FirewallModelBuilder) addETCDRules(c *fi.ModelBuilderContext, sgMap map
 		}
 		b.addDirectionalGroupRule(c, masterSG, masterSG, etcdMgmrRule)
 	}
-
-	if b.Cluster.Spec.Networking.Calico != nil {
-
-		etcdCNIRule := &openstacktasks.SecurityGroupRule{
-			Lifecycle:    b.Lifecycle,
-			Direction:    s(string(rules.DirIngress)),
-			Protocol:     s(string(rules.ProtocolTCP)),
-			EtherType:    s(IPV4),
-			PortRangeMin: i(4001),
-			PortRangeMax: i(4001),
-		}
-		// Master access from other masters covered above
-		// Allow nodes to reach ETCD endpoints
-		b.addDirectionalGroupRule(c, masterSG, nodeSG, etcdCNIRule)
-	}
 	return nil
 }
 
 // addNodePortRules - Add node port rules to nodes give the NodePortRange
-func (b *FirewallModelBuilder) addNodePortRules(c *fi.ModelBuilderContext, sgMap map[string]*openstacktasks.SecurityGroup) error {
-
+func (b *FirewallModelBuilder) addNodePortRules(c *fi.CloudupModelBuilderContext, sgMap map[string]*openstacktasks.SecurityGroup) error {
 	nodeName := b.SecurityGroupName(kops.InstanceGroupRoleNode)
 	nodeSG := sgMap[nodeName]
 
@@ -219,11 +265,10 @@ func (b *FirewallModelBuilder) addNodePortRules(c *fi.ModelBuilderContext, sgMap
 }
 
 // addHTTPSRules - Add rules to 443 access given the presence of a loadbalancer or not
-func (b *FirewallModelBuilder) addHTTPSRules(c *fi.ModelBuilderContext, sgMap map[string]*openstacktasks.SecurityGroup, useVIPACL bool) error {
-
-	masterName := b.SecurityGroupName(kops.InstanceGroupRoleMaster)
+func (b *FirewallModelBuilder) addHTTPSRules(c *fi.CloudupModelBuilderContext, sgMap map[string]*openstacktasks.SecurityGroup, useVIPACL bool) error {
+	masterName := b.SecurityGroupName(kops.InstanceGroupRoleControlPlane)
 	nodeName := b.SecurityGroupName(kops.InstanceGroupRoleNode)
-	lbSGName := b.Cluster.Spec.MasterPublicName
+	lbSGName := b.APIResourceName()
 	lbSG := sgMap[lbSGName]
 	masterSG := sgMap[masterName]
 	nodeSG := sgMap[nodeName]
@@ -237,50 +282,75 @@ func (b *FirewallModelBuilder) addHTTPSRules(c *fi.ModelBuilderContext, sgMap ma
 		PortRangeMax: i(443),
 	}
 
-	//Allow all local communication for kubernetes.svc and to the api.internal lb/gossip for kubelet's
+	// Allow all local communication for kubernetes.svc and to the api.internal lb for kubelet's
 	b.addDirectionalGroupRule(c, masterSG, nodeSG, httpsIngress)
 	b.addDirectionalGroupRule(c, masterSG, masterSG, httpsIngress)
 
 	if b.UseLoadBalancerForAPI() {
 		if !useVIPACL {
-			//Allow API Access to the lb sg
-			for _, apiAccess := range b.Cluster.Spec.KubernetesAPIAccess {
+			// Allow API Access to the lb sg
+			for _, apiAccess := range b.Cluster.Spec.API.Access {
+				etherType := IPV4
+				if !net.IsIPv4CIDRString(apiAccess) {
+					etherType = IPV6
+				}
 				b.addDirectionalGroupRule(c, lbSG, nil, &openstacktasks.SecurityGroupRule{
+					Lifecycle:      b.Lifecycle,
+					Direction:      s(string(rules.DirIngress)),
+					Protocol:       s(IPProtocolTCP),
+					EtherType:      s(etherType),
+					PortRangeMin:   i(443),
+					PortRangeMax:   i(443),
+					RemoteIPPrefix: s(apiAccess),
+				})
+			}
+			// Allow masters ingress from the sg
+			b.addDirectionalGroupRule(c, masterSG, lbSG, httpsIngress)
+		}
+
+		// FIXME: Octavia port traffic appears to be denied though its port is in lbSG
+		if b.usesOctavia() {
+			if b.getOctaviaProvider() == "ovn" {
+				for _, apiAccess := range b.Cluster.Spec.API.Access {
+					etherType := IPV4
+					if !net.IsIPv4CIDRString(apiAccess) {
+						etherType = IPV6
+					}
+					b.addDirectionalGroupRule(c, masterSG, nil, &openstacktasks.SecurityGroupRule{
+						Lifecycle:      b.Lifecycle,
+						Direction:      s(string(rules.DirIngress)),
+						Protocol:       s(IPProtocolTCP),
+						EtherType:      s(etherType),
+						PortRangeMin:   i(443),
+						PortRangeMax:   i(443),
+						RemoteIPPrefix: s(apiAccess),
+					})
+				}
+			} else {
+				b.addDirectionalGroupRule(c, masterSG, nil, &openstacktasks.SecurityGroupRule{
 					Lifecycle:      b.Lifecycle,
 					Direction:      s(string(rules.DirIngress)),
 					Protocol:       s(IPProtocolTCP),
 					EtherType:      s(IPV4),
 					PortRangeMin:   i(443),
 					PortRangeMax:   i(443),
-					RemoteIPPrefix: s(apiAccess),
+					RemoteIPPrefix: s(b.Cluster.Spec.Networking.NetworkCIDR),
 				})
 			}
-			//Allow masters ingress from the sg
-			b.addDirectionalGroupRule(c, masterSG, lbSG, httpsIngress)
-		}
-
-		//FIXME: Octavia port traffic appears to be denied though its port is in lbSG
-		if b.usesOctavia() {
-			b.addDirectionalGroupRule(c, masterSG, nil, &openstacktasks.SecurityGroupRule{
-				Lifecycle:      b.Lifecycle,
-				Direction:      s(string(rules.DirIngress)),
-				Protocol:       s(IPProtocolTCP),
-				EtherType:      s(IPV4),
-				PortRangeMin:   i(443),
-				PortRangeMax:   i(443),
-				RemoteIPPrefix: s(b.Cluster.Spec.NetworkCIDR),
-			})
 		}
 
 	} else {
 		// Allow the masters to receive connections from KubernetesAPIAccess
-		for _, apiAccess := range b.Cluster.Spec.KubernetesAPIAccess {
-
+		for _, apiAccess := range b.Cluster.Spec.API.Access {
+			etherType := IPV4
+			if !net.IsIPv4CIDRString(apiAccess) {
+				etherType = IPV6
+			}
 			b.addDirectionalGroupRule(c, masterSG, nil, &openstacktasks.SecurityGroupRule{
 				Lifecycle:      b.Lifecycle,
 				Direction:      s(string(rules.DirIngress)),
 				Protocol:       s(IPProtocolTCP),
-				EtherType:      s(IPV4),
+				EtherType:      s(etherType),
 				PortRangeMin:   i(443),
 				PortRangeMax:   i(443),
 				RemoteIPPrefix: s(apiAccess),
@@ -292,10 +362,9 @@ func (b *FirewallModelBuilder) addHTTPSRules(c *fi.ModelBuilderContext, sgMap ma
 }
 
 // addKubeletRules - Add rules to 10250 port
-func (b *FirewallModelBuilder) addKubeletRules(c *fi.ModelBuilderContext, sgMap map[string]*openstacktasks.SecurityGroup) error {
-
-	//TODO: This is the default port for kubelet and may be overridden
-	masterName := b.SecurityGroupName(kops.InstanceGroupRoleMaster)
+func (b *FirewallModelBuilder) addKubeletRules(c *fi.CloudupModelBuilderContext, sgMap map[string]*openstacktasks.SecurityGroup) error {
+	// TODO: This is the default port for kubelet and may be overridden
+	masterName := b.SecurityGroupName(kops.InstanceGroupRoleControlPlane)
 	nodeName := b.SecurityGroupName(kops.InstanceGroupRoleNode)
 	masterSG := sgMap[masterName]
 	nodeSG := sgMap[nodeName]
@@ -317,9 +386,9 @@ func (b *FirewallModelBuilder) addKubeletRules(c *fi.ModelBuilderContext, sgMap 
 	return nil
 }
 
-// addNodeExporterRules - Allow 9100 TCP port from nodesg
-func (b *FirewallModelBuilder) addNodeExporterRules(c *fi.ModelBuilderContext, sgMap map[string]*openstacktasks.SecurityGroup) error {
-	masterName := b.SecurityGroupName(kops.InstanceGroupRoleMaster)
+// addNodeExporterAndOccmRules - Allow 9100 TCP port from nodesg, allow 10258 from nodes to master - expose occm metrics
+func (b *FirewallModelBuilder) addNodeExporterAndOccmRules(c *fi.CloudupModelBuilderContext, sgMap map[string]*openstacktasks.SecurityGroup) error {
+	masterName := b.SecurityGroupName(kops.InstanceGroupRoleControlPlane)
 	nodeName := b.SecurityGroupName(kops.InstanceGroupRoleNode)
 	masterSG := sgMap[masterName]
 	nodeSG := sgMap[nodeName]
@@ -334,13 +403,80 @@ func (b *FirewallModelBuilder) addNodeExporterRules(c *fi.ModelBuilderContext, s
 	// allow 9100 port from nodeSG
 	b.addDirectionalGroupRule(c, masterSG, nodeSG, nodeExporterIngress)
 	b.addDirectionalGroupRule(c, nodeSG, nodeSG, nodeExporterIngress)
+
+	occmMetrics := &openstacktasks.SecurityGroupRule{
+		Lifecycle:    b.Lifecycle,
+		Direction:    s(string(rules.DirIngress)),
+		Protocol:     s(IPProtocolTCP),
+		EtherType:    s(IPV4),
+		PortRangeMin: i(10258),
+		PortRangeMax: i(10258),
+	}
+	b.addDirectionalGroupRule(c, masterSG, nodeSG, occmMetrics)
+
+	if fi.ValueOf(b.Cluster.Spec.CloudProvider.Openstack.BlockStorage.MetricsEnabled) {
+		csiMetrics := &openstacktasks.SecurityGroupRule{
+			Lifecycle:    b.Lifecycle,
+			Direction:    s(string(rules.DirIngress)),
+			Protocol:     s(IPProtocolTCP),
+			EtherType:    s(IPV4),
+			PortRangeMin: i(9809),
+			PortRangeMax: i(9809),
+		}
+		// allow 9809 port from nodeSG & masterSG
+		b.addDirectionalGroupRule(c, masterSG, nodeSG, csiMetrics)
+		b.addDirectionalGroupRule(c, nodeSG, nodeSG, csiMetrics)
+	}
+	return nil
+}
+
+// addKubeControllerManagerMetricsRules - Add rules to 10257 port
+func (b *FirewallModelBuilder) addKubeControllerManagerMetricsRules(c *fi.CloudupModelBuilderContext, sgMap map[string]*openstacktasks.SecurityGroup) error {
+	// TODO: This is the default port for kube-controller-manager metrics and may be overridden
+	masterName := b.SecurityGroupName(kops.InstanceGroupRoleControlPlane)
+	nodeName := b.SecurityGroupName(kops.InstanceGroupRoleNode)
+	masterSG := sgMap[masterName]
+	nodeSG := sgMap[nodeName]
+
+	kubeControllerManagerMetricsRule := &openstacktasks.SecurityGroupRule{
+		Lifecycle:    b.Lifecycle,
+		Direction:    s(string(rules.DirIngress)),
+		Protocol:     s(IPProtocolTCP),
+		EtherType:    s(IPV4),
+		PortRangeMin: i(10257),
+		PortRangeMax: i(10257),
+	}
+
+	// allow port 10257 from nodeSG to masterSG
+	b.addDirectionalGroupRule(c, masterSG, nodeSG, kubeControllerManagerMetricsRule)
+	return nil
+}
+
+// addKubeSchedulerMetricsRules - Add rules to 10259 port
+func (b *FirewallModelBuilder) addKubeSchedulerMetricsRules(c *fi.CloudupModelBuilderContext, sgMap map[string]*openstacktasks.SecurityGroup) error {
+	// TODO: This is the default port for kube-scheduler metrics and may be overridden
+	masterName := b.SecurityGroupName(kops.InstanceGroupRoleControlPlane)
+	nodeName := b.SecurityGroupName(kops.InstanceGroupRoleNode)
+	masterSG := sgMap[masterName]
+	nodeSG := sgMap[nodeName]
+
+	kubeSchedulerMetricsRule := &openstacktasks.SecurityGroupRule{
+		Lifecycle:    b.Lifecycle,
+		Direction:    s(string(rules.DirIngress)),
+		Protocol:     s(IPProtocolTCP),
+		EtherType:    s(IPV4),
+		PortRangeMin: i(10259),
+		PortRangeMax: i(10259),
+	}
+
+	// allow port 10259 from nodeSG to masterSG
+	b.addDirectionalGroupRule(c, masterSG, nodeSG, kubeSchedulerMetricsRule)
 	return nil
 }
 
 // addDNSRules - Add DNS rules for internal DNS queries
-func (b *FirewallModelBuilder) addDNSRules(c *fi.ModelBuilderContext, sgMap map[string]*openstacktasks.SecurityGroup) error {
-
-	masterName := b.SecurityGroupName(kops.InstanceGroupRoleMaster)
+func (b *FirewallModelBuilder) addDNSRules(c *fi.CloudupModelBuilderContext, sgMap map[string]*openstacktasks.SecurityGroup) error {
+	masterName := b.SecurityGroupName(kops.InstanceGroupRoleControlPlane)
 	nodeName := b.SecurityGroupName(kops.InstanceGroupRoleNode)
 	masterSG := sgMap[masterName]
 	nodeSG := sgMap[nodeName]
@@ -361,55 +497,40 @@ func (b *FirewallModelBuilder) addDNSRules(c *fi.ModelBuilderContext, sgMap map[
 }
 
 // addCNIRules - Add ports required for different CNI implementations
-func (b *FirewallModelBuilder) addCNIRules(c *fi.ModelBuilderContext, sgMap map[string]*openstacktasks.SecurityGroup) error {
-
+func (b *FirewallModelBuilder) addCNIRules(c *fi.CloudupModelBuilderContext, sgMap map[string]*openstacktasks.SecurityGroup) error {
 	udpPorts := []int{}
 	tcpPorts := []int{}
 	protocols := []string{}
 
-	// allow cadvisor
-	tcpPorts = append(tcpPorts, 4194)
-
-	if b.Cluster.Spec.Networking != nil {
-		if b.Cluster.Spec.Networking.Kopeio != nil {
-			// VXLAN over UDP
-			// https://tools.ietf.org/html/rfc7348
-			udpPorts = append(udpPorts, 4789)
-		}
-
-		if b.Cluster.Spec.Networking.Cilium != nil {
-			udpPorts = append(udpPorts, 8472)
-			tcpPorts = append(tcpPorts, 4240)
-		}
-
-		if b.Cluster.Spec.Networking.Weave != nil {
-			udpPorts = append(udpPorts, 6783)
-			tcpPorts = append(tcpPorts, 6783)
-			udpPorts = append(udpPorts, 6784)
-		}
-
-		if b.Cluster.Spec.Networking.Flannel != nil {
-			switch b.Cluster.Spec.Networking.Flannel.Backend {
-			case "", "udp":
-				udpPorts = append(udpPorts, 8285)
-			case "vxlan":
-				udpPorts = append(udpPorts, 8472)
-			default:
-				klog.Warningf("unknown flannel networking backend %q", b.Cluster.Spec.Networking.Flannel.Backend)
-			}
-		}
-
-		if b.Cluster.Spec.Networking.Calico != nil {
-			tcpPorts = append(tcpPorts, 179)
-			protocols = append(protocols, ProtocolIPEncap)
-		}
-
-		if b.Cluster.Spec.Networking.Kuberouter != nil {
-			protocols = append(protocols, ProtocolIPEncap)
+	if b.Cluster.Spec.Networking.Cilium != nil {
+		udpPorts = append(udpPorts, 8472)
+		tcpPorts = append(tcpPorts, 4240)
+		if b.Cluster.Spec.Networking.Cilium.Hubble != nil && fi.ValueOf(b.Cluster.Spec.Networking.Cilium.Hubble.Enabled) {
+			tcpPorts = append(tcpPorts, 4244)
 		}
 	}
 
-	masterName := b.SecurityGroupName(kops.InstanceGroupRoleMaster)
+	if b.Cluster.Spec.Networking.Flannel != nil {
+		switch b.Cluster.Spec.Networking.Flannel.Backend {
+		case "", "udp":
+			udpPorts = append(udpPorts, 8285)
+		case "vxlan":
+			udpPorts = append(udpPorts, 8472)
+		default:
+			klog.Warningf("unknown flannel networking backend %q", b.Cluster.Spec.Networking.Flannel.Backend)
+		}
+	}
+
+	if b.Cluster.Spec.Networking.Calico != nil {
+		tcpPorts = append(tcpPorts, wellknownports.BGP)
+		protocols = append(protocols, ProtocolIPEncap)
+	}
+
+	if b.Cluster.Spec.Networking.KubeRouter != nil {
+		protocols = append(protocols, ProtocolIPEncap)
+	}
+
+	masterName := b.SecurityGroupName(kops.InstanceGroupRoleControlPlane)
 	nodeName := b.SecurityGroupName(kops.InstanceGroupRoleNode)
 	masterSG := sgMap[masterName]
 	nodeSG := sgMap[nodeName]
@@ -457,29 +578,21 @@ func (b *FirewallModelBuilder) addCNIRules(c *fi.ModelBuilderContext, sgMap map[
 	return nil
 }
 
-// addProtokubeRules - Add rules for protokube if gossip DNS is enabled
-func (b *FirewallModelBuilder) addProtokubeRules(c *fi.ModelBuilderContext, sgMap map[string]*openstacktasks.SecurityGroup) error {
-
-	if dns.IsGossipHostname(b.ClusterName()) {
-		masterName := b.SecurityGroupName(kops.InstanceGroupRoleMaster)
-		nodeName := b.SecurityGroupName(kops.InstanceGroupRoleNode)
-		masterSG := sgMap[masterName]
-		nodeSG := sgMap[nodeName]
-		for _, portRange := range wellknownports.DNSGossipPortRanges() {
-			protokubeRule := &openstacktasks.SecurityGroupRule{
-				Lifecycle:    b.Lifecycle,
-				Direction:    s(string(rules.DirIngress)),
-				Protocol:     s(string(rules.ProtocolTCP)),
-				EtherType:    s(string(rules.EtherType4)),
-				PortRangeMin: i(portRange.Min),
-				PortRangeMax: i(portRange.Max),
-			}
-			b.addDirectionalGroupRule(c, masterSG, nodeSG, protokubeRule)
-			b.addDirectionalGroupRule(c, nodeSG, masterSG, protokubeRule)
-			b.addDirectionalGroupRule(c, masterSG, masterSG, protokubeRule)
-			b.addDirectionalGroupRule(c, nodeSG, nodeSG, protokubeRule)
-		}
+// addKopsControllerRules - Add rules for kops-controller for node bootstrap
+func (b *FirewallModelBuilder) addKopsControllerRules(c *fi.CloudupModelBuilderContext, sgMap map[string]*openstacktasks.SecurityGroup) error {
+	masterName := b.SecurityGroupName(kops.InstanceGroupRoleControlPlane)
+	nodeName := b.SecurityGroupName(kops.InstanceGroupRoleNode)
+	masterSG := sgMap[masterName]
+	nodeSG := sgMap[nodeName]
+	kopsControllerRule := &openstacktasks.SecurityGroupRule{
+		Lifecycle:    b.Lifecycle,
+		Direction:    s(string(rules.DirIngress)),
+		Protocol:     s(string(rules.ProtocolTCP)),
+		EtherType:    s(string(rules.EtherType4)),
+		PortRangeMin: i(wellknownports.KopsControllerPort),
+		PortRangeMax: i(wellknownports.KopsControllerPort),
 	}
+	b.addDirectionalGroupRule(c, masterSG, nodeSG, kopsControllerRule)
 	return nil
 }
 
@@ -504,7 +617,7 @@ func (b *FirewallModelBuilder) getExistingRules(sgMap map[string]*openstacktasks
 			return fmt.Errorf("Found multiple security groups with the same name: %v", sgName)
 		}
 		sg := sgs[0]
-		sgt.Name = fi.String(sg.Name)
+		sgt.Name = new(sg.Name)
 		sgIdMap[sg.ID] = sgt
 	}
 
@@ -519,29 +632,28 @@ func (b *FirewallModelBuilder) getExistingRules(sgMap map[string]*openstacktasks
 		for _, rule := range sgRules {
 
 			t := &openstacktasks.SecurityGroupRule{
-				ID:             fi.String(rule.ID),
-				Direction:      fi.String(rule.Direction),
-				EtherType:      fi.String(rule.EtherType),
-				PortRangeMax:   fi.Int(rule.PortRangeMax),
-				PortRangeMin:   fi.Int(rule.PortRangeMin),
-				Protocol:       fi.String(rule.Protocol),
-				RemoteIPPrefix: fi.String(rule.RemoteIPPrefix),
+				ID:             new(rule.ID),
+				Direction:      new(rule.Direction),
+				EtherType:      new(rule.EtherType),
+				PortRangeMax:   new(rule.PortRangeMax),
+				PortRangeMin:   new(rule.PortRangeMin),
+				Protocol:       new(rule.Protocol),
+				RemoteIPPrefix: new(rule.RemoteIPPrefix),
 				RemoteGroup:    sgIdMap[rule.RemoteGroupID],
 				Lifecycle:      b.Lifecycle,
 				SecGroup:       sgIdMap[rule.SecGroupID],
-				Delete:         fi.Bool(true),
+				Delete:         new(true),
 			}
 			klog.V(8).Infof("Adding existing rule %v", t)
-			b.Rules[fi.StringValue(t.GetName())] = t
+			b.Rules[fi.ValueOf(t.GetName())] = t
 		}
 	}
 	return nil
-
 }
 
-func (b *FirewallModelBuilder) addDefaultEgress(c *fi.ModelBuilderContext, sgMap map[string]*openstacktasks.SecurityGroup, useVIPACL bool) {
+func (b *FirewallModelBuilder) addDefaultEgress(c *fi.CloudupModelBuilderContext, sgMap map[string]*openstacktasks.SecurityGroup, useVIPACL bool) {
 	for name, sg := range sgMap {
-		if useVIPACL && name == b.Cluster.Spec.MasterPublicName {
+		if useVIPACL && name == b.APIResourceName() {
 			continue
 		}
 		t := &openstacktasks.SecurityGroupRule{
@@ -565,20 +677,17 @@ func (b *FirewallModelBuilder) addDefaultEgress(c *fi.ModelBuilderContext, sgMap
 }
 
 // Build - schedule security groups and security group rule tasks for Openstack
-func (b *FirewallModelBuilder) Build(c *fi.ModelBuilderContext) error {
-	roles := []kops.InstanceGroupRole{kops.InstanceGroupRoleMaster, kops.InstanceGroupRoleNode}
+func (b *FirewallModelBuilder) Build(c *fi.CloudupModelBuilderContext) error {
+	roles := []kops.InstanceGroupRole{kops.InstanceGroupRoleControlPlane, kops.InstanceGroupRoleNode}
 	if b.UsesSSHBastion() {
 		roles = append(roles, kops.InstanceGroupRoleBastion)
 	}
 
 	sgMap := make(map[string]*openstacktasks.SecurityGroup)
 
-	useVIPACL := false
-	if b.UseLoadBalancerForAPI() && b.UseVIPACL() {
-		useVIPACL = true
-	}
+	useVIPACL := b.UseLoadBalancerForAPI() && b.UseVIPACL()
 	sg := &openstacktasks.SecurityGroup{
-		Name:             s(b.Cluster.Spec.MasterPublicName),
+		Name:             s(b.APIResourceName()),
 		Lifecycle:        b.Lifecycle,
 		RemoveExtraRules: []string{"port=443"},
 	}
@@ -586,7 +695,7 @@ func (b *FirewallModelBuilder) Build(c *fi.ModelBuilderContext) error {
 		sg.RemoveGroup = true
 	}
 	c.AddTask(sg)
-	sgMap[b.Cluster.Spec.MasterPublicName] = sg
+	sgMap[b.APIResourceName()] = sg
 	for _, role := range roles {
 
 		// Create Security Group for Role
@@ -596,11 +705,12 @@ func (b *FirewallModelBuilder) Build(c *fi.ModelBuilderContext) error {
 			Lifecycle:   b.Lifecycle,
 			RemoveGroup: false,
 		}
-		if role == kops.InstanceGroupRoleBastion {
+		switch role {
+		case kops.InstanceGroupRoleBastion:
 			sg.RemoveExtraRules = []string{"port=22"}
-		} else if role == kops.InstanceGroupRoleNode {
+		case kops.InstanceGroupRoleNode:
 			sg.RemoveExtraRules = []string{"port=22", "port=10250"}
-		} else if role == kops.InstanceGroupRoleMaster {
+		case kops.InstanceGroupRoleControlPlane:
 			sg.RemoveExtraRules = []string{"port=22", "port=443", "port=10250"}
 		}
 		c.AddTask(sg)
@@ -617,22 +727,26 @@ func (b *FirewallModelBuilder) Build(c *fi.ModelBuilderContext) error {
 
 	b.addDefaultEgress(c, sgMap, useVIPACL)
 
-	//Add API Server Rules
+	// Add API Server Rules
 	b.addHTTPSRules(c, sgMap, useVIPACL)
 
-	//Add SSH
+	// Add SSH
 	b.addSSHRules(c, sgMap)
-	//Allow overlay DNS
+	// Allow overlay DNS
 	b.addDNSRules(c, sgMap)
-	//Add Kubelet Rules
+	// Add Kubelet Rules
 	b.addKubeletRules(c, sgMap)
-	//Add Node exporter Rules
-	b.addNodeExporterRules(c, sgMap)
-	// Protokube Rules
-	b.addProtokubeRules(c, sgMap)
-	//Allow necessary local traffic
+	// Add Node exporter and occm metrics Rules
+	b.addNodeExporterAndOccmRules(c, sgMap)
+	// Add kube controller manager metrics Rules
+	b.addKubeControllerManagerMetricsRules(c, sgMap)
+	// Add kube scheduler metrics Rules
+	b.addKubeSchedulerMetricsRules(c, sgMap)
+	// Kops-controller Rules
+	b.addKopsControllerRules(c, sgMap)
+	// Allow necessary local traffic
 	b.addCNIRules(c, sgMap)
-	//ETCD Leader Election
+	// ETCD Leader Election
 	b.addETCDRules(c, sgMap)
 	// Add NodePort Rules:
 	err = b.addNodePortRules(c, sgMap)
@@ -645,5 +759,4 @@ func (b *FirewallModelBuilder) Build(c *fi.ModelBuilderContext) error {
 	}
 
 	return nil
-
 }

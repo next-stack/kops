@@ -17,6 +17,7 @@ limitations under the License.
 package vfsclientset
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -37,20 +38,20 @@ import (
 )
 
 type ClusterVFS struct {
-	commonVFS
+	VFSClientBase
 }
 
-func newClusterVFS(basePath vfs.Path) *ClusterVFS {
+func newClusterVFS(vfsContext *vfs.VFSContext, basePath vfs.Path) *ClusterVFS {
 	c := &ClusterVFS{}
-	c.init("Cluster", basePath, StoreVersion)
+	c.Init("Cluster", vfsContext, basePath, StoreVersion)
 	return c
 }
 
-func (c *ClusterVFS) Get(name string, options metav1.GetOptions) (*api.Cluster, error) {
+func (c *ClusterVFS) Get(ctx context.Context, name string, options metav1.GetOptions) (*api.Cluster, error) {
 	if options.ResourceVersion != "" {
 		return nil, fmt.Errorf("ResourceVersion not supported in ClusterVFS::Get")
 	}
-	o, err := c.find(name)
+	o, err := c.find(ctx, name)
 	if err != nil {
 		return nil, err
 	}
@@ -69,8 +70,8 @@ func (c *ClusterVFS) configBase(clusterName string) (vfs.Path, error) {
 	return configPath, nil
 }
 
-func (c *ClusterVFS) List(options metav1.ListOptions) (*api.ClusterList, error) {
-	names, err := c.listNames()
+func (c *ClusterVFS) List(ctx context.Context, options metav1.ListOptions) (*api.ClusterList, error) {
+	names, err := c.listNames(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -78,7 +79,7 @@ func (c *ClusterVFS) List(options metav1.ListOptions) (*api.ClusterList, error) 
 	var items []api.Cluster
 
 	for _, clusterName := range names {
-		cluster, err := c.find(clusterName)
+		cluster, err := c.find(ctx, clusterName)
 		if err != nil {
 			klog.Warningf("cluster %q found in state store listing, but cannot be loaded: %v", clusterName, err)
 			continue
@@ -96,7 +97,9 @@ func (c *ClusterVFS) List(options metav1.ListOptions) (*api.ClusterList, error) 
 }
 
 func (r *ClusterVFS) Create(c *api.Cluster) (*api.Cluster, error) {
-	if errs := validation.ValidateCluster(c, false); len(errs) != 0 {
+	ctx := context.TODO()
+
+	if errs := validation.ValidateCluster(c, false, r.vfsContext); len(errs) != 0 {
 		return nil, errs.ToAggregate()
 	}
 
@@ -109,7 +112,7 @@ func (r *ClusterVFS) Create(c *api.Cluster) (*api.Cluster, error) {
 		return nil, fmt.Errorf("clusterName is required")
 	}
 
-	if err := r.writeConfig(c, r.basePath.Join(clusterName, registry.PathCluster), c, vfs.WriteOptionCreate); err != nil {
+	if err := r.writeConfig(ctx, c, r.basePath.Join(clusterName, registry.PathCluster), c, vfs.WriteOptionCreate); err != nil {
 		if os.IsExist(err) {
 			return nil, err
 		}
@@ -120,12 +123,14 @@ func (r *ClusterVFS) Create(c *api.Cluster) (*api.Cluster, error) {
 }
 
 func (r *ClusterVFS) Update(c *api.Cluster, status *api.ClusterStatus) (*api.Cluster, error) {
+	ctx := context.TODO()
+
 	clusterName := c.ObjectMeta.Name
 	if clusterName == "" {
 		return nil, field.Required(field.NewPath("objectMeta", "name"), "clusterName is required")
 	}
 
-	old, err := r.Get(clusterName, metav1.GetOptions{})
+	old, err := r.Get(ctx, clusterName, metav1.GetOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -134,7 +139,7 @@ func (r *ClusterVFS) Update(c *api.Cluster, status *api.ClusterStatus) (*api.Clu
 		return nil, errors.NewNotFound(schema.GroupResource{Group: api.GroupName, Resource: "Cluster"}, clusterName)
 	}
 
-	if err := validation.ValidateClusterUpdate(c, status, old).ToAggregate(); err != nil {
+	if err := validation.ValidateClusterUpdate(c, status, old, r.vfsContext).ToAggregate(); err != nil {
 		return nil, err
 	}
 
@@ -142,7 +147,7 @@ func (r *ClusterVFS) Update(c *api.Cluster, status *api.ClusterStatus) (*api.Clu
 		c.SetGeneration(old.GetGeneration() + 1)
 	}
 
-	if err := r.writeConfig(c, r.basePath.Join(clusterName, registry.PathCluster), c, vfs.WriteOptionOnlyIfExists); err != nil {
+	if err := r.writeConfig(ctx, c, r.basePath.Join(clusterName, registry.PathCluster), c, vfs.WriteOptionOnlyIfExists); err != nil {
 		if os.IsNotExist(err) {
 			return nil, err
 		}
@@ -154,8 +159,8 @@ func (r *ClusterVFS) Update(c *api.Cluster, status *api.ClusterStatus) (*api.Clu
 
 // List returns a slice containing all the cluster names
 // It skips directories that don't look like clusters
-func (r *ClusterVFS) listNames() ([]string, error) {
-	paths, err := r.basePath.ReadTree()
+func (r *ClusterVFS) listNames(ctx context.Context) ([]string, error) {
+	paths, err := r.basePath.ReadTree(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("error reading state store: %v", err)
 	}
@@ -175,13 +180,13 @@ func (r *ClusterVFS) listNames() ([]string, error) {
 	return keys, nil
 }
 
-func (r *ClusterVFS) find(clusterName string) (*api.Cluster, error) {
+func (r *ClusterVFS) find(ctx context.Context, clusterName string) (*api.Cluster, error) {
 	if clusterName == "" {
 		return nil, fmt.Errorf("clusterName is required")
 	}
 	configPath := r.basePath.Join(clusterName, registry.PathCluster)
 
-	o, err := r.readConfig(configPath)
+	o, err := r.readConfig(ctx, configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -199,12 +204,12 @@ func (r *ClusterVFS) find(clusterName string) (*api.Cluster, error) {
 	}
 
 	// TODO: Split this out into real version updates / schema changes
-	if c.Spec.ConfigBase == "" {
+	if c.Spec.ConfigStore.Base == "" {
 		configBase, err := r.configBase(clusterName)
 		if err != nil {
-			return nil, fmt.Errorf("error building ConfigBase for cluster: %v", err)
+			return nil, fmt.Errorf("error building ConfigStore.Base for cluster: %v", err)
 		}
-		c.Spec.ConfigBase = configBase.Path()
+		c.Spec.ConfigStore.Base = configBase.Path()
 	}
 
 	return c, nil

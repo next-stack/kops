@@ -17,6 +17,7 @@ limitations under the License.
 package deployer
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path"
@@ -29,34 +30,55 @@ import (
 )
 
 func (d *deployer) DumpClusterLogs() error {
+	yamlFile, err := os.Create(path.Join(d.ArtifactsDir, "toolbox-dump.yaml"))
+	if err != nil {
+		panic(err)
+	}
+	defer yamlFile.Close()
+
+	// Up() may not have run in this process, or may have failed before it could work this out.
+	d.resolveSSHUserFromCluster()
 
 	args := []string{
 		d.KopsBinaryPath, "toolbox", "dump",
 		"--name", d.ClusterName,
 		"--dir", d.ArtifactsDir,
 		"--private-key", d.SSHPrivateKeyPath,
-		"--ssh-user", d.SSHUser,
+	}
+	// Passing an empty --ssh-user would override the kops default with an unusable value.
+	if d.SSHUser != "" {
+		args = append(args, "--ssh-user", d.SSHUser)
+	}
+
+	if d.MaxNodesToDump != "" {
+		args = append(args, "--max-nodes", d.MaxNodesToDump)
+	}
+	if d.NodeDumpTimeout > 0 {
+		args = append(args, "--node-dump-timeout", d.NodeDumpTimeout.String())
 	}
 	klog.Info(strings.Join(args, " "))
 	cmd := exec.Command(args[0], args[1:]...)
-	cmd.SetEnv(d.env()...)
-	if err := runWithOutput(cmd); err != nil {
-		return err
+	cmd.SetEnv(append(d.env(), "KOPS_TOOLBOX_DUMP_K8S_RESOURCES=1")...)
+	cmd.SetStdout(yamlFile)
+	cmd.SetStderr(os.Stderr)
+
+	var dumpErr error
+	if err := cmd.Run(); err != nil {
+		klog.Warningf("kops toolbox dump failed: %v", err)
+		dumpErr = errors.Join(dumpErr, err)
 	}
 
 	if err := d.dumpClusterManifest(); err != nil {
-		return err
+		klog.Warningf("cluster manifest dump failed: %v", err)
+		dumpErr = errors.Join(dumpErr, err)
 	}
 
-	if err := d.dumpClusterInfo(); err != nil {
-		return err
-	}
-
-	return nil
+	return dumpErr
 }
 
 func (d *deployer) dumpClusterManifest() error {
 	resourceTypes := []string{"cluster", "instancegroups"}
+	var dumpErr error
 	for _, rt := range resourceTypes {
 		yamlFile, err := os.Create(path.Join(d.ArtifactsDir, fmt.Sprintf("%v.yaml", rt)))
 		if err != nil {
@@ -75,10 +97,10 @@ func (d *deployer) dumpClusterManifest() error {
 		cmd.SetStdout(yamlFile)
 		cmd.SetEnv(d.env()...)
 		if err := cmd.Run(); err != nil {
-			return err
+			dumpErr = errors.Join(err, dumpErr)
 		}
 	}
-	return nil
+	return dumpErr
 }
 
 func (d *deployer) dumpClusterInfo() error {
@@ -92,12 +114,111 @@ func (d *deployer) dumpClusterInfo() error {
 
 	cmd := exec.Command(args[0], args[1:]...)
 	cmd.SetEnv(d.env()...)
+	var dumpErr error
+
 	if err := cmd.Run(); err != nil {
 		if err = d.dumpClusterInfoSSH(); err != nil {
-			return err
+			dumpErr = errors.Join(dumpErr, err)
 		}
 	}
-	return nil
+
+	resourceTypes := []string{
+		"csinodes", "csidrivers", "storageclasses", "persistentvolumes",
+		"mutatingwebhookconfigurations", "validatingwebhookconfigurations",
+		"clusterrolebindings", "clusterroles",
+	}
+	if err := os.MkdirAll(path.Join(d.ArtifactsDir, "cluster-info"), 0o755); err != nil {
+		return err
+	}
+	for _, resType := range resourceTypes {
+		yamlFile, err := os.Create(path.Join(d.ArtifactsDir, "cluster-info", fmt.Sprintf("%v.yaml", resType)))
+		if err != nil {
+			return err
+		}
+		defer yamlFile.Close()
+
+		args = []string{
+			"kubectl", "--request-timeout", "5s", "get", resType,
+			"--all-namespaces",
+			"--show-managed-fields",
+			"--ignore-not-found=true",
+			"-o", "yaml",
+		}
+		klog.Info(strings.Join(args, " "))
+
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.SetEnv(d.env()...)
+		cmd.SetStdout(yamlFile)
+		if err := cmd.Run(); err != nil {
+			klog.Warningf("Failed to get %v: %v", resType, err)
+			dumpErr = errors.Join(dumpErr, err)
+		}
+	}
+
+	nsCmd := exec.Command(
+		"kubectl", "--request-timeout", "5s", "get", "namespaces", "--no-headers", "-o", "custom-columns=name:.metadata.name",
+	)
+	namespaces, err := exec.OutputLines(nsCmd)
+	if err != nil {
+		dumpErr = errors.Join(dumpErr, err)
+		klog.Warningf("failed to get namespaces: %v", err)
+	}
+
+	namespacedResourceTypes := []string{
+		"certificaterequests",
+		"certificates",
+		"configmaps",
+		"endpoints",
+		"endpointslices",
+		"issuers",
+		"leases",
+		"persistentvolumeclaims",
+		"poddisruptionbudgets",
+		"podmonitors",
+		"statefulsets",
+		"serviceaccounts",
+		"servicemonitors",
+		"rolebindings",
+		"roles",
+	}
+	for _, namespace := range namespaces {
+		namespace = strings.TrimSpace(namespace)
+		if err := os.MkdirAll(path.Join(d.ArtifactsDir, "cluster-info", namespace), 0o755); err != nil {
+			dumpErr = errors.Join(dumpErr, err)
+		}
+		for _, resType := range namespacedResourceTypes {
+			yamlFile, err := os.Create(path.Join(d.ArtifactsDir, "cluster-info", namespace, fmt.Sprintf("%v.yaml", resType)))
+			if err != nil {
+				dumpErr = errors.Join(dumpErr, err)
+			}
+			defer yamlFile.Close()
+
+			args = []string{
+				"kubectl", "get", resType,
+				"-n", namespace,
+				"--show-managed-fields",
+				"--ignore-not-found=true",
+				"-o", "yaml",
+			}
+			klog.Info(strings.Join(args, " "))
+
+			cmd := exec.Command(args[0], args[1:]...)
+			cmd.SetEnv(d.env()...)
+			cmd.SetStdout(yamlFile)
+			if err := cmd.Run(); err != nil {
+				if err = d.dumpClusterInfoSSH(); err != nil {
+					klog.Warningf("Failed to get %v: %v", resType, err)
+					dumpErr = errors.Join(dumpErr, err)
+				}
+			}
+		}
+	}
+	// cleanup zero byte files
+	cmd = exec.Command("find", d.ArtifactsDir, "-size", "0", "-print", "-delete", "-o")
+	if err := cmd.Run(); err != nil {
+		dumpErr = errors.Join(dumpErr, err)
+	}
+	return dumpErr
 }
 
 // dumpClusterInfoSSH runs `kubectl cluster-info dump` on a control plane host via SSH
@@ -108,12 +229,15 @@ func (d *deployer) dumpClusterInfoSSH() error {
 		d.KopsBinaryPath, "toolbox", "dump",
 		"--name", d.ClusterName,
 		"--private-key", d.SSHPrivateKeyPath,
-		"--ssh-user", d.SSHUser,
 		"-o", "yaml",
+	}
+	if d.SSHUser != "" {
+		toolboxDumpArgs = append(toolboxDumpArgs, "--ssh-user", d.SSHUser)
 	}
 	klog.Info(strings.Join(toolboxDumpArgs, " "))
 
 	cmd := exec.Command(toolboxDumpArgs[0], toolboxDumpArgs[1:]...)
+	cmd.SetStderr(os.Stderr)
 	dumpOutput, err := exec.Output(cmd)
 	if err != nil {
 		return err
@@ -188,16 +312,11 @@ func findControlPlaneIPUser(dump resources.Dump) (string, string, bool) {
 			continue
 		}
 		for _, role := range instance.Roles {
-			if role == "master" {
+			if role == "control-plane" {
 				return instance.PublicAddresses[0], instance.SSHUser, true
 			}
 		}
 	}
 	klog.Warning("ControlPlane instance not found from kops toolbox dump")
 	return "", "", false
-}
-
-func runWithOutput(cmd exec.Cmd) error {
-	exec.InheritOutput(cmd)
-	return cmd.Run()
 }

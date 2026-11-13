@@ -22,12 +22,13 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 
 	"k8s.io/kops/upup/pkg/fi"
 
 	"github.com/google/uuid"
-	"github.com/gophercloud/gophercloud/openstack/networking/v2/ports"
+	"github.com/gophercloud/gophercloud/v2/openstack/networking/v2/ports"
 )
 
 type portListResponse struct {
@@ -67,7 +68,6 @@ func (m *MockClient) mockPorts() {
 		case http.MethodPut:
 			parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 			if len(parts) == 4 && parts[2] == "tags" {
-
 				m.tagPort(w, r)
 			} else if len(parts) == 2 {
 				m.updatePort(w, r)
@@ -84,8 +84,23 @@ func (m *MockClient) mockPorts() {
 	m.Mux.HandleFunc("/ports", handler)
 }
 
-func (m *MockClient) listPorts(w http.ResponseWriter, vals url.Values) {
+func containsAll(list []string, subList []string) bool {
+	for _, item := range subList {
+		if !slices.Contains(list, item) {
+			return false
+		}
+	}
+	return true
+}
 
+func parseTags(tags string) []string {
+	if tags == "" {
+		return []string{}
+	}
+	return strings.Split(tags, ",")
+}
+
+func (m *MockClient) listPorts(w http.ResponseWriter, vals url.Values) {
 	w.WriteHeader(http.StatusOK)
 
 	ports := make([]ports.Port, 0)
@@ -93,6 +108,8 @@ func (m *MockClient) listPorts(w http.ResponseWriter, vals url.Values) {
 	idFilter := vals.Get("id")
 	networkFilter := vals.Get("network_id")
 	deviceFilter := vals.Get("device_id")
+	tags := parseTags(vals.Get("tags"))
+
 	for _, p := range m.ports {
 		if nameFilter != "" && nameFilter != p.Name {
 			continue
@@ -104,6 +121,9 @@ func (m *MockClient) listPorts(w http.ResponseWriter, vals url.Values) {
 			continue
 		}
 		if idFilter != "" && idFilter != p.ID {
+			continue
+		}
+		if len(tags) > 0 && !containsAll(p.Tags, tags) {
 			continue
 		}
 		ports = append(ports, p)
@@ -240,10 +260,9 @@ func (m *MockClient) updatePort(w http.ResponseWriter, r *http.Request) {
 
 	deviceID := update.Port.DeviceID
 	if deviceID != nil {
-		port.DeviceID = fi.StringValue(deviceID)
+		port.DeviceID = fi.ValueOf(deviceID)
 	}
 	m.ports[portID] = port
 
 	w.WriteHeader(http.StatusOK)
-
 }

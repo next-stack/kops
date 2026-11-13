@@ -30,19 +30,21 @@ import (
 // TargetPool represents a GCE TargetPool
 // +kops:fitask
 type TargetPool struct {
-	Name      *string
+	Name        *string
+	HealthCheck *HTTPHealthcheck
+
 	Lifecycle fi.Lifecycle
 }
 
-var _ fi.CompareWithID = &TargetPool{}
+var _ fi.CompareWithID = (*TargetPool)(nil)
 
 func (e *TargetPool) CompareWithID() *string {
 	return e.Name
 }
 
-func (e *TargetPool) Find(c *fi.Context) (*TargetPool, error) {
-	cloud := c.Cloud.(gce.GCECloud)
-	name := fi.StringValue(e.Name)
+func (e *TargetPool) Find(c *fi.CloudupContext) (*TargetPool, error) {
+	cloud := c.T.Cloud.(gce.GCECloud)
+	name := fi.ValueOf(e.Name)
 
 	r, err := cloud.Compute().TargetPools().Get(cloud.Project(), cloud.Region(), name)
 	if err != nil {
@@ -53,33 +55,34 @@ func (e *TargetPool) Find(c *fi.Context) (*TargetPool, error) {
 	}
 
 	actual := &TargetPool{}
-	actual.Name = fi.String(r.Name)
+	actual.Name = new(r.Name)
 
 	// Avoid spurious changes
+	actual.HealthCheck = e.HealthCheck
 	actual.Lifecycle = e.Lifecycle
 
 	return actual, nil
 }
 
-func (e *TargetPool) Run(c *fi.Context) error {
-	return fi.DefaultDeltaRunMethod(e, c)
+func (e *TargetPool) Run(c *fi.CloudupContext) error {
+	return fi.CloudupDefaultDeltaRunMethod(e, c)
 }
 
 func (_ *TargetPool) CheckChanges(a, e, changes *TargetPool) error {
-	if fi.StringValue(e.Name) == "" {
+	if fi.ValueOf(e.Name) == "" {
 		return fi.RequiredField("Name")
 	}
 	return nil
 }
 
 func (e *TargetPool) URL(cloud gce.GCECloud) string {
-	name := fi.StringValue(e.Name)
+	name := fi.ValueOf(e.Name)
 
 	return fmt.Sprintf("https://www.googleapis.com/compute/v1/projects/%s/regions/%s/targetPools/%s", cloud.Project(), cloud.Region(), name)
 }
 
 func (_ *TargetPool) RenderGCE(t *gce.GCEAPITarget, a, e, changes *TargetPool) error {
-	name := fi.StringValue(e.Name)
+	name := fi.ValueOf(e.Name)
 
 	o := &compute.TargetPool{
 		Name: name,
@@ -104,25 +107,25 @@ func (_ *TargetPool) RenderGCE(t *gce.GCEAPITarget, a, e, changes *TargetPool) e
 }
 
 type terraformTargetPool struct {
-	Name            string   `json:"name" cty:"name"`
-	Description     string   `json:"description,omitempty" cty:"description"`
-	HealthChecks    []string `json:"health_checks,omitempty" cty:"health_checks"`
-	Instances       []string `json:"instances,omitempty" cty:"instances"`
-	SessionAffinity string   `json:"session_affinity,omitempty" cty:"session_affinity"`
+	Name         string                     `cty:"name"`
+	HealthChecks []*terraformWriter.Literal `cty:"health_checks"`
 }
 
 func (_ *TargetPool) RenderTerraform(t *terraform.TerraformTarget, a, e, changes *TargetPool) error {
-	name := fi.StringValue(e.Name)
+	name := fi.ValueOf(e.Name)
 
 	tf := &terraformTargetPool{
 		Name: name,
+		HealthChecks: []*terraformWriter.Literal{
+			e.HealthCheck.TerraformLink(),
+		},
 	}
 
 	return t.RenderResource("google_compute_target_pool", name, tf)
 }
 
 func (e *TargetPool) TerraformLink() *terraformWriter.Literal {
-	name := fi.StringValue(e.Name)
+	name := fi.ValueOf(e.Name)
 
 	return terraformWriter.LiteralSelfLink("google_compute_target_pool", name)
 }

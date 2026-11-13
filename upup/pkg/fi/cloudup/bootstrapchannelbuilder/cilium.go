@@ -17,74 +17,37 @@ limitations under the License.
 package bootstrapchannelbuilder
 
 import (
-	"fmt"
-
-	"github.com/blang/semver/v4"
+	"k8s.io/klog/v2"
 	"k8s.io/kops/channels/pkg/api"
 	"k8s.io/kops/upup/pkg/fi"
 )
 
 func addCiliumAddon(b *BootstrapChannelBuilder, addons *AddonList) error {
-
 	cilium := b.Cluster.Spec.Networking.Cilium
-	if cilium != nil {
-		ver, err := semver.ParseTolerant(cilium.Version)
-		if err != nil {
-			return fmt.Errorf("Failed to parse cilium version: %w", err)
+	if cilium == nil {
+		return nil
+	}
+
+	key := "networking.cilium.io"
+	useBuiltin := !b.hasExternalAddon(key)
+
+	if !useBuiltin {
+		klog.Infof("found cilium (%q) in addons; won't use builtin", key)
+	} else {
+		id := "k8s-1.16"
+		location := key + "/" + id + "-v1.15.yaml"
+
+		addon := &api.AddonSpec{
+			Name:               new(key),
+			Selector:           networkingSelector(),
+			Manifest:           new(location),
+			Id:                 id,
+			NeedsRollingUpdate: api.NeedsRollingUpdateAll,
 		}
-
-		key := "networking.cilium.io"
-		if ver.Minor < 9 {
-			{
-				id := "k8s-1.12"
-				location := key + "/" + id + "-v1.8.yaml"
-
-				addons.Add(&api.AddonSpec{
-					Name:               fi.String(key),
-					Selector:           networkingSelector(),
-					Manifest:           fi.String(location),
-					Id:                 id,
-					NeedsRollingUpdate: "all",
-				})
-			}
-		} else if ver.Minor == 9 {
-			{
-				id := "k8s-1.12"
-				location := key + "/" + id + "-v1.9.yaml"
-
-				addon := &api.AddonSpec{
-					Name:               fi.String(key),
-					Selector:           networkingSelector(),
-					Manifest:           fi.String(location),
-					Id:                 id,
-					NeedsRollingUpdate: "all",
-				}
-				if cilium.Hubble != nil && fi.BoolValue(cilium.Hubble.Enabled) {
-					addon.NeedsPKI = true
-				}
-				addons.Add(addon)
-			}
-		} else if ver.Minor == 10 {
-			{
-				id := "k8s-1.16"
-				location := key + "/" + id + "-v1.10.yaml"
-
-				addon := &api.AddonSpec{
-					Name:               fi.String(key),
-					Selector:           networkingSelector(),
-					Manifest:           fi.String(location),
-					Id:                 id,
-					NeedsRollingUpdate: "all",
-				}
-				if cilium.Hubble != nil && fi.BoolValue(cilium.Hubble.Enabled) {
-					addon.NeedsPKI = true
-				}
-				addons.Add(addon)
-			}
-		} else {
-			return fmt.Errorf("unknown cilium version: %q", cilium.Version)
+		if cilium.Hubble != nil && fi.ValueOf(cilium.Hubble.Enabled) {
+			addon.NeedsPKI = true
 		}
+		addons.Add(addon)
 	}
 	return nil
-
 }

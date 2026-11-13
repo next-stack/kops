@@ -24,21 +24,29 @@ import (
 	"k8s.io/kops/util/pkg/reflectutils"
 )
 
-type HasDependencies interface {
-	GetDependencies(tasks map[string]Task) []Task
+type HasDependencies[T SubContext] interface {
+	GetDependencies(tasks map[string]Task[T]) []Task[T]
 }
 
+type CloudupHasDependencies = HasDependencies[CloudupSubContext]
+type InstallHasDependencies = HasDependencies[InstallSubContext]
+type NodeupHasDependencies = HasDependencies[NodeupSubContext]
+
 // NotADependency is a marker type to prevent FindTaskDependencies() from considering it a potential dependency.
-type NotADependency struct{}
+type NotADependency[T SubContext] struct{}
 
-var _ HasDependencies = &NotADependency{}
+type NodeupNotADependency = NotADependency[NodeupSubContext]
+type CloudupNotADependency = NotADependency[CloudupSubContext]
 
-func (NotADependency) GetDependencies(map[string]Task) []Task {
+var _ CloudupHasDependencies = (*CloudupNotADependency)(nil)
+var _ NodeupHasDependencies = (*NodeupNotADependency)(nil)
+
+func (NotADependency[T]) GetDependencies(map[string]Task[T]) []Task[T] {
 	return nil
 }
 
 // FindTaskDependencies returns a map from each task's key to the discovered list of dependencies
-func FindTaskDependencies(tasks map[string]Task) map[string][]string {
+func FindTaskDependencies[T SubContext](tasks map[string]Task[T]) map[string][]string {
 	taskToId := make(map[interface{}]string)
 	for k, t := range tasks {
 		taskToId[t] = k
@@ -49,8 +57,8 @@ func FindTaskDependencies(tasks map[string]Task) map[string][]string {
 	for k, t := range tasks {
 		task := t
 
-		var dependencies []Task
-		if hd, ok := task.(HasDependencies); ok {
+		var dependencies []Task[T]
+		if hd, ok := task.(HasDependencies[T]); ok {
 			dependencies = hd.GetDependencies(tasks)
 		} else {
 			dependencies = reflectForDependencies(tasks, task)
@@ -58,9 +66,13 @@ func FindTaskDependencies(tasks map[string]Task) map[string][]string {
 
 		var dependencyKeys []string
 		for _, dep := range dependencies {
+			// Skip nils, including interface nils
+			if dep == nil || reflect.ValueOf(dep).IsNil() {
+				continue
+			}
 			dependencyKey, found := taskToId[dep]
 			if !found {
-				klog.Fatalf("dependency not found: %v", dep)
+				klog.Fatalf("dependency for task %T:%q not found: %v", t, k, dep)
 			}
 			dependencyKeys = append(dependencyKeys, dependencyKey)
 		}
@@ -76,14 +88,14 @@ func FindTaskDependencies(tasks map[string]Task) map[string][]string {
 	return edges
 }
 
-func reflectForDependencies(tasks map[string]Task, task Task) []Task {
+func reflectForDependencies[T SubContext](tasks map[string]Task[T], task Task[T]) []Task[T] {
 	v := reflect.ValueOf(task).Elem()
 	return getDependencies(tasks, v)
 }
 
 // FindDependencies will try to infer dependencies for an arbitrary object
-func FindDependencies(tasks map[string]Task, o interface{}) []Task {
-	if hd, ok := o.(HasDependencies); ok {
+func FindDependencies[T SubContext](tasks map[string]Task[T], o interface{}) []Task[T] {
+	if hd, ok := o.(HasDependencies[T]); ok {
 		return hd.GetDependencies(tasks)
 	}
 
@@ -91,8 +103,8 @@ func FindDependencies(tasks map[string]Task, o interface{}) []Task {
 	return getDependencies(tasks, v)
 }
 
-func getDependencies(tasks map[string]Task, v reflect.Value) []Task {
-	var dependencies []Task
+func getDependencies[T SubContext](tasks map[string]Task[T], v reflect.Value) []Task[T] {
+	var dependencies []Task[T]
 
 	visitor := func(path *reflectutils.FieldPath, f *reflect.StructField, v reflect.Value) error {
 		if reflectutils.IsPrimitiveValue(v) {
@@ -113,12 +125,28 @@ func getDependencies(tasks map[string]Task, v reflect.Value) []Task {
 				return nil
 			}
 
+			// Ignore empty struct (struct{}) and other non-addressable types
+			if !v.CanAddr() {
+				typeName := v.Type().PkgPath() + "/" + v.Type().Name()
+				switch typeName {
+				case "k8s.io/apimachinery/pkg/util/sets/Empty":
+					// known
+				default:
+					klog.Warningf("skipping non-addressable type %v name=%q", v.Type(), typeName)
+				}
+				return nil
+			}
+
 			// TODO: Can we / should we use a type-switch statement
 			intf := v.Addr().Interface()
-			if hd, ok := intf.(HasDependencies); ok {
+			if hd, ok := intf.(HasDependencies[T]); ok {
 				deps := hd.GetDependencies(tasks)
 				dependencies = append(dependencies, deps...)
-			} else if dep, ok := intf.(Task); ok {
+				// Add the direct dependency if it's a task as well
+				if dep, ok := intf.(Task[T]); ok {
+					dependencies = append(dependencies, dep)
+				}
+			} else if dep, ok := intf.(Task[T]); ok {
 				dependencies = append(dependencies, dep)
 			} else if _, ok := intf.(Resource); ok {
 				// Ignore: not a dependency, unless we explicitly implement HasDependencies (e.g. TaskDependentResource)

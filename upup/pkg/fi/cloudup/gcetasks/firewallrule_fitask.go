@@ -27,7 +27,7 @@ import (
 
 // FirewallRule
 
-var _ fi.HasLifecycle = &FirewallRule{}
+var _ fi.HasLifecycle = (*FirewallRule)(nil)
 
 // GetLifecycle returns the Lifecycle of the object, implementing fi.HasLifecycle
 func (o *FirewallRule) GetLifecycle() fi.Lifecycle {
@@ -39,7 +39,7 @@ func (o *FirewallRule) SetLifecycle(lifecycle fi.Lifecycle) {
 	o.Lifecycle = lifecycle
 }
 
-var _ fi.HasName = &FirewallRule{}
+var _ fi.HasName = (*FirewallRule)(nil)
 
 // GetName returns the Name of the object, implementing fi.HasName
 func (o *FirewallRule) GetName() *string {
@@ -48,5 +48,5 @@ func (o *FirewallRule) GetName() *string {
 
 // String is the stringer function for the task, producing readable output using fi.TaskAsString
 func (o *FirewallRule) String() string {
-	return fi.TaskAsString(o)
+	return fi.CloudupTaskAsString(o)
 }

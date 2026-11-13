@@ -22,13 +22,16 @@ import (
 	"testing"
 
 	"k8s.io/kops/pkg/assets"
+	"k8s.io/kops/pkg/featureflag"
 	"k8s.io/kops/pkg/model"
 	"k8s.io/kops/pkg/model/iam"
 	"k8s.io/kops/pkg/testutils"
 	"k8s.io/kops/upup/pkg/fi"
+	"k8s.io/kops/util/pkg/vfs"
 )
 
 func Test_RunKubeApiserverBuilder(t *testing.T) {
+	featureflag.ParseFlags("-ImageDigest")
 	tests := []string{
 		"tests/minimal",
 	}
@@ -36,8 +39,8 @@ func Test_RunKubeApiserverBuilder(t *testing.T) {
 		basedir := basedir
 
 		t.Run(fmt.Sprintf("basedir=%s", basedir), func(t *testing.T) {
-			context := &fi.ModelBuilderContext{
-				Tasks: make(map[string]fi.Task),
+			context := &fi.CloudupModelBuilderContext{
+				Tasks: make(map[string]fi.CloudupTask),
 			}
 			kopsModelContext, err := LoadKopsModelContext(basedir)
 			if err != nil {
@@ -47,7 +50,7 @@ func Test_RunKubeApiserverBuilder(t *testing.T) {
 
 			builder := KubeApiserverBuilder{
 				KopsModelContext: kopsModelContext,
-				AssetBuilder:     assets.NewAssetBuilder(kopsModelContext.Cluster, false),
+				AssetBuilder:     assets.NewAssetBuilder(vfs.Context, kopsModelContext.Cluster.Spec.Assets, false),
 			}
 
 			if err := builder.Build(context); err != nil {
@@ -71,8 +74,9 @@ func LoadKopsModelContext(basedir string) (*model.KopsModelContext, error) {
 	}
 
 	kopsContext := &model.KopsModelContext{
-		IAMModelContext: iam.IAMModelContext{Cluster: spec.Cluster},
-		InstanceGroups:  spec.InstanceGroups,
+		IAMModelContext:   iam.IAMModelContext{Cluster: spec.Cluster},
+		AllInstanceGroups: spec.InstanceGroups,
+		InstanceGroups:    spec.InstanceGroups,
 	}
 
 	return kopsContext, nil

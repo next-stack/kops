@@ -24,7 +24,7 @@ import (
 	"regexp"
 
 	"github.com/google/uuid"
-	"github.com/gophercloud/gophercloud/openstack/loadbalancer/v2/pools"
+	"github.com/gophercloud/gophercloud/v2/openstack/loadbalancer/v2/pools"
 )
 
 type poolListResponse struct {
@@ -71,7 +71,6 @@ func (m *MockClient) mockPools() {
 }
 
 func (m *MockClient) listPools(w http.ResponseWriter, vals url.Values) {
-
 	w.WriteHeader(http.StatusOK)
 
 	pools := make([]pools.Pool, 0)

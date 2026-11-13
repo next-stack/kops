@@ -30,12 +30,23 @@ type BootstrapRequest struct {
 	// IncludeNodeConfig controls whether the cluster & instance group configuration should be returned.
 	// This allows for nodes without access to the kops state store.
 	IncludeNodeConfig bool `json:"includeNodeConfig"`
+
+	// Challenge is for a callback challenge.
+	Challenge *ChallengeRequest `json:"challenge,omitempty"`
+}
+
+// ChallengeRequest describes the callback challenge.
+type ChallengeRequest struct {
+	Endpoint        string `json:"endpoint,omitempty"`
+	ServerCA        []byte `json:"ca,omitempty"`
+	ChallengeID     string `json:"challengeID,omitempty"`
+	ChallengeSecret []byte `json:"challengeSecret,omitempty"`
 }
 
 // BootstrapResponse is a response to a BootstrapRequest.
 type BootstrapResponse struct {
 	// Certs are the issued certificates.
-	Certs map[string]string
+	Certs map[string]string `json:"Certs,omitempty"`
 
 	// NodeConfig contains the node configuration, if IncludeNodeConfig is set.
 	NodeConfig *NodeConfig `json:"nodeConfig,omitempty"`
@@ -43,11 +54,11 @@ type BootstrapResponse struct {
 
 // NodeConfig holds configuration needed to boot a node (without the kops state store)
 type NodeConfig struct {
-	// ClusterFullConfig holds the completed configuration for the cluster.
-	ClusterFullConfig string `json:"clusterFullConfig,omitempty"`
-
 	// NodeupConfig holds the nodeup.Config for the node's instance group.
 	NodeupConfig string `json:"nodeupConfig,omitempty"`
+
+	// NodeSecrets holds the secrets for the node (like `dockerconfig`).
+	NodeSecrets map[string][]byte `json:"nodeSecrets,omitempty"`
 }
 
 // NodeConfigCertificate holds a certificate that the node needs to boot.

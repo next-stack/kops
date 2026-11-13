@@ -24,8 +24,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
 	"k8s.io/kops/pkg/apis/kops"
-	"k8s.io/kops/upup/pkg/fi"
-	"k8s.io/kops/upup/pkg/fi/cloudup/gce"
+	"k8s.io/kops/upup/pkg/fi/cloudup/gce/gcenames"
 	"k8s.io/kops/upup/pkg/fi/loader"
 	"k8s.io/kops/upup/pkg/fi/utils"
 )
@@ -39,12 +38,11 @@ type KubeControllerManagerOptionsBuilder struct {
 	*OptionsContext
 }
 
-var _ loader.OptionsBuilder = &KubeControllerManagerOptionsBuilder{}
+var _ loader.ClusterOptionsBuilder = &KubeControllerManagerOptionsBuilder{}
 
 // BuildOptions generates the configurations used to create kubernetes controller manager manifest
-func (b *KubeControllerManagerOptionsBuilder) BuildOptions(o interface{}) error {
-
-	clusterSpec := o.(*kops.ClusterSpec)
+func (b *KubeControllerManagerOptionsBuilder) BuildOptions(o *kops.Cluster) error {
+	clusterSpec := &o.Spec
 	if clusterSpec.KubeControllerManager == nil {
 		clusterSpec.KubeControllerManager = &kops.KubeControllerManagerConfig{}
 	}
@@ -55,7 +53,7 @@ func (b *KubeControllerManagerOptionsBuilder) BuildOptions(o interface{}) error 
 	// TLDR; set this too low, and have a few EBS Volumes, and you will spam AWS api
 
 	{
-		klog.V(4).Infof("Kubernetes version %q supports AttachDetachReconcileSyncPeriod; will configure", b.KubernetesVersion)
+		klog.V(4).Infof("Kubernetes version %q supports AttachDetachReconcileSyncPeriod; will configure", b.ControlPlaneKubernetesVersion().String())
 		// If not set ... or set to 0s ... which is stupid
 		if kcm.AttachDetachReconcileSyncPeriod == nil ||
 			kcm.AttachDetachReconcileSyncPeriod.Duration.String() == "0s" {
@@ -77,35 +75,11 @@ func (b *KubeControllerManagerOptionsBuilder) BuildOptions(o interface{}) error 
 	}
 
 	kcm.ClusterName = b.ClusterName
-	switch kops.CloudProviderID(clusterSpec.CloudProvider) {
-	case kops.CloudProviderAWS:
-		kcm.CloudProvider = "aws"
+	kcm.CloudProvider = "external"
 
-	case kops.CloudProviderGCE:
-		kcm.CloudProvider = "gce"
-		kcm.ClusterName = gce.SafeClusterName(b.ClusterName)
-
-	case kops.CloudProviderDO:
-		kcm.CloudProvider = "external"
-
-	case kops.CloudProviderOpenstack:
-		kcm.CloudProvider = "openstack"
-
-	case kops.CloudProviderALI:
-		kcm.CloudProvider = "alicloud"
-
-	case kops.CloudProviderAzure:
-		kcm.CloudProvider = "azure"
-
-	default:
-		return fmt.Errorf("unknown cloudprovider %q", clusterSpec.CloudProvider)
+	if kcm.LogLevel == 0 {
+		kcm.LogLevel = 2
 	}
-
-	if clusterSpec.ExternalCloudControllerManager != nil {
-		kcm.CloudProvider = "external"
-	}
-
-	kcm.LogLevel = 2
 
 	image, err := Image("kube-controller-manager", clusterSpec, b.AssetBuilder)
 	if err != nil {
@@ -114,12 +88,12 @@ func (b *KubeControllerManagerOptionsBuilder) BuildOptions(o interface{}) error 
 	kcm.Image = image
 
 	// Doesn't seem to be any real downside to always doing a leader election
-	kcm.LeaderElection = &kops.LeaderElectionConfiguration{LeaderElect: fi.Bool(true)}
+	kcm.LeaderElection = &kops.LeaderElectionConfiguration{LeaderElect: new(true)}
 
-	kcm.AllocateNodeCIDRs = fi.Bool(!clusterSpec.PodCIDRFromCloud)
+	kcm.AllocateNodeCIDRs = new(!clusterSpec.IsKopsControllerIPAM())
 
-	if kcm.ClusterCIDR == "" && !clusterSpec.PodCIDRFromCloud {
-		kcm.ClusterCIDR = clusterSpec.PodCIDR
+	if kcm.ClusterCIDR == "" && !clusterSpec.IsKopsControllerIPAM() {
+		kcm.ClusterCIDR = clusterSpec.Networking.PodCIDR
 	}
 
 	if utils.IsIPv6CIDR(kcm.ClusterCIDR) {
@@ -130,65 +104,47 @@ func (b *KubeControllerManagerOptionsBuilder) BuildOptions(o interface{}) error 
 			// Kubernetes limitation
 			nodeSize = 16
 		}
-		kcm.NodeCIDRMaskSize = fi.Int32(int32(clusterSize + nodeSize))
+		kcm.NodeCIDRMaskSize = new(int32(clusterSize + nodeSize))
 	}
 
-	networking := clusterSpec.Networking
-	if networking == nil {
-		kcm.ConfigureCloudRoutes = fi.Bool(true)
-	} else if networking.Kubenet != nil {
-		kcm.ConfigureCloudRoutes = fi.Bool(true)
-	} else if networking.GCE != nil {
-		kcm.ConfigureCloudRoutes = fi.Bool(false)
-		kcm.CIDRAllocatorType = fi.String("CloudAllocator")
+	networking := &clusterSpec.Networking
+	if networking.Kubenet != nil {
+		kcm.ConfigureCloudRoutes = new(true)
+	} else if networking.GCP != nil {
+		kcm.ConfigureCloudRoutes = new(false)
+		if kcm.CloudProvider == "external" {
+			// kcm should not allocate node cidrs with the CloudAllocator if we're using the external CCM
+			kcm.AllocateNodeCIDRs = new(false)
+		} else {
+			kcm.CIDRAllocatorType = new("CloudAllocator")
+		}
+	} else if networking.Kindnet != nil {
+		// We don't expect KCM to configure routes; it should be done by the CCM (or by the infrastructure)
+		kcm.ConfigureCloudRoutes = new(false)
+
+		// If the cloud is allocating the node CIDRs, that should be done by CCM
+		if o.GetCloudProvider() == kops.CloudProviderGCE && gcenames.UsesIPAliases(o) {
+			kcm.AllocateNodeCIDRs = new(false)
+		}
 	} else if networking.External != nil {
-		kcm.ConfigureCloudRoutes = fi.Bool(false)
+		kcm.ConfigureCloudRoutes = new(false)
 	} else if UsesCNI(networking) {
-		kcm.ConfigureCloudRoutes = fi.Bool(false)
-	} else if networking.Kopeio != nil {
-		// Kopeio is based on kubenet / external
-		kcm.ConfigureCloudRoutes = fi.Bool(false)
+		kcm.ConfigureCloudRoutes = new(false)
 	} else {
 		return fmt.Errorf("no networking mode set")
 	}
 
 	if kcm.UseServiceAccountCredentials == nil {
-		kcm.UseServiceAccountCredentials = fi.Bool(true)
+		kcm.UseServiceAccountCredentials = new(true)
 	}
 
 	if len(kcm.Controllers) == 0 {
 		var changes []string
-		// @check if the node authorization is enabled and if so enable the tokencleaner controller (disabled by default)
-		// This is responsible for cleaning up bootstrap tokens which have expired
-		if fi.BoolValue(clusterSpec.KubeAPIServer.EnableBootstrapAuthToken) {
-			changes = append(changes, "tokencleaner")
-		}
-		if clusterSpec.PodCIDRFromCloud {
+		if clusterSpec.IsKopsControllerIPAM() {
 			changes = append(changes, "-nodeipam")
 		}
 		if len(changes) != 0 {
 			kcm.Controllers = append([]string{"*"}, changes...)
-		}
-	}
-
-	if clusterSpec.CloudConfig != nil && clusterSpec.CloudConfig.AWSEBSCSIDriver != nil && fi.BoolValue(clusterSpec.CloudConfig.AWSEBSCSIDriver.Enabled) {
-
-		if kcm.FeatureGates == nil {
-			kcm.FeatureGates = make(map[string]string)
-		}
-
-		if b.IsKubernetesLT("1.21.0") {
-			if _, found := clusterSpec.Kubelet.FeatureGates["CSIMigrationAWSComplete"]; !found {
-				clusterSpec.Kubelet.FeatureGates["CSIMigrationAWSComplete"] = "true"
-			}
-		} else {
-			if _, found := clusterSpec.Kubelet.FeatureGates["InTreePluginAWSUnregister"]; !found {
-				clusterSpec.Kubelet.FeatureGates["InTreePluginAWSUnregister"] = "true"
-			}
-		}
-
-		if _, found := kcm.FeatureGates["CSIMigrationAWS"]; !found {
-			kcm.FeatureGates["CSIMigrationAWS"] = "true"
 		}
 	}
 

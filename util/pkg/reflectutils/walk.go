@@ -44,6 +44,7 @@ func IsMethodNotFound(err error) bool {
 
 // JSONMergeStruct merges src into dest
 // It uses a JSON marshal & unmarshal, so only fields that are JSON-visible will be copied
+// If both source and destination has a value for a field, source takes presedence
 func JSONMergeStruct(dest, src interface{}) {
 	// Not the most efficient approach, but simple & relatively well defined
 	j, err := json.Marshal(src)
@@ -54,28 +55,6 @@ func JSONMergeStruct(dest, src interface{}) {
 	if err != nil {
 		klog.Fatalf("error unmarshaling config: %v", err)
 	}
-}
-
-// InvokeMethod calls the specified method by reflection
-func InvokeMethod(target interface{}, name string, args ...interface{}) ([]reflect.Value, error) {
-	v := reflect.ValueOf(target)
-
-	method, found := v.Type().MethodByName(name)
-	if !found {
-		return nil, &MethodNotFoundError{
-			Name:   name,
-			Target: target,
-		}
-	}
-
-	var argValues []reflect.Value
-	for _, a := range args {
-		argValues = append(argValues, reflect.ValueOf(a))
-	}
-	klog.V(12).Infof("Calling method %s on %T", method.Name, target)
-	m := v.MethodByName(method.Name)
-	rv := m.Call(argValues)
-	return rv, nil
 }
 
 func BuildTypeName(t reflect.Type) string {

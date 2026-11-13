@@ -16,12 +16,24 @@ limitations under the License.
 
 package v1alpha2
 
+import (
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
+)
+
 // ContainerdConfig is the configuration for containerd
 type ContainerdConfig struct {
 	// Address of containerd's GRPC server (default "/run/containerd/containerd.sock").
 	Address *string `json:"address,omitempty" flag:"address"`
+	// ConfigAdditions adds additional config entries to the generated config file.
+	// Paths are written to the config as-is, so they must match the schema version of the
+	// configured containerd: v2 paths (e.g. plugins."io.containerd.grpc.v1.cri".*) for
+	// containerd < 2.0, v3 paths (e.g. plugins."io.containerd.cri.v1.runtime".*) for >= 2.0.
+	ConfigAdditions map[string]intstr.IntOrString `json:"configAdditions,omitempty"`
 	// ConfigOverride is the complete containerd config file provided by the user.
 	ConfigOverride *string `json:"configOverride,omitempty"`
+	// Env sets environment variables for the containerd service.
+	Env []EnvVar `json:"env,omitempty"`
 	// LogLevel controls the logging details [trace, debug, info, warn, error, fatal, panic] (default "info").
 	LogLevel *string `json:"logLevel,omitempty" flag:"log-level"`
 	// Packages overrides the URL and hash for the packages.
@@ -38,13 +50,68 @@ type ContainerdConfig struct {
 	Version *string `json:"version,omitempty"`
 	// NvidiaGPU configures the Nvidia GPU runtime.
 	NvidiaGPU *NvidiaGPUConfig `json:"nvidiaGPU,omitempty"`
+	// GVisor configures the gVisor (runsc) sandboxed runtime.
+	GVisor *GVisorConfig `json:"gvisor,omitempty"`
+	// Runc configures the runc runtime.
+	Runc *Runc `json:"runc,omitempty"`
+	// SelinuxEnabled enables SELinux support
+	SeLinuxEnabled bool `json:"selinuxEnabled,omitempty"`
+	// NRI configures the Node Resource Interface.
+	NRI *NRIConfig `json:"nri,omitempty"`
+	// Enables Kubelet ECR Credential helper to pass credentials to containerd mirrors, to use ECR as a pull-through cache
+	UseECRCredentialsForMirrors bool `json:"useECRCredentialsForMirrors,omitempty"`
+	// InstallCriCtl installs crictl (default "false").
+	InstallCriCtl bool `json:"installCriCtl,omitempty"`
+	// InstallNerdCtl installs nerdctl (default "false").
+	InstallNerdCtl bool `json:"installNerdCtl,omitempty"`
+	// SandboxImage is the image used for the sandbox container.
+	SandboxImage *string `json:"sandboxImage,omitempty"`
+}
+
+type NRIConfig struct {
+	// Enable NRI support in containerd
+	Enabled *bool `json:"enabled,omitempty"`
+	// PluginRegistrationTimeout is the timeout for plugin registration
+	PluginRegistrationTimeout *metav1.Duration `json:"pluginRegistrationTimeout,omitempty"`
+	// PluginRequestTimeout is the timeout for a plugin to handle a request
+	PluginRequestTimeout *metav1.Duration `json:"pluginRequestTimeout,omitempty"`
 }
 
 type NvidiaGPUConfig struct {
 	// Package is the name of the nvidia driver package that will be installed.
-	// Default is "nvidia-headless-460-server".
+	// Default is "nvidia-driver-535-server".
 	DriverPackage string `json:"package,omitempty"`
 	// Enabled determines if kOps will install the Nvidia GPU runtime and drivers.
 	// They will only be installed on intances that has an Nvidia GPU.
 	Enabled *bool `json:"enabled,omitempty"`
+	// Image defines the container image used to deploy the Nvidia Kubernetes Device Plugin.
+	DevicePluginImage string `json:"image,omitempty"`
+	// DCGMExporterConfig configures the DCGM exporter
+	DCGMExporter *DCGMExporterConfig `json:"dcgmExporter,omitempty"`
+}
+
+// DCGMExporterConfig configures the DCGM exporter.
+// Only the DCGMExporterConfig in the cluster level takes effect. Configurations on the Instance Group are ignored.
+type DCGMExporterConfig struct {
+	// Enabled determines if kOps will install the DCGM exporter
+	Enabled bool `json:"enabled,omitempty"`
+}
+
+type Runc struct {
+	// Version used to pick the runc package.
+	Version *string `json:"version,omitempty"`
+	// Packages overrides the URL and hash for the packages.
+	Packages *PackagesConfig `json:"packages,omitempty"`
+}
+
+// GVisorConfig configures the gVisor sandboxed container runtime.
+// When enabled, kOps installs runsc and containerd-shim-runsc-v1,
+// registers the "runsc" runtime handler in containerd, and deploys
+// a Kubernetes RuntimeClass named "gvisor".
+type GVisorConfig struct {
+	// Enabled determines if kOps will install the gVisor runtime.
+	Enabled *bool `json:"enabled,omitempty"`
+	// Platform is the gVisor execution platform: "systrap" (default, works
+	// everywhere including VMs) or "kvm" (bare-metal with KVM support).
+	Platform string `json:"platform,omitempty"`
 }

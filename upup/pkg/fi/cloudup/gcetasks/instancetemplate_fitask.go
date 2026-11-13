@@ -27,7 +27,7 @@ import (
 
 // InstanceTemplate
 
-var _ fi.HasLifecycle = &InstanceTemplate{}
+var _ fi.HasLifecycle = (*InstanceTemplate)(nil)
 
 // GetLifecycle returns the Lifecycle of the object, implementing fi.HasLifecycle
 func (o *InstanceTemplate) GetLifecycle() fi.Lifecycle {
@@ -39,7 +39,7 @@ func (o *InstanceTemplate) SetLifecycle(lifecycle fi.Lifecycle) {
 	o.Lifecycle = lifecycle
 }
 
-var _ fi.HasName = &InstanceTemplate{}
+var _ fi.HasName = (*InstanceTemplate)(nil)
 
 // GetName returns the Name of the object, implementing fi.HasName
 func (o *InstanceTemplate) GetName() *string {
@@ -48,5 +48,5 @@ func (o *InstanceTemplate) GetName() *string {
 
 // String is the stringer function for the task, producing readable output using fi.TaskAsString
 func (o *InstanceTemplate) String() string {
-	return fi.TaskAsString(o)
+	return fi.CloudupTaskAsString(o)
 }

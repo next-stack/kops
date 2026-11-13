@@ -19,8 +19,8 @@ package azuretasks
 import (
 	"context"
 
-	"github.com/Azure/azure-sdk-for-go/services/resources/mgmt/2020-06-01/resources"
-	"github.com/Azure/go-autorest/autorest/to"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
+	resources "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources/v3"
 	"k8s.io/klog/v2"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/azure"
@@ -38,8 +38,11 @@ type ResourceGroup struct {
 	Shared *bool
 }
 
-var _ fi.Task = &ResourceGroup{}
-var _ fi.CompareWithID = &ResourceGroup{}
+var (
+	_ fi.CloudupTask          = &ResourceGroup{}
+	_ fi.CompareWithID        = &ResourceGroup{}
+	_ fi.CloudupTaskNormalize = &ResourceGroup{}
+)
 
 // CompareWithID returns the Name of the VM Scale Set.
 func (r *ResourceGroup) CompareWithID() *string {
@@ -47,16 +50,16 @@ func (r *ResourceGroup) CompareWithID() *string {
 }
 
 // Find discovers the ResourceGroup in the cloud provider.
-func (r *ResourceGroup) Find(c *fi.Context) (*ResourceGroup, error) {
-	cloud := c.Cloud.(azure.AzureCloud)
-	l, err := cloud.ResourceGroup().List(context.TODO(), "" /* filter*/)
+func (r *ResourceGroup) Find(c *fi.CloudupContext) (*ResourceGroup, error) {
+	cloud := c.T.Cloud.(azure.AzureCloud)
+	l, err := cloud.ResourceGroup().List(context.TODO())
 	if err != nil {
 		return nil, err
 	}
-	var found *resources.Group
+	var found *resources.ResourceGroup
 	for _, rg := range l {
 		if *rg.Name == *r.Name {
-			found = &rg
+			found = rg
 			break
 		}
 	}
@@ -64,7 +67,7 @@ func (r *ResourceGroup) Find(c *fi.Context) (*ResourceGroup, error) {
 		return nil, nil
 	}
 	return &ResourceGroup{
-		Name:      to.StringPtr(*found.Name),
+		Name:      to.Ptr(*found.Name),
 		Lifecycle: r.Lifecycle,
 		Tags:      found.Tags,
 		// To prevent spurious comparison failures. Follow awstask.VPC.
@@ -72,10 +75,14 @@ func (r *ResourceGroup) Find(c *fi.Context) (*ResourceGroup, error) {
 	}, nil
 }
 
+func (r *ResourceGroup) Normalize(c *fi.CloudupContext) error {
+	c.T.Cloud.(azure.AzureCloud).AddClusterTags(r.Tags)
+	return nil
+}
+
 // Run implements fi.Task.Run.
-func (r *ResourceGroup) Run(c *fi.Context) error {
-	c.Cloud.(azure.AzureCloud).AddClusterTags(r.Tags)
-	return fi.DefaultDeltaRunMethod(r, c)
+func (r *ResourceGroup) Run(c *fi.CloudupContext) error {
+	return fi.CloudupDefaultDeltaRunMethod(r, c)
 }
 
 // CheckChanges returns an error if a change is not allowed.
@@ -98,15 +105,15 @@ func (*ResourceGroup) CheckChanges(a, e, changes *ResourceGroup) error {
 // RenderAzure creates or updates a resource group.
 func (*ResourceGroup) RenderAzure(t *azure.AzureAPITarget, a, e, changes *ResourceGroup) error {
 	if a == nil {
-		klog.Infof("Creating a new Resource Group with name: %s", fi.StringValue(e.Name))
+		klog.Infof("Creating a new Resource Group with name: %s", fi.ValueOf(e.Name))
 	} else {
-		klog.Infof("Updating a Resource Group with name: %s", fi.StringValue(e.Name))
+		klog.Infof("Updating a Resource Group with name: %s", fi.ValueOf(e.Name))
 	}
 	return t.Cloud.ResourceGroup().CreateOrUpdate(
 		context.TODO(),
 		*e.Name,
-		resources.Group{
-			Location: to.StringPtr(t.Cloud.Region()),
+		resources.ResourceGroup{
+			Location: to.Ptr(t.Cloud.Region()),
 			Tags:     e.Tags,
 		})
 }

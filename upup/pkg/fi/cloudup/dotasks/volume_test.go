@@ -70,9 +70,11 @@ func (f fakeStorageClient) DeleteSnapshot(ctx context.Context, id string) (*godo
 	return f.deleteSnapshotFn(ctx, id)
 }
 
-func newContext(cloud fi.Cloud) *fi.Context {
-	return &fi.Context{
-		Cloud: cloud,
+func newContext(cloud fi.Cloud) *fi.CloudupContext {
+	return &fi.CloudupContext{
+		T: fi.CloudupSubContext{
+			Cloud: cloud,
+		},
 	}
 }
 
@@ -100,15 +102,15 @@ func Test_Find(t *testing.T) {
 				},
 			},
 			&Volume{
-				Name:   fi.String("test0"),
-				SizeGB: fi.Int64(int64(100)),
-				Region: fi.String("nyc1"),
+				Name:   new("test0"),
+				SizeGB: new(int64(100)),
+				Region: new("nyc1"),
 			},
 			&Volume{
-				Name:   fi.String("test0"),
-				ID:     fi.String("100"),
-				SizeGB: fi.Int64(int64(100)),
-				Region: fi.String("nyc1"),
+				Name:   new("test0"),
+				ID:     new("100"),
+				SizeGB: new(int64(100)),
+				Region: new("nyc1"),
 			},
 			nil,
 		},
@@ -121,9 +123,9 @@ func Test_Find(t *testing.T) {
 				},
 			},
 			&Volume{
-				Name:   fi.String("test1"),
-				SizeGB: fi.Int64(int64(100)),
-				Region: fi.String("nyc1"),
+				Name:   new("test1"),
+				SizeGB: new(int64(100)),
+				Region: new("nyc1"),
 			},
 			nil,
 			nil,
@@ -137,9 +139,9 @@ func Test_Find(t *testing.T) {
 				},
 			},
 			&Volume{
-				Name:   fi.String("test1"),
-				SizeGB: fi.Int64(int64(100)),
-				Region: fi.String("nyc1"),
+				Name:   new("test1"),
+				SizeGB: new(int64(100)),
+				Region: new("nyc1"),
 			},
 			nil,
 			errors.New("error!"),

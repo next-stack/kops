@@ -17,48 +17,64 @@ limitations under the License.
 package kops
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"os/exec"
 	"strings"
 
 	"k8s.io/klog/v2"
 	api "k8s.io/kops/pkg/apis/kops/v1alpha2"
+	"sigs.k8s.io/kubetest2/pkg/exec"
 )
 
 // GetCluster will retrieve the specified Cluster from the state store.
-func GetCluster(clusterName string) (*api.Cluster, error) {
+func GetCluster(kopsBinary, clusterName string, env []string, full bool) (*api.Cluster, error) {
 	args := []string{
-		"kops", "get", "cluster", clusterName, "-ojson",
+		kopsBinary, "get", "cluster", clusterName, "-ojson",
+	}
+	if full {
+		args = append(args, "--full")
 	}
 	c := exec.Command(args[0], args[1:]...)
+	c.SetEnv(env...)
 	var stdout bytes.Buffer
-	c.Stdout = &stdout
+	c.SetStdout(&stdout)
 	var stderr bytes.Buffer
-	c.Stderr = &stderr
+	c.SetStderr(&stderr)
 	if err := c.Run(); err != nil {
 		klog.Warningf("failed to run %s; stderr=%s", strings.Join(args, " "), stderr.String())
 		return nil, fmt.Errorf("error querying cluster from %s: %w", strings.Join(args, " "), err)
 	}
 
+	var jsonBytes []byte
+
 	cluster := &api.Cluster{}
-	if err := json.Unmarshal(stdout.Bytes(), cluster); err != nil {
+	scanner := bufio.NewScanner(&stdout)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "//") {
+			continue
+		}
+		jsonBytes = append(jsonBytes, scanner.Bytes()...)
+	}
+	if err := json.Unmarshal(jsonBytes, cluster); err != nil {
 		return nil, fmt.Errorf("error parsing cluster json: %w", err)
 	}
 	return cluster, nil
 }
 
 // GetInstanceGroups will retrieve the instance groups for the specified Cluster from the state store.
-func GetInstanceGroups(clusterName string) ([]*api.InstanceGroup, error) {
+func GetInstanceGroups(kopsBinary, clusterName string, env []string) ([]*api.InstanceGroup, error) {
 	args := []string{
-		"kops", "get", "instancegroups", "--name", clusterName, "-ojson",
+		kopsBinary, "get", "instancegroups", "--name", clusterName, "-ojson",
 	}
 	c := exec.Command(args[0], args[1:]...)
+	c.SetEnv(env...)
 	var stdout bytes.Buffer
-	c.Stdout = &stdout
+	c.SetStdout(&stdout)
 	var stderr bytes.Buffer
-	c.Stderr = &stderr
+	c.SetStderr(&stderr)
 	if err := c.Run(); err != nil {
 		klog.Warningf("failed to run %s; stderr=%s", strings.Join(args, " "), stderr.String())
 		return nil, fmt.Errorf("error querying instance groups from %s: %w", strings.Join(args, " "), err)
@@ -69,4 +85,21 @@ func GetInstanceGroups(clusterName string) ([]*api.InstanceGroup, error) {
 		return nil, fmt.Errorf("error parsing instance groups json: %w", err)
 	}
 	return igs, nil
+}
+
+// GetVersion will retrieve the kOps version.
+func GetVersion(kopsBinary string) (string, error) {
+	args := []string{
+		kopsBinary, "version", "--short",
+	}
+	c := exec.Command(args[0], args[1:]...)
+	var stdout bytes.Buffer
+	c.SetStdout(&stdout)
+	var stderr bytes.Buffer
+	c.SetStderr(&stderr)
+	if err := c.Run(); err != nil {
+		klog.Warningf("failed to run %s; stderr=%s", strings.Join(args, " "), stderr.String())
+		return "", fmt.Errorf("error querying version from %s: %w", strings.Join(args, " "), err)
+	}
+	return stdout.String(), nil
 }

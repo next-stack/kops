@@ -18,13 +18,12 @@ package nodetasks
 
 import (
 	"fmt"
-	"io/ioutil"
+	"os"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 	"k8s.io/kops/upup/pkg/fi"
-	"k8s.io/kops/upup/pkg/fi/nodeup/cloudinit"
 	"k8s.io/kops/upup/pkg/fi/nodeup/local"
 )
 
@@ -36,30 +35,30 @@ type BindMount struct {
 	Recursive  bool     `json:"recursive"`
 }
 
-var _ fi.Task = &BindMount{}
+var _ fi.NodeupTask = (*BindMount)(nil)
 
 func (s *BindMount) String() string {
 	return fmt.Sprintf("BindMount: %s->%s", s.Source, s.Mountpoint)
 }
 
-var _ CreatesDir = &BindMount{}
+var _ CreatesDir = (*BindMount)(nil)
 
 // Dir implements CreatesDir::Dir
 func (e *BindMount) Dir() string {
 	return e.Mountpoint
 }
 
-var _ fi.HasName = &Archive{}
+var _ fi.HasName = (*BindMount)(nil)
 
 func (e *BindMount) GetName() *string {
-	return fi.String("BindMount-" + e.Mountpoint)
+	return new("BindMount-" + e.Mountpoint)
 }
 
-var _ fi.HasDependencies = &BindMount{}
+var _ fi.NodeupHasDependencies = (*BindMount)(nil)
 
 // GetDependencies implements HasDependencies::GetDependencies
-func (e *BindMount) GetDependencies(tasks map[string]fi.Task) []fi.Task {
-	var deps []fi.Task
+func (e *BindMount) GetDependencies(tasks map[string]fi.NodeupTask) []fi.NodeupTask {
+	var deps []fi.NodeupTask
 
 	// Requires parent directories to be created
 	deps = append(deps, findCreatesDirParents(e.Mountpoint, tasks)...)
@@ -84,7 +83,7 @@ func (e *BindMount) GetDependencies(tasks map[string]fi.Task) []fi.Task {
 	return deps
 }
 
-func findTaskInSlice(tasks []fi.Task, task fi.Task) int {
+func findTaskInSlice(tasks []fi.NodeupTask, task fi.NodeupTask) int {
 	for i, t := range tasks {
 		if t == task {
 			return i
@@ -93,8 +92,8 @@ func findTaskInSlice(tasks []fi.Task, task fi.Task) int {
 	return -1
 }
 
-func (e *BindMount) Find(c *fi.Context) (*BindMount, error) {
-	mounts, err := ioutil.ReadFile("/proc/self/mountinfo")
+func (e *BindMount) Find(c *fi.NodeupContext) (*BindMount, error) {
+	mounts, err := os.ReadFile("/proc/self/mountinfo")
 	if err != nil {
 		return nil, fmt.Errorf("error reading /proc/self/mountinfo: %v", err)
 	}
@@ -172,8 +171,8 @@ func (e *BindMount) Find(c *fi.Context) (*BindMount, error) {
 	return nil, nil
 }
 
-func (e *BindMount) Run(c *fi.Context) error {
-	return fi.DefaultDeltaRunMethod(e, c)
+func (e *BindMount) Run(c *fi.NodeupContext) error {
+	return fi.NodeupDefaultDeltaRunMethod(e, c)
 }
 
 func (s *BindMount) CheckChanges(a, e, changes *BindMount) error {
@@ -248,8 +247,4 @@ func (e *BindMount) execute(t Executor) error {
 	}
 
 	return nil
-}
-
-func (_ *BindMount) RenderCloudInit(t *cloudinit.CloudInitTarget, a, e, changes *BindMount) error {
-	return fmt.Errorf("BindMount::RenderCloudInit not implemented")
 }

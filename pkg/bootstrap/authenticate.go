@@ -18,7 +18,13 @@ package bootstrap
 
 import (
 	"context"
+	"errors"
+	"net/http"
+
+	"k8s.io/kops/pkg/nodeidentity/clusterapi"
 )
+
+var ErrAlreadyExists = errors.New("node already exists")
 
 // Authenticator generates authentication credentials for requests.
 type Authenticator interface {
@@ -33,11 +39,27 @@ type VerifyResult struct {
 	// InstanceGroupName is the name of the kops InstanceGroup this node is a member of.
 	InstanceGroupName string
 
+	// CAPIMachine is the Cluster API Machine object corresponding to this node, if available.
+	CAPIMachine *clusterapi.Machine
+
 	// CertificateNames is the alternate names the node is authorized to use for certificates.
 	CertificateNames []string
+
+	// ChallengeEndpoint is a valid endpoints to which we should issue a challenge request,
+	// corresponding to the node the request identified as.
+	// This should be sourced from e.g. the cloud, and acts as a cross-check
+	// that this is the correct instance.
+	ChallengeEndpoint string
 }
 
 // Verifier verifies authentication credentials for requests.
 type Verifier interface {
-	VerifyToken(ctx context.Context, token string, body []byte) (*VerifyResult, error)
+	// VerifyToken performs full validation of the provided token, often making cloud API calls to verify the caller.
+	// It should return either an error or a validated VerifyResult.
+	// If the token looks like it is intended for a different verifier
+	// (for example it has the wrong prefix), we should return ErrNotThisVerifier
+	VerifyToken(ctx context.Context, rawRequest *http.Request, token string, body []byte) (*VerifyResult, error)
 }
+
+// ErrNotThisVerifier is returned when a verifier receives a token that is not intended for it.
+var ErrNotThisVerifier = errors.New("token not valid for this verifier")

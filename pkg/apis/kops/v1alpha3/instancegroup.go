@@ -17,9 +17,11 @@ limitations under the License.
 package v1alpha3
 
 import (
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// InstanceGroup represents a group of instances with the same configuration.
 // +genclient
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:printcolumn:name="role",type="string",JSONPath=".spec.role",description="Role",priority=0
@@ -28,7 +30,6 @@ import (
 // +kubebuilder:printcolumn:name="max",type="integer",JSONPath=".spec.maxSize",description="Max",priority=0
 // +kubebuilder:printcolumn:name="zones",type="string",JSONPath=".spec.zones",description="Zones",priority=0
 // +kubebuilder:resource:shortName=ig
-// InstanceGroup represents a group of instances (either nodes or masters) with the same configuration
 type InstanceGroup struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -46,12 +47,16 @@ type InstanceGroupList struct {
 	Items []InstanceGroup `json:"items"`
 }
 
-// InstanceGroupRole string describes the roles of the nodes in this InstanceGroup (master or nodes)
+// InstanceGroupRole string describes the roles of the nodes in this InstanceGroup.
 type InstanceGroupRole string
+
+type InstanceManager string
 
 // InstanceGroupSpec is the specification for an InstanceGroup
 type InstanceGroupSpec struct {
-	// Type determines the role of instances in this instance group: masters or nodes
+	// Manager determines what is managing the node lifecycle
+	Manager InstanceManager `json:"manager,omitempty"`
+	// Role determines the role of instances in this instance group.
 	Role InstanceGroupRole `json:"role,omitempty"`
 	// Image is the instance (ami etc) we should use
 	Image string `json:"image,omitempty"`
@@ -61,22 +66,12 @@ type InstanceGroupSpec struct {
 	MaxSize *int32 `json:"maxSize,omitempty"`
 	// Autoscale determines if autoscaling will be enabled for this instance group if cluster autoscaler is enabled
 	Autoscale *bool `json:"autoscale,omitempty"`
+	// AutoscalePriority determines the InstanceGroup priority for scaling when cluster autoscaler uses the priority expander.
+	AutoscalePriority int16 `json:"autoscalePriority,omitempty"`
 	// MachineType is the instance class
 	MachineType string `json:"machineType,omitempty"`
-	// RootVolumeSize is the size of the EBS root volume to use, in GB
-	RootVolumeSize *int32 `json:"rootVolumeSize,omitempty"`
-	// RootVolumeType is the type of the EBS root volume to use (e.g. gp2)
-	RootVolumeType *string `json:"rootVolumeType,omitempty"`
-	// RootVolumeIops is the provisioned IOPS when the volume type is io1, io2 or gp3 (AWS only).
-	RootVolumeIops *int32 `json:"rootVolumeIops,omitempty"`
-	// RootVolumeThroughput is the volume throughput in MBps when the volume type is gp3 (AWS only).
-	RootVolumeThroughput *int32 `json:"rootVolumeThroughput,omitempty"`
-	// RootVolumeOptimization enables EBS optimization for an instance
-	RootVolumeOptimization *bool `json:"rootVolumeOptimization,omitempty"`
-	// RootVolumeEncryption enables EBS root volume encryption for an instance
-	RootVolumeEncryption *bool `json:"rootVolumeEncryption,omitempty"`
-	// RootVolumeEncryptionKey provides the key identifier for root volume encryption
-	RootVolumeEncryptionKey *string `json:"rootVolumeEncryptionKey,omitempty"`
+	// RootVolume specifies options for the instances' root volumes.
+	RootVolume *InstanceRootVolumeSpec `json:"rootVolume,omitempty"`
 	// Volumes is a collection of additional volumes to create for instances within this InstanceGroup
 	Volumes []VolumeSpec `json:"volumes,omitempty"`
 	// VolumeMounts a collection of volume mounts
@@ -95,7 +90,7 @@ type InstanceGroupSpec struct {
 	// CPUCredits is the credit option for CPU Usage on burstable instance types (AWS only)
 	CPUCredits *string `json:"cpuCredits,omitempty"`
 	// AssociatePublicIP is true if we want instances to have a public IP
-	AssociatePublicIP *bool `json:"associatePublicIp,omitempty"`
+	AssociatePublicIP *bool `json:"associatePublicIP,omitempty"`
 	// AdditionalSecurityGroups attaches additional security groups (e.g. i-123456)
 	AdditionalSecurityGroups []string `json:"additionalSecurityGroups,omitempty"`
 	// CloudLabels defines additional tags or labels on cloud provider resources
@@ -113,12 +108,14 @@ type InstanceGroupSpec struct {
 	Taints []string `json:"taints,omitempty"`
 	// MixedInstancesPolicy defined a optional backing of an AWS ASG by a EC2 Fleet (AWS Only)
 	MixedInstancesPolicy *MixedInstancesPolicySpec `json:"mixedInstancesPolicy,omitempty"`
+	// CapacityRebalance makes ASGs proactively replace spot instances when the ASG receives a rebalance recommendation (AWS Only).
+	CapacityRebalance *bool `json:"capacityRebalance,omitempty"`
 	// AdditionalUserData is any additional user-data to be passed to the host
 	AdditionalUserData []UserData `json:"additionalUserData,omitempty"`
 	// SuspendProcesses disables the listed Scaling Policies
 	SuspendProcesses []string `json:"suspendProcesses,omitempty"`
 	// ExternalLoadBalancers define loadbalancers that should be attached to this instance group
-	ExternalLoadBalancers []LoadBalancer `json:"externalLoadBalancers,omitempty"`
+	ExternalLoadBalancers []LoadBalancerSpec `json:"externalLoadBalancers,omitempty"`
 	// DetailedInstanceMonitoring defines if detailed-monitoring is enabled (AWS only)
 	DetailedInstanceMonitoring *bool `json:"detailedInstanceMonitoring,omitempty"`
 	// IAMProfileSpec defines the identity of the cloud group IAM profile (AWS only).
@@ -148,6 +145,40 @@ type InstanceGroupSpec struct {
 	UpdatePolicy *string `json:"updatePolicy,omitempty"`
 	// WarmPool configures an ASG warm pool for the instance group
 	WarmPool *WarmPoolSpec `json:"warmPool,omitempty"`
+	// Containerd specifies override configuration for instance group
+	Containerd *ContainerdConfig `json:"containerd,omitempty"`
+	// Packages specifies additional packages to be installed.
+	Packages []string `json:"packages,omitempty"`
+	// GuestAccelerators configures additional accelerators
+	GuestAccelerators []AcceleratorConfig `json:"guestAccelerators,omitempty"`
+	// MaxInstanceLifetime to the maximum amount of time, in seconds, that an instance can be in service.
+	// Value expected must be in form of duration ("ms", "s", "m", "h")
+	MaxInstanceLifetime *metav1.Duration `json:"maxInstanceLifetime,omitempty"`
+	// GCPProvisioningModel: Specifies the provisioning model of the GCP instance.
+	// Valid values:
+	//   'STANDARD': (default) standard provisioning with user controlled run time, no discounts
+	//   'SPOT': heavily discounted, no guaranteed run time.
+	GCPProvisioningModel *string `json:"gcpProvisioningModel,omitempty"`
+}
+
+// InstanceRootVolumeSpec specifies options for an instance's root volume.
+type InstanceRootVolumeSpec struct {
+	// Size is the size of the EBS root volume to use, in GB.
+	Size *int32 `json:"size,omitempty"`
+	// Type is the type of the root volume to use, for example gp3 on AWS, pd-ssd on GCE or
+	// StandardSSD_LRS on Azure. On Azure, CacheDisk, ResourceDisk or NvmeDisk place the root volume
+	// on the VM's local storage as an ephemeral OS disk instead of a managed disk.
+	Type *string `json:"type,omitempty"`
+	// IOPS is the provisioned IOPS when the volume type is io1, io2 or gp3 (AWS only).
+	IOPS *int32 `json:"iops,omitempty"`
+	// Throughput is the volume throughput in MBps when the volume type is gp3 (AWS only).
+	Throughput *int32 `json:"throughput,omitempty"`
+	// Optimization enables EBS optimization for an instance.
+	Optimization *bool `json:"optimization,omitempty"`
+	// Encryption enables EBS root volume encryption for an instance.
+	Encryption *bool `json:"encryption,omitempty"`
+	// EncryptionKey provides the key identifier for root volume encryption.
+	EncryptionKey *string `json:"encryptionKey,omitempty"`
 }
 
 // InstanceMetadataOptions defines the EC2 instance metadata service options (AWS Only)
@@ -164,6 +195,8 @@ type InstanceMetadataOptions struct {
 type MixedInstancesPolicySpec struct {
 	// Instances is a list of instance types which we are willing to run in the EC2 fleet
 	Instances []string `json:"instances,omitempty"`
+	// InstanceRequirements is a list of requirements for any instance type we are willing to run in the EC2 fleet.
+	InstanceRequirements *InstanceRequirementsSpec `json:"instanceRequirements,omitempty"`
 	// OnDemandAllocationStrategy indicates how to allocate instance types to fulfill On-Demand capacity
 	OnDemandAllocationStrategy *string `json:"onDemandAllocationStrategy,omitempty"`
 	// OnDemandBase is the minimum amount of the Auto Scaling group's capacity that must be
@@ -181,6 +214,21 @@ type MixedInstancesPolicySpec struct {
 	// SpotInstancePools is the number of Spot pools to use to allocate your Spot capacity (defaults to 2)
 	// pools are determined from the different instance types in the Overrides array of LaunchTemplate
 	SpotInstancePools *int64 `json:"spotInstancePools,omitempty"`
+}
+
+// InstanceRequirementsSpec is a list of requirements for any instance type we are willing to run in the EC2 fleet.
+type InstanceRequirementsSpec struct {
+	CPU    *MinMaxSpec `json:"cpu,omitempty"`
+	Memory *MinMaxSpec `json:"memory,omitempty"`
+	// ExcludedInstanceTypes is a list of instance types which will not be used by the instance group.
+	// You can use strings with one or more wild cards, represented by an asterisk (*), to exclude an
+	// instance type, size, or generation.
+	ExcludedInstanceTypes []string `json:"excludedInstanceTypes,omitempty"`
+}
+
+type MinMaxSpec struct {
+	Max *resource.Quantity `json:"max,omitempty"`
+	Min *resource.Quantity `json:"min,omitempty"`
 }
 
 // UserData defines a user-data section
@@ -202,8 +250,8 @@ type VolumeSpec struct {
 	Device string `json:"device,omitempty"`
 	// Encrypted indicates you want to encrypt the volume
 	Encrypted *bool `json:"encrypted,omitempty"`
-	// Iops is the provisioned IOPS for the volume when the volume type is io1, io2 or gp3 (AWS only).
-	Iops *int64 `json:"iops,omitempty"`
+	// IOPS is the provisioned IOPS for the volume when the volume type is io1, io2 or gp3 (AWS only).
+	IOPS *int64 `json:"iops,omitempty"`
 	// Throughput is the volume throughput in MBps when the volume type is gp3 (AWS only).
 	Throughput *int64 `json:"throughput,omitempty"`
 	// Key is the encryption key identifier for the volume
@@ -237,9 +285,15 @@ type IAMProfileSpec struct {
 }
 
 // LoadBalancer defines a load balancer
-type LoadBalancer struct {
+type LoadBalancerSpec struct {
 	// LoadBalancerName to associate with this instance group (AWS ELB)
 	LoadBalancerName *string `json:"loadBalancerName,omitempty"`
 	// TargetGroupARN to associate with this instance group (AWS ALB/NLB)
-	TargetGroupARN *string `json:"targetGroupArn,omitempty"`
+	TargetGroupARN *string `json:"targetGroupARN,omitempty"`
+}
+
+// AcceleratorConfig defines an accelerator config
+type AcceleratorConfig struct {
+	AcceleratorCount int64  `json:"acceleratorCount,omitempty"`
+	AcceleratorType  string `json:"acceleratorType,omitempty"`
 }

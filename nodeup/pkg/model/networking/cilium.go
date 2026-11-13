@@ -23,8 +23,9 @@ import (
 	"path/filepath"
 
 	"golang.org/x/sys/unix"
+
 	"k8s.io/kops/nodeup/pkg/model"
-	apiModel "k8s.io/kops/pkg/apis/kops/model"
+	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/nodeup/nodetasks"
 )
@@ -34,20 +35,18 @@ type CiliumBuilder struct {
 	*model.NodeupModelContext
 }
 
-var _ fi.ModelBuilder = &CiliumBuilder{}
+var _ fi.NodeupModelBuilder = &CiliumBuilder{}
 
 // Build is responsible for configuring the network cni
-func (b *CiliumBuilder) Build(c *fi.ModelBuilderContext) error {
-	cilium := b.Cluster.Spec.Networking.Cilium
-
+func (b *CiliumBuilder) Build(c *fi.NodeupModelBuilderContext) error {
 	// As long as the Cilium Etcd cluster exists, we should do this
-	if apiModel.UseCiliumEtcd(b.Cluster) {
+	if b.NodeupConfig.UseCiliumEtcd {
 		if err := b.buildCiliumEtcdSecrets(c); err != nil {
 			return err
 		}
 	}
 
-	if cilium == nil {
+	if b.NodeupConfig.Networking.Cilium == nil {
 		return nil
 	}
 
@@ -59,15 +58,23 @@ func (b *CiliumBuilder) Build(c *fi.ModelBuilderContext) error {
 		return fmt.Errorf("failed to create cgroupv2 mount unit: %w", err)
 	}
 
-	return nil
+	disableManageForeignRoutes(c, b.Distribution)
+	disableCloudInitNetworkHotplug(c, b.Distribution)
 
+	if b.NodeupConfig.Networking.Cilium.IPAM == kops.CiliumIpamEni {
+		maskEC2NetUtilsUdevRules(c, b.Distribution)
+		setMACAddressPolicyNone(c, b.Distribution)
+		if err := markSecondaryENIsUnmanaged(c, b.Distribution); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
-func (b *CiliumBuilder) buildBPFMount(c *fi.ModelBuilderContext) error {
-
+func (b *CiliumBuilder) buildBPFMount(c *fi.NodeupModelBuilderContext) error {
 	var fsdata unix.Statfs_t
 	err := unix.Statfs("/sys/fs/bpf", &fsdata)
-
 	if err != nil {
 		return fmt.Errorf("error checking for /sys/fs/bpf: %v", err)
 	}
@@ -97,7 +104,7 @@ WantedBy=multi-user.target
 
 		service := &nodetasks.Service{
 			Name:       "sys-fs-bpf.mount",
-			Definition: fi.String(unit),
+			Definition: new(unit),
 		}
 		service.InitDefaults()
 		c.AddTask(service)
@@ -106,15 +113,14 @@ WantedBy=multi-user.target
 	return nil
 }
 
-func (b *CiliumBuilder) buildCgroup2Mount(c *fi.ModelBuilderContext) error {
-
+func (b *CiliumBuilder) buildCgroup2Mount(c *fi.NodeupModelBuilderContext) error {
 	cgroupPath := "/run/cilium/cgroupv2"
 
 	var fsdata unix.Statfs_t
 	err := unix.Statfs(cgroupPath, &fsdata)
 
 	// If the path does not exist, systemd will create it
-	if !errors.Is(err, os.ErrNotExist) {
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("error checking for /run/cilium/cgroupv2: %v", err)
 	}
 
@@ -141,8 +147,8 @@ WantedBy=multi-user.target
 
 		service := &nodetasks.Service{
 			Name:         "run-cilium-cgroupv2.mount",
-			Definition:   fi.String(unit),
-			SmartRestart: fi.Bool(false),
+			Definition:   new(unit),
+			SmartRestart: new(false),
 		}
 		service.InitDefaults()
 		c.AddTask(service)
@@ -151,7 +157,7 @@ WantedBy=multi-user.target
 	return nil
 }
 
-func (b *CiliumBuilder) buildCiliumEtcdSecrets(c *fi.ModelBuilderContext) error {
+func (b *CiliumBuilder) buildCiliumEtcdSecrets(c *fi.NodeupModelBuilderContext) error {
 	name := "etcd-client-cilium"
 	dir := "/etc/kubernetes/pki/cilium"
 	signer := "etcd-clients-ca-cilium"
@@ -159,7 +165,7 @@ func (b *CiliumBuilder) buildCiliumEtcdSecrets(c *fi.ModelBuilderContext) error 
 		Path:     filepath.Join(dir, "etcd-ca.crt"),
 		Contents: fi.NewStringResource(b.NodeupConfig.CAs[signer]),
 		Type:     nodetasks.FileType_File,
-		Mode:     fi.String("0600"),
+		Mode:     new("0600"),
 	})
 	if b.HasAPIServer {
 		issueCert := &nodetasks.IssueCert{
@@ -174,31 +180,27 @@ func (b *CiliumBuilder) buildCiliumEtcdSecrets(c *fi.ModelBuilderContext) error 
 		c.AddTask(issueCert)
 		return issueCert.AddFileTasks(c, dir, name, "", nil)
 	} else {
-		if b.UseKopsControllerForNodeBootstrap() {
-			cert, key, err := b.GetBootstrapCert(name, signer)
-			if err != nil {
-				return err
-			}
-
-			c.AddTask(&nodetasks.File{
-				Path:           filepath.Join(dir, name+".crt"),
-				Contents:       cert,
-				Type:           nodetasks.FileType_File,
-				Mode:           fi.String("0644"),
-				BeforeServices: []string{"kubelet.service"},
-			})
-
-			c.AddTask(&nodetasks.File{
-				Path:           filepath.Join(dir, name+".key"),
-				Contents:       key,
-				Type:           nodetasks.FileType_File,
-				Mode:           fi.String("0400"),
-				BeforeServices: []string{"kubelet.service"},
-			})
-
-			return nil
-		} else {
-			return b.BuildCertificatePairTask(c, name, dir, name, nil, []string{"kubelet.service"})
+		cert, key, err := b.GetBootstrapCert(name, signer)
+		if err != nil {
+			return err
 		}
+
+		c.AddTask(&nodetasks.File{
+			Path:           filepath.Join(dir, name+".crt"),
+			Contents:       cert,
+			Type:           nodetasks.FileType_File,
+			Mode:           new("0644"),
+			BeforeServices: []string{"kubelet.service"},
+		})
+
+		c.AddTask(&nodetasks.File{
+			Path:           filepath.Join(dir, name+".key"),
+			Contents:       key,
+			Type:           nodetasks.FileType_File,
+			Mode:           new("0400"),
+			BeforeServices: []string{"kubelet.service"},
+		})
+
+		return nil
 	}
 }

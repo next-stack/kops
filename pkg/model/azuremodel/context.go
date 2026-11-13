@@ -23,7 +23,6 @@ import (
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/model"
 	nodeidentityazure "k8s.io/kops/pkg/nodeidentity/azure"
-	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/azure"
 	"k8s.io/kops/upup/pkg/fi/cloudup/azuretasks"
 )
@@ -35,12 +34,12 @@ type AzureModelContext struct {
 
 // LinkToVirtualNetwork returns the Azure Virtual Network object the cluster is located in.
 func (c *AzureModelContext) LinkToVirtualNetwork() *azuretasks.VirtualNetwork {
-	return &azuretasks.VirtualNetwork{Name: fi.String(c.NameForVirtualNetwork())}
+	return &azuretasks.VirtualNetwork{Name: new(c.NameForVirtualNetwork())}
 }
 
 // NameForVirtualNetwork returns the name of the Azure Virtual Network object the cluster is located in.
 func (c *AzureModelContext) NameForVirtualNetwork() string {
-	networkName := c.Cluster.Spec.NetworkID
+	networkName := c.Cluster.Spec.Networking.NetworkID
 	if networkName == "" {
 		networkName = c.ClusterName()
 	}
@@ -49,7 +48,7 @@ func (c *AzureModelContext) NameForVirtualNetwork() string {
 
 // LinkToResourceGroup returns the Resource Group object the cluster is located in.
 func (c *AzureModelContext) LinkToResourceGroup() *azuretasks.ResourceGroup {
-	return &azuretasks.ResourceGroup{Name: fi.String(c.NameForResourceGroup())}
+	return &azuretasks.ResourceGroup{Name: new(c.NameForResourceGroup())}
 }
 
 // NameForResourceGroup returns the name of the Resource Group object the cluster is located in.
@@ -59,22 +58,42 @@ func (c *AzureModelContext) NameForResourceGroup() string {
 
 // LinkToAzureSubnet returns the Azure Subnet object the cluster is located in.
 func (c *AzureModelContext) LinkToAzureSubnet(spec *kops.ClusterSubnetSpec) *azuretasks.Subnet {
-	return &azuretasks.Subnet{Name: fi.String(spec.Name)}
+	return &azuretasks.Subnet{Name: new(spec.Name)}
 }
 
 // NameForRouteTable returns the name of the Route Table object for the cluster.
 func (c *AzureModelContext) NameForRouteTable() string {
-	return c.Cluster.Spec.CloudConfig.Azure.RouteTableName
+	return c.Cluster.AzureRouteTableName()
 }
 
 // LinkToLoadBalancer returns the Load Balancer object for the cluster.
 func (c *AzureModelContext) LinkToLoadBalancer() *azuretasks.LoadBalancer {
-	return &azuretasks.LoadBalancer{Name: fi.String(c.NameForLoadBalancer())}
+	return &azuretasks.LoadBalancer{Name: new(c.NameForLoadBalancer())}
 }
 
 // NameForLoadBalancer returns the name of the Load Balancer object for the cluster.
 func (c *AzureModelContext) NameForLoadBalancer() string {
 	return "api-" + c.ClusterName()
+}
+
+// NameForApplicationSecurityGroupControlPlane returns the name of the Application Security Group object for the ControlPlane role.
+func (c *AzureModelContext) NameForApplicationSecurityGroupControlPlane() string {
+	return kops.InstanceGroupRoleControlPlane.ToLowerString() + "." + c.ClusterName()
+}
+
+// NameForApplicationSecurityGroupNodes returns the name of the Application Security Group object for the Node role.
+func (c *AzureModelContext) NameForApplicationSecurityGroupNodes() string {
+	return kops.InstanceGroupRoleNode.ToLowerString() + "s." + c.ClusterName()
+}
+
+// LinkToApplicationSecurityGroupControlPlane returns the Application Security Group object for the ControlPlane role.
+func (c *AzureModelContext) LinkToApplicationSecurityGroupControlPlane() *azuretasks.ApplicationSecurityGroup {
+	return &azuretasks.ApplicationSecurityGroup{Name: new(c.NameForApplicationSecurityGroupControlPlane())}
+}
+
+// LinkToApplicationSecurityGroupNodes returns the Application Security Group object for the Node role.
+func (c *AzureModelContext) LinkToApplicationSecurityGroupNodes() *azuretasks.ApplicationSecurityGroup {
+	return &azuretasks.ApplicationSecurityGroup{Name: new(c.NameForApplicationSecurityGroupNodes())}
 }
 
 // CloudTagsForInstanceGroup computes the tags to apply to instances in the specified InstanceGroup
@@ -115,7 +134,10 @@ func (c *AzureModelContext) CloudTagsForInstanceGroup(ig *kops.InstanceGroup) ma
 	}
 
 	// The system tags take priority because the cluster likely breaks without them...
-	labels[azure.TagNameRolePrefix+strings.ToLower(string(ig.Spec.Role))] = "1"
+	labels[azure.TagNameRolePrefix+ig.Spec.Role.ToLowerString()] = "1"
+	if ig.Spec.Role.HasControlPlane() {
+		labels[azure.TagNameRolePrefix+"master"] = "1"
+	}
 
 	// Set the tag used by kops-controller to identify the instance group to which the VM ScaleSet belongs.
 	labels[nodeidentityazure.InstanceGroupNameTag] = ig.Name
@@ -123,7 +145,7 @@ func (c *AzureModelContext) CloudTagsForInstanceGroup(ig *kops.InstanceGroup) ma
 	// Replace all "/" with "_" as "/" is not an allowed key character in Azure.
 	m := make(map[string]*string)
 	for k, v := range labels {
-		m[strings.ReplaceAll(k, "/", "_")] = fi.String(v)
+		m[strings.ReplaceAll(k, "/", "_")] = new(v)
 	}
 	return m
 }

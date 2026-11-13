@@ -19,7 +19,6 @@ package model
 import (
 	"path/filepath"
 
-	"k8s.io/kops/pkg/apis/kops/model"
 	"k8s.io/kops/pkg/wellknownusers"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/nodeup/nodetasks"
@@ -31,11 +30,18 @@ type KopsControllerBuilder struct {
 	*NodeupModelContext
 }
 
-var _ fi.ModelBuilder = &KopsControllerBuilder{}
+var _ fi.NodeupModelBuilder = &KopsControllerBuilder{}
+
+func (b *KopsControllerBuilder) runsKopsController() bool {
+	if b.IsMaster || b.HasAPIServer {
+		return true
+	}
+	return false
+}
 
 // Build is responsible for configuring keys that will be used by kops-controller (via hostPath)
-func (b *KopsControllerBuilder) Build(c *fi.ModelBuilderContext) error {
-	if !b.IsMaster {
+func (b *KopsControllerBuilder) Build(c *fi.NodeupModelBuilderContext) error {
+	if !b.runsKopsController() {
 		return nil
 	}
 
@@ -60,7 +66,10 @@ func (b *KopsControllerBuilder) Build(c *fi.ModelBuilderContext) error {
 		KeypairID:      b.NodeupConfig.KeypairIDs[fi.CertificateIDCA],
 		Type:           "server",
 		Subject:        nodetasks.PKIXName{CommonName: "kops-controller"},
-		AlternateNames: []string{"kops-controller.internal." + b.Cluster.ObjectMeta.Name},
+		AlternateNames: []string{"kops-controller.internal." + b.NodeupConfig.ClusterName},
+	}
+	if len(b.BootConfig.APIServerIPs) > 0 {
+		issueCert.AlternateNames = append(issueCert.AlternateNames, b.BootConfig.APIServerIPs...)
 	}
 	c.AddTask(issueCert)
 
@@ -81,7 +90,7 @@ func (b *KopsControllerBuilder) Build(c *fi.ModelBuilderContext) error {
 	})
 
 	caList := []string{fi.CertificateIDCA}
-	if model.UseCiliumEtcd(b.Cluster) {
+	if b.NodeupConfig.UseCiliumEtcd {
 		caList = append(caList, "etcd-clients-ca-cilium")
 	}
 	for _, cert := range caList {

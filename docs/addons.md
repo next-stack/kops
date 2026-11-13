@@ -20,7 +20,51 @@ AWS Load Balancer Controller offers additional functionality for provisioning EL
 spec:
   awsLoadBalancerController:
     enabled: true
+    cpuRequest: "100m"
+    cpuLimit: "200m"
+    memoryRequest: "200Mi"
+    memoryLimit: "500Mi"
 ```
+
+Though the AWS Load Balancer Controller can integrate the AWS WAF and
+Shield services with your Application Load Balancers (ALBs), kOps
+disables those capabilities by default.
+
+{{ kops_feature_table(kops_added_default='1.24') }}
+
+You can enable use of either or both of the WAF and WAF Classic
+services by including the following fields in the cluster spec:
+
+```yaml
+spec:
+  awsLoadBalancerController:
+    enabled: true
+    enableWAF: true
+    enableWAFv2: true
+    cpuRequest: "100m"
+    cpuLimit: "200m"
+    memoryRequest: "200Mi"
+    memoryLimit: "500Mi"
+```
+
+Note that the controller will only succeed in associating one WAF with
+a given ALB at a time, despite it accepting both the
+"alb.ingress.kubernetes.io/waf-acl-id" and
+"alb.ingress.kubernetes.io/wafv2-acl-arn" annotations on the same
+_Ingress_ object.
+
+You can enable use of Shield Advanced by including the following fields in the cluster spec:
+
+```yaml
+spec:
+  awsLoadBalancerController:
+    enabled: true
+    enableShield: true
+```
+
+Support for the WAF and Shield services in kOps is currently **beta**, meaning
+that the accepted configuration and the AWS resources involved may
+change.
 
 Read more in the [official documentation](https://kubernetes-sigs.github.io/aws-load-balancer-controller/latest/).
 
@@ -35,18 +79,62 @@ spec:
     enabled: true
     expander: least-waste
     balanceSimilarNodeGroups: false
+    emitPerNodegroupMetrics: false
     awsUseStaticInstanceList: false
-    scaleDownUtilizationThreshold: 0.5
+    scaleDownUtilizationThreshold: "0.5"
+    skipNodesWithCustomControllerPods: true
     skipNodesWithLocalStorage: true
     skipNodesWithSystemPods: true
     newPodScaleUpDelay: 0s
     scaleDownDelayAfterAdd: 10m0s
+    scaleDownUnneededTime: 10m0s
+    scaleDownUnreadyTime: 20m0s
     image: <the latest supported image for the specified kubernetes version>
     cpuRequest: "100m"
     memoryRequest: "300Mi"
 ```
 
 Read more about cluster autoscaler in the [official documentation](https://github.com/kubernetes/autoscaler/tree/master/cluster-autoscaler).
+
+##### Expander strategies
+Cluster autoscaler supports several different [expander strategies](https://github.com/kubernetes/autoscaler/blob/master/cluster-autoscaler/FAQ.md#what-are-expanders).
+
+###### Priority Expander configuration
+{{ kops_feature_table(kops_added_default='1.26') }}
+
+The `priority` expander requires additional configuration through a ConfigMap as described in [its documentation](https://github.com/kubernetes/autoscaler/blob/master/cluster-autoscaler/expander/priority/readme.md)
+
+When `expander: priority` is defined kOps will create this ConfigMap based on the InstanceGroup spec. You can change priority of each instance group by adding the followig to the InstanceGroup spec.
+
+```yaml
+spec:
+  autoscale: true
+  autoscalePriority: 100
+```
+
+If `autoscalePriority` is not set, it will default to 0.
+
+If you need a more complex configuration, eg use regex for matching the InstanceGoup, you can provide your own custom configuration. If this is configured, the priority set on the InstanceGroup specs are ignored.
+
+```yaml
+clusterAutoscaler:
+  customPriorityExpanderConfig:
+    100:
+    - .*foo.*
+    50:
+    - .*bar.*
+    0:
+    - .*
+```
+
+###### Disable
+
+If you want to manage the priority expander ConfigMap outside of kOps, you can disable the ConfigMap creation by adding the following to the Cluster spec:
+
+```yaml
+clusterAutoscaler:
+  createPriorityExpanderConfig: false
+```
 
 ##### Disabling cluster autoscaler for a given instance group
 {{ kops_feature_table(kops_added_default='1.20') }}
@@ -87,8 +175,74 @@ spec:
     managed: false
 ```
 
+##### DNS nameserver configuration for cert-manager pod
+{{ kops_feature_table(kops_added_default='1.23.3', k8s_min='1.16') }}
+
+Optional list of DNS nameserver IP addresses for the cert-manager pod to use.
+This is useful if you have a public and private DNS zone for the same domain to ensure that cert-manager can access ingress, or DNS01 challenge TXT records at all times.
+
+You can set pod DNS nameserver configuration for cert-manager like so:
+```yaml
+spec:
+  certManager:
+    enabled: true
+    nameservers:
+      - 1.1.1.1
+      - 8.8.8.8
+```
+
+##### Enabling dns-01 challenges
+
+{{ kops_feature_table(kops_added_default='1.25.0') }}
+
+Cert Manager may be granted the necessary IAM privileges to solve dns-01 challenges by adding a list of hostedzone IDs.
+This requires [external permissions for service accounts](/cluster_spec/#service-account-issuer-discovery-and-aws-iam-roles-for-service-accounts-irsa) to be enabled.
+
+```yaml
+spec:
+  certManager:
+    enabled: true
+    hostedZoneIDs:
+    - ZONEID
+  iam:
+    useServiceAccountExternalPermissions: true
+```
+
+##### Feature gates
+
+{{ kops_feature_table(kops_added_default='1.37') }}
+
+The cert-manager controller, webhook and cainjector each accept their own set of feature gates, so they are configured
+per component: `featureGates` applies to the controller, `webhookFeatureGates` to the webhook and `cainjectorFeatureGates`
+to the cainjector. Some features, such as `AdditionalCertificateOutputFormats` and `NameConstraints`, must be enabled on
+both the controller and the webhook to take effect.
+
+```yaml
+spec:
+  certManager:
+    enabled: true
+    featureGates:
+      AdditionalCertificateOutputFormats: true
+    webhookFeatureGates:
+      AdditionalCertificateOutputFormats: true
+```
+
+See the [cert-manager feature gates documentation](https://cert-manager.io/docs/installation/configuring-components/#feature-gates) for the gates each component supports.
 
 Read more about cert-manager in the [official documentation](https://cert-manager.io/docs/)
+
+#### Karpenter
+{{ kops_feature_table(kops_added_default='1.24') }}
+
+The Karpenter addon enables Karpenter-managed InstanceGroups.
+
+```yaml
+spec:
+  karpenter:
+    enabled: true
+```
+
+See more details on how to configure Karpenter in the [kOps Karpenter docs](/operations/karpenter) and the [official documentation](https://karpenter.sh)
 
 #### Metrics server
 {{ kops_feature_table(kops_added_default='1.19') }}
@@ -150,16 +304,20 @@ spec:
 ```yaml
 spec:
   nodeTerminationHandler:
+    cpuRequest: 200m
     enabled: true
+    enableRebalanceMonitoring: true
     enableSQSTerminationDraining: true
     managedASGTag: "aws-node-termination-handler/managed"
+    prometheusEnable: true
+    webhookURL: "https://hooks.slack.com/services/YOUR/SLACK/URL"
 ```
 
 ##### Queue Processor Mode
 
 {{ kops_feature_table(kops_added_default='1.21') }}
 
-If `enableSQSTerminationDraining` is true Node Termination Handler will operate in Queue Processor mode. In addition to the events mentioned above, Queue Processor mode allows Node Termination Handler to take care of ASG Scale-In, AZ-Rebalance, Unhealthy Instances, EC2 Instance Termination via the API or Console, and more. kOps will provision the necessary infrastructure: an SQS queue, EventBridge rules, and ASG Lifecycle hooks. `managedASGTag` can be configured with Queue Processor mode to distinguish resource ownership between multiple clusters.
+If `enableSQSTerminationDraining` is not false Node Termination Handler will operate in Queue Processor mode. In addition to the events mentioned above, Queue Processor mode allows Node Termination Handler to take care of ASG Scale-In, AZ-Rebalance, Unhealthy Instances, EC2 Instance Termination via the API or Console, and more. kOps will provision the necessary infrastructure: an SQS queue, EventBridge rules, and ASG Lifecycle hooks. `managedASGTag` can be configured with Queue Processor mode to distinguish resource ownership between multiple clusters.
 
 The kOps CLI requires additional IAM permissions to manage the requisite EventBridge rules and SQS queue:
 
@@ -180,6 +338,7 @@ The kOps CLI requires additional IAM permissions to manage the requisite EventBr
         "events:RemoveTargets",
         "events:TagResource",
         "sqs:CreateQueue",
+        "sqs:TagQueue",
         "sqs:DeleteQueue",
         "sqs:GetQueueAttributes",
         "sqs:ListQueues",
@@ -206,6 +365,28 @@ spec:
     memoryRequest: 32Mi
     cpuRequest: 10m
 ```
+
+#### Pod Identity Webhook
+
+{{ kops_feature_table(kops_added_default='1.23') }}
+
+When using [IAM roles for Service Accounts](/cluster_spec/#service-account-issuer-discovery-and-aws-iam-roles-for-service-accounts-irsa) (IRSA), Pods require an additinal token to authenticate with the AWS API. In addition, the SDK requires specific environment variables set to make use of these tokens. This addon will mutate Pods configured to use IRSA so that users do not need to do this themselves.
+
+All ServiceAccounts configured with AWS privileges in the Cluster spec will automatically be mutated to assume the configured role.
+
+
+```yaml
+spec:
+  certManager:
+    enabled: true
+  podIdentityWebhook:
+    enabled: true
+```
+
+The EKS annotations on ServiceAccounts are typically not necessary as kOps will configure the webhook with all ServiceAccount to role mapping configured in the Cluster spec. But if you need specific configuration, you may annotate the ServiceAccount, overriding the kOps configuration.
+
+Read more about Pod Identity Webhook in the [official documentation](https://github.com/aws/amazon-eks-pod-identity-webhook).
+
 #### Snapshot controller
 
 {{ kops_feature_table(kops_added_default='1.21', k8s_min='1.20') }}
@@ -229,19 +410,37 @@ spec:
       enabled: true
 ```
 
+##### Self-managed aws-ebs-csi-driver
+
+{{ kops_feature_table(kops_added_default='1.25') }}
+
+The following configuration allows for a self-managed aws-ebs-csi-driver. Please note that if you’re using Amazon EBS volumes, you must install the Amazon EBS CSI driver. If the Amazon EBS CSI plugin is not installed, then volume operations will fail.
+
+If IRSA is not enabled, the control plane will have the permissions to provision nodes, and the self-managed controllers should run on the control plane. If IRSA is enabled, kOps will create the respective AWS IAM Role, assign the policy, and establish a trust relationship allowing the ServiceAccount to assume the IAM Role. To configure Pods to assume the given IAM roles, enable the [Pod Identity Webhook](https://kops.sigs.k8s.io/addons/#pod-identity-webhook). Without this webhook, you need to modify your Pod specs yourself for your Pod to assume the defined roles.
+
+```yaml
+spec:
+  cloudConfig:
+    awsEBSCSIDriver:
+      enabled: true
+      managed: false
+```
 
 ## Custom addons
 
-The command `kops create cluster` does not support specifying addons to be added to the cluster when it is created. Instead they can be added after cluster creation using kubectl. Alternatively when creating a cluster from a yaml manifest, addons can be specified using `spec.addons`.
+Static addons are configured with `spec.addons`. Each entry points to a manifest that the control plane can read.
 
 ```yaml
 spec:
   addons:
-  - manifest: s3://my-kops-addons/addon.yaml
+  - manifest: https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.4.0/standard-install.yaml
 ```
 
-The docs about the [addon management](contributing/addons.md#addon-management) describe in more detail how to define a addon resource with regards to versioning.
-Here is a minimal example of an addon manifest that would install two different addons.
+Starting with kOps 1.36, that file can be a regular Kubernetes resource manifest. For example, the manifest above installs the Gateway API CRDs. kOps applies the resources as-is.
+
+It can also be a kOps `Addons` index. Use this when one entry in `spec.addons` should point at multiple versioned manifests. The [addon management](contributing/addons.md#addon-management) docs describe versioned addon indexes in more detail.
+
+Here is a minimal `Addons` index that installs two addons.
 
 ```yaml
 kind: Addons
@@ -261,7 +460,7 @@ spec:
     manifest: bar.addons.org.io/v0.0.1.yaml
 ```
 
-In this example the folder structure should look like this;
+In this example, the file structure should look like this:
 
 ```
 addon.yaml
@@ -271,7 +470,7 @@ addon.yaml
     v0.0.1.yaml
 ```
 
-The yaml files in the foo/bar folders can be any kubernetes resource. Typically this file structure would be pushed to S3 or another of the supported backends and then referenced as above in `spec.addons`. In order for master nodes to be able to access the S3 bucket containing the addon manifests, one might have to add additional iam policies to the master nodes using `spec.additionalPolicies`, like so:
+The YAML files in the foo/bar folders can be any Kubernetes resource manifest. Typically this file structure would be pushed to S3 or another supported backend and then referenced from `spec.addons`. If master nodes need access to an S3 bucket containing addon manifests, add IAM policies using `spec.additionalPolicies`, like so:
 
 ```yaml
 spec:

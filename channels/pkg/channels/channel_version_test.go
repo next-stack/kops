@@ -20,8 +20,8 @@ import (
 	"context"
 	"testing"
 
-	cmv1 "github.com/jetstack/cert-manager/pkg/apis/certmanager/v1"
-	fakecertmanager "github.com/jetstack/cert-manager/pkg/client/clientset/versioned/fake"
+	cmv1 "github.com/cert-manager/cert-manager/pkg/apis/certmanager/v1"
+	fakecertmanager "github.com/cert-manager/cert-manager/pkg/client/clientset/versioned/fake"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	fakekubernetes "k8s.io/client-go/kubernetes/fake"
@@ -29,7 +29,7 @@ import (
 
 func Test_IsPKIInstalled(t *testing.T) {
 	ctx := context.Background()
-	fakek8s := fakekubernetes.NewSimpleClientset(&corev1.Namespace{
+	fakek8s := fakekubernetes.NewClientset(&corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "kube-sysetem",
 		},
@@ -47,7 +47,7 @@ func Test_IsPKIInstalled(t *testing.T) {
 		t.Error("claims PKI installed when it is not")
 	}
 
-	fakek8s = fakekubernetes.NewSimpleClientset(
+	fakek8s = fakekubernetes.NewClientset(
 		&corev1.Namespace{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: "kube-sysetem",
@@ -76,5 +76,4 @@ func Test_IsPKIInstalled(t *testing.T) {
 	if !isInstalled {
 		t.Error("claims PKI is not installed when it is")
 	}
-
 }

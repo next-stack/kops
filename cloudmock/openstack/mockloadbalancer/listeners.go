@@ -24,7 +24,7 @@ import (
 	"regexp"
 
 	"github.com/google/uuid"
-	"github.com/gophercloud/gophercloud/openstack/loadbalancer/v2/listeners"
+	"github.com/gophercloud/gophercloud/v2/openstack/loadbalancer/v2/listeners"
 )
 
 type listenerListResponse struct {
@@ -66,7 +66,6 @@ func (m *MockClient) mockListeners() {
 }
 
 func (m *MockClient) listListeners(w http.ResponseWriter, vals url.Values) {
-
 	w.WriteHeader(http.StatusOK)
 
 	listeners := make([]listeners.Listener, 0)

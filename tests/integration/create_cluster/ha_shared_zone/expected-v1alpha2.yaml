@@ -5,7 +5,9 @@ metadata:
   name: ha.example.com
 spec:
   api:
-    dns: {}
+    loadBalancer:
+      class: Network
+      type: Public
   authorization:
     rbac: {}
   channel: stable
@@ -15,27 +17,31 @@ spec:
   - cpuRequest: 200m
     etcdMembers:
     - encryptedVolume: true
-      instanceGroup: master-us-test-1a-1
+      instanceGroup: control-plane-us-test-1a-1
       name: etcd-1
     - encryptedVolume: true
-      instanceGroup: master-us-test-1a-2
+      instanceGroup: control-plane-us-test-1a-2
       name: etcd-2
     - encryptedVolume: true
-      instanceGroup: master-us-test-1a-3
+      instanceGroup: control-plane-us-test-1a-3
       name: etcd-3
+    manager:
+      backupRetentionDays: 90
     memoryRequest: 100Mi
     name: main
   - cpuRequest: 100m
     etcdMembers:
     - encryptedVolume: true
-      instanceGroup: master-us-test-1a-1
+      instanceGroup: control-plane-us-test-1a-1
       name: etcd-1
     - encryptedVolume: true
-      instanceGroup: master-us-test-1a-2
+      instanceGroup: control-plane-us-test-1a-2
       name: etcd-2
     - encryptedVolume: true
-      instanceGroup: master-us-test-1a-3
+      instanceGroup: control-plane-us-test-1a-3
       name: etcd-3
+    manager:
+      backupRetentionDays: 90
     memoryRequest: 100Mi
     name: events
   iam:
@@ -46,8 +52,7 @@ spec:
   kubernetesApiAccess:
   - 0.0.0.0/0
   - ::/0
-  kubernetesVersion: v1.21.0
-  masterPublicName: api.ha.example.com
+  kubernetesVersion: v1.32.0
   networkCIDR: 172.20.0.0/16
   networking:
     cni: {}
@@ -56,15 +61,13 @@ spec:
   - 0.0.0.0/0
   - ::/0
   subnets:
-  - cidr: 172.20.32.0/19
+  - cidr: 172.20.0.0/16
     name: us-test-1a
     type: Public
     zone: us-test-1a
   topology:
     dns:
-      type: Public
-    masters: public
-    nodes: public
+      type: None
 
 ---
 
@@ -74,14 +77,14 @@ metadata:
   creationTimestamp: "2017-01-01T00:00:00Z"
   labels:
     kops.k8s.io/cluster: ha.example.com
-  name: master-us-test-1a-1
+  name: control-plane-us-test-1a-1
 spec:
-  image: 099720109477/ubuntu/images/hvm-ssd/ubuntu-focal-20.04-amd64-server-20211015
+  image: 099720109477/ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-20261108
   machineType: m3.medium
   maxSize: 1
   minSize: 1
   nodeLabels:
-    kops.k8s.io/instancegroup: master-us-test-1a-1
+    kops.k8s.io/instancegroup: control-plane-us-test-1a-1
   role: Master
   subnets:
   - us-test-1a
@@ -94,14 +97,14 @@ metadata:
   creationTimestamp: "2017-01-01T00:00:00Z"
   labels:
     kops.k8s.io/cluster: ha.example.com
-  name: master-us-test-1a-2
+  name: control-plane-us-test-1a-2
 spec:
-  image: 099720109477/ubuntu/images/hvm-ssd/ubuntu-focal-20.04-amd64-server-20211015
+  image: 099720109477/ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-20261108
   machineType: m3.medium
   maxSize: 1
   minSize: 1
   nodeLabels:
-    kops.k8s.io/instancegroup: master-us-test-1a-2
+    kops.k8s.io/instancegroup: control-plane-us-test-1a-2
   role: Master
   subnets:
   - us-test-1a
@@ -114,14 +117,14 @@ metadata:
   creationTimestamp: "2017-01-01T00:00:00Z"
   labels:
     kops.k8s.io/cluster: ha.example.com
-  name: master-us-test-1a-3
+  name: control-plane-us-test-1a-3
 spec:
-  image: 099720109477/ubuntu/images/hvm-ssd/ubuntu-focal-20.04-amd64-server-20211015
+  image: 099720109477/ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-20261108
   machineType: m3.medium
   maxSize: 1
   minSize: 1
   nodeLabels:
-    kops.k8s.io/instancegroup: master-us-test-1a-3
+    kops.k8s.io/instancegroup: control-plane-us-test-1a-3
   role: Master
   subnets:
   - us-test-1a
@@ -136,7 +139,7 @@ metadata:
     kops.k8s.io/cluster: ha.example.com
   name: nodes-us-test-1a
 spec:
-  image: 099720109477/ubuntu/images/hvm-ssd/ubuntu-focal-20.04-amd64-server-20211015
+  image: 099720109477/ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-20261108
   machineType: t2.medium
   maxSize: 1
   minSize: 1

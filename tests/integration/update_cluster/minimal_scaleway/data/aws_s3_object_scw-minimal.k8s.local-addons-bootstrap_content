@@ -1,0 +1,101 @@
+kind: Addons
+metadata:
+  name: bootstrap
+spec:
+  addons:
+  - id: k8s-1.16
+    manifest: kops-controller.addons.k8s.io/k8s-1.16.yaml
+    manifestHash: 111cb12279e9cb93cba5f6a3abe3247c4b02d525cc902b2088846810a987bd72
+    name: kops-controller.addons.k8s.io
+    needsRollingUpdate: control-plane
+    selector:
+      k8s-addon: kops-controller.addons.k8s.io
+  - id: k8s-1.12
+    manifest: coredns.addons.k8s.io/k8s-1.12.yaml
+    manifestHash: 585274b5724012812b9ef3ede64f07129c7e217ddf301b4c3c24dd07a638a18b
+    name: coredns.addons.k8s.io
+    selector:
+      k8s-addon: coredns.addons.k8s.io
+  - id: k8s-1.9
+    manifest: kubelet-api.rbac.addons.k8s.io/k8s-1.9.yaml
+    manifestHash: da91eb5cf9a29f1b03510007d6d54603aef2fc23a305abc9ba496c510dfd3bc7
+    name: kubelet-api.rbac.addons.k8s.io
+    selector:
+      k8s-addon: kubelet-api.rbac.addons.k8s.io
+  - manifest: limit-range.addons.k8s.io/v1.5.0.yaml
+    manifestHash: 686cc69e559a1c6f5e8b94e38de54a575a25c432ed5ceec565244b965fb5f07f
+    name: limit-range.addons.k8s.io
+    selector:
+      k8s-addon: limit-range.addons.k8s.io
+  - id: k8s-1.12
+    manifest: dns-controller.addons.k8s.io/k8s-1.12.yaml
+    manifestHash: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+    name: dns-controller.addons.k8s.io
+    prune:
+      kinds:
+      - kind: ConfigMap
+        labelSelector: addon.kops.k8s.io/name=dns-controller.addons.k8s.io,app.kubernetes.io/managed-by=kops
+      - kind: Service
+        labelSelector: addon.kops.k8s.io/name=dns-controller.addons.k8s.io,app.kubernetes.io/managed-by=kops
+      - kind: ServiceAccount
+        labelSelector: addon.kops.k8s.io/name=dns-controller.addons.k8s.io,app.kubernetes.io/managed-by=kops
+      - group: admissionregistration.k8s.io
+        kind: MutatingWebhookConfiguration
+        labelSelector: addon.kops.k8s.io/name=dns-controller.addons.k8s.io,app.kubernetes.io/managed-by=kops
+      - group: admissionregistration.k8s.io
+        kind: ValidatingWebhookConfiguration
+        labelSelector: addon.kops.k8s.io/name=dns-controller.addons.k8s.io,app.kubernetes.io/managed-by=kops
+      - group: apiregistration.k8s.io
+        kind: APIService
+        labelSelector: addon.kops.k8s.io/name=dns-controller.addons.k8s.io,app.kubernetes.io/managed-by=kops
+      - group: apps
+        kind: DaemonSet
+        labelSelector: addon.kops.k8s.io/name=dns-controller.addons.k8s.io,app.kubernetes.io/managed-by=kops
+      - group: apps
+        kind: Deployment
+        labelSelector: addon.kops.k8s.io/name=dns-controller.addons.k8s.io,app.kubernetes.io/managed-by=kops
+      - group: apps
+        kind: StatefulSet
+        labelSelector: addon.kops.k8s.io/name=dns-controller.addons.k8s.io,app.kubernetes.io/managed-by=kops
+      - group: networking.k8s.io
+        kind: IngressClass
+        labelSelector: addon.kops.k8s.io/name=dns-controller.addons.k8s.io,app.kubernetes.io/managed-by=kops
+      - group: policy
+        kind: PodDisruptionBudget
+        labelSelector: addon.kops.k8s.io/name=dns-controller.addons.k8s.io,app.kubernetes.io/managed-by=kops
+      - group: rbac.authorization.k8s.io
+        kind: ClusterRole
+        labelSelector: addon.kops.k8s.io/name=dns-controller.addons.k8s.io,app.kubernetes.io/managed-by=kops
+      - group: rbac.authorization.k8s.io
+        kind: ClusterRoleBinding
+        labelSelector: addon.kops.k8s.io/name=dns-controller.addons.k8s.io,app.kubernetes.io/managed-by=kops
+      - group: rbac.authorization.k8s.io
+        kind: Role
+        labelSelector: addon.kops.k8s.io/name=dns-controller.addons.k8s.io,app.kubernetes.io/managed-by=kops
+      - group: rbac.authorization.k8s.io
+        kind: RoleBinding
+        labelSelector: addon.kops.k8s.io/name=dns-controller.addons.k8s.io,app.kubernetes.io/managed-by=kops
+      - group: storage.k8s.io
+        kind: CSIDriver
+        labelSelector: addon.kops.k8s.io/name=dns-controller.addons.k8s.io,app.kubernetes.io/managed-by=kops
+    selector:
+      k8s-addon: dns-controller.addons.k8s.io
+  - id: k8s-1.24
+    manifest: scaleway-cloud-controller.addons.k8s.io/k8s-1.24.yaml
+    manifestHash: 2203789dbfc24d40f55d6bb9d6a7c7a8ad1b9f39ec99ca561ed9302741675c13
+    name: scaleway-cloud-controller.addons.k8s.io
+    selector:
+      k8s-addon: scaleway-cloud-controller.addons.k8s.io
+  - id: k8s-1.24
+    manifest: scaleway-csi-driver.addons.k8s.io/k8s-1.24.yaml
+    manifestHash: c9048192cf937ebef8f5d537c8ba7d3dd9c8392591e57220b3380adb50388d89
+    name: scaleway-csi-driver.addons.k8s.io
+    selector:
+      k8s-addon: scaleway-csi-driver.addons.k8s.io
+  - id: k8s-1.16
+    manifest: networking.cilium.io/k8s-1.16-v1.15.yaml
+    manifestHash: c2d8d8a9043eb6958ffe1601b4f0c6c4f88cfcaecc192ebcfab63bcd59dcf309
+    name: networking.cilium.io
+    needsRollingUpdate: all
+    selector:
+      role.kubernetes.io/networking: "1"

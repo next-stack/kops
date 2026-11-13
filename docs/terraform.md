@@ -9,13 +9,13 @@ The Terraform output should be reasonably stable (i.e. the text files should onl
 Note that if you modify the Terraform files that kOps spits out, it will override your changes with the configuration state defined by its own configs. In other terms, kOps's own state is the ultimate source of truth (as far as kOps is concerned), and Terraform is a representation of that state for your convenience.
 
 ### Terraform Version Compatibility
-| kOps Version | Terraform Version | Feature Flag Notes |
-|--------------|-------------------|--------------------|
-| >= 1.19      | >= 0.12.26, >= 0.13 | HCL2 supported by default <br>`KOPS_FEATURE_FLAGS=Terraform-0.12` is now deprecated |
-| >= 1.18      | >= 0.12             | HCL2 supported by default |
-| >= 1.18      | < 0.12              | `KOPS_FEATURE_FLAGS=-Terraform-0.12` |
-| >= 1.17      | >= 0.12             | `KOPS_FEATURE_FLAGS=TerraformJSON` outputs JSON |
-| <= 1.17      | < 0.12              | Supported by default |
+| kOps Version    | Terraform Version | Feature Flag Notes |
+|-----------------|-------------------|--------------------|
+| >= 1.19         | >= 0.12.26, >= 0.13 | HCL2 supported by default <br>`KOPS_FEATURE_FLAGS=Terraform-0.12` is now deprecated |
+| >= 1.18         | >= 0.12             | HCL2 supported by default |
+| >= 1.18         | < 0.12              | `KOPS_FEATURE_FLAGS=-Terraform-0.12` |
+| >= 1.17, < 1.23 | >= 0.12             | `KOPS_FEATURE_FLAGS=TerraformJSON` outputs JSON |
+| <= 1.17         | < 0.12              | Supported by default |
 
 ### Using Terraform
 
@@ -26,7 +26,7 @@ You could keep your Terraform state locally, but we **strongly recommend** savin
 ```terraform
 terraform {
   backend "s3" {
-    bucket = "mybucket"
+    bucket = "terraform_state_bucket"
     key    = "path/to/my/key"
     region = "us-east-1"
   }
@@ -42,14 +42,14 @@ For example, a complete setup might be:
 ```
 $ kops create cluster \
   --name=kubernetes.mydomain.com \
-  --state=s3://mycompany.kubernetes \
+  --state=s3://mycompany.kops_state_bucket \
   --dns-zone=kubernetes.mydomain.com \
   [... your other options ...]
   --out=. \
   --target=terraform
 ```
 
-The above command will create kOps state on S3 (defined in `--state`) and output a representation of your configuration into Terraform files. Thereafter you can preview your changes in `kubernetes.tf` and then use Terraform to create all the resources as shown below:
+The above command will create the [kOps state store](state.md) on S3 (defined in `--state`) and output a representation of your configuration into Terraform files. Thereafter, you can preview your changes in `kubernetes.tf` and then use Terraform to create all the resources as shown below:
 
 Additional Terraform `.tf` files could be added at this stage to customize your deployment, but remember the kOps state should continue to remain the ultimate source of truth for the Kubernetes cluster.
 
@@ -90,17 +90,22 @@ It's possible to use Terraform to make changes to your infrastructure as defined
 ```
 $ kops edit cluster \
   --name=kubernetes.mydomain.com \
-  --state=s3://mycompany.kubernetes
+  --state=s3://mycompany.kops_state_bucket
 
 # editor opens, make your changes ...
 ```
+
+The Terraform target requires the complete cluster configuration and cannot be combined with
+`--instance-group` or `--instance-group-roles`. Omitting resources from the configuration can cause
+Terraform to plan their destruction. For staged upgrades, generate the full configuration and follow
+the [targeted Terraform apply procedure](tutorial/upgrading-kubernetes.md).
 
 Then output your changes/edits to kOps cluster state into the Terraform files. Run `kops update` with `--target` and `--out` parameters:
 
 ```
 $ kops update cluster \
   --name=kubernetes.mydomain.com \
-  --state=s3://mycompany.kubernetes \
+  --state=s3://mycompany.kops_state_bucket \
   --out=. \
   --target=terraform
 ```
@@ -125,7 +130,7 @@ $ terraform plan -destroy
 $ terraform destroy
 $ kops delete cluster --yes \
   --name=kubernetes.mydomain.com \
-  --state=s3://mycompany.kubernetes
+  --state=s3://mycompany.kops_state_bucket
 ```
 
 Ps: You don't have to `kops delete cluster` if you just want to recreate from scratch. Deleting kOps cluster state means that you've have to `kops create` again.
@@ -137,14 +142,3 @@ Ps: You don't have to `kops delete cluster` if you just want to recreate from sc
 Changes made with `kops edit` (like enabling RBAC and / or feature gates) will result in changes to the LaunchTemplate of your cluster nodes. After a `terraform apply`, they won't be applied right away since terraform will not launch new instances as part of that.
 
 To see your changes applied to the cluster you'll also need to run `kops rolling-update` after running `terraform apply`. This will ensure that all nodes' changes have the desired settings configured with `kops edit`.
-
-#### Terraform JSON output
-
-With terraform 0.12 JSON is now officially supported as configuration language. To enable JSON output instead of HCLv2 output you need to enable it through a feature flag.
-
-```
-export KOPS_FEATURE_FLAGS=TerraformJSON
-kops update cluster .....
-```
-
-This is an alternative to of using terraforms own configuration syntax HCL. Be sure to delete the existing kubernetes.tf file. Terraform will otherwise use both and then complain. 

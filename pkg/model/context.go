@@ -21,9 +21,11 @@ import (
 	"net"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/apis/kops/model"
 	"k8s.io/kops/pkg/apis/kops/util"
+	"k8s.io/kops/pkg/kubemanifest"
 	"k8s.io/kops/pkg/model/components"
 	"k8s.io/kops/pkg/model/iam"
 	nodeidentityaws "k8s.io/kops/pkg/nodeidentity/aws"
@@ -31,6 +33,10 @@ import (
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awstasks"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
+	"k8s.io/kops/upup/pkg/fi/cloudup/gce"
+	"k8s.io/kops/upup/pkg/fi/cloudup/hetzner"
+	"k8s.io/kops/upup/pkg/fi/cloudup/linode"
+	"k8s.io/kops/upup/pkg/fi/cloudup/scaleway"
 
 	"github.com/blang/semver/v4"
 	utilnet "k8s.io/apimachinery/pkg/util/net"
@@ -44,9 +50,21 @@ const (
 // KopsModelContext is the kops model
 type KopsModelContext struct {
 	iam.IAMModelContext
+
+	// AllInstanceGroups is the list of instance groups in the cluster.
+	// Generally most tasks should use InstanceGroups instead,
+	// but we sometimes need the full list for example when configuring cluster-wide IAM.
+	AllInstanceGroups []*kops.InstanceGroup
+
+	// InstanceGroups is the list of instance groups in the cluster that are being processed.
+	// This is a filtered list of AllInstanceGroups.
 	InstanceGroups []*kops.InstanceGroup
-	Region         string
-	SSHPublicKeys  [][]byte
+
+	Region        string
+	SSHPublicKeys [][]byte
+
+	// AdditionalObjects holds cluster-asssociated configuration objects, other than the Cluster and InstanceGroups.
+	AdditionalObjects kubemanifest.ObjectList
 }
 
 // GatherSubnets maps the subnet names in an InstanceGroup to the ClusterSubnetSpec objects (which are stored on the Cluster)
@@ -56,8 +74,8 @@ func (b *KopsModelContext) GatherSubnets(ig *kops.InstanceGroup) ([]*kops.Cluste
 
 	for _, subnetName := range ig.Spec.Subnets {
 		var matches []*kops.ClusterSubnetSpec
-		for i := range b.Cluster.Spec.Subnets {
-			clusterSubnet := &b.Cluster.Spec.Subnets[i]
+		for i := range b.Cluster.Spec.Networking.Subnets {
+			clusterSubnet := &b.Cluster.Spec.Networking.Subnets[i]
 			if clusterSubnet.Name == subnetName {
 				matches = append(matches, clusterSubnet)
 			}
@@ -86,7 +104,7 @@ func (b *KopsModelContext) GatherSubnets(ig *kops.InstanceGroup) ([]*kops.Cluste
 
 // FindInstanceGroup returns the instance group with the matching Name (or nil if not found)
 func (b *KopsModelContext) FindInstanceGroup(name string) *kops.InstanceGroup {
-	for _, ig := range b.InstanceGroups {
+	for _, ig := range b.AllInstanceGroups {
 		if ig.ObjectMeta.Name == name {
 			return ig
 		}
@@ -104,11 +122,12 @@ func (b *KopsModelContext) FindZonesForInstanceGroup(ig *kops.InstanceGroup) ([]
 	return model.FindZonesForInstanceGroup(b.Cluster, ig)
 }
 
-// MasterInstanceGroups returns InstanceGroups with the master role
+// MasterInstanceGroups returns the instance groups with the control-plane role,
+// including those not being updated
 func (b *KopsModelContext) MasterInstanceGroups() []*kops.InstanceGroup {
 	var groups []*kops.InstanceGroup
-	for _, ig := range b.InstanceGroups {
-		if !ig.IsMaster() {
+	for _, ig := range b.AllInstanceGroups {
+		if !ig.IsControlPlane() {
 			continue
 		}
 		groups = append(groups, ig)
@@ -120,7 +139,7 @@ func (b *KopsModelContext) MasterInstanceGroups() []*kops.InstanceGroup {
 func (b *KopsModelContext) NodeInstanceGroups() []*kops.InstanceGroup {
 	var groups []*kops.InstanceGroup
 	for _, ig := range b.InstanceGroups {
-		if ig.Spec.Role != kops.InstanceGroupRoleNode {
+		if !ig.Spec.Role.HasNode() {
 			continue
 		}
 		groups = append(groups, ig)
@@ -129,6 +148,8 @@ func (b *KopsModelContext) NodeInstanceGroups() []*kops.InstanceGroup {
 }
 
 // CloudTagsForInstanceGroup computes the tags to apply to instances in the specified InstanceGroup
+//
+// TODO: The cloud provider specific logic should be moved to relevant model packages.
 func (b *KopsModelContext) CloudTagsForInstanceGroup(ig *kops.InstanceGroup) (map[string]string, error) {
 	labels := b.CloudTags(b.AutoscalingGroupName(ig), false)
 
@@ -142,53 +163,107 @@ func (b *KopsModelContext) CloudTagsForInstanceGroup(ig *kops.InstanceGroup) (ma
 		labels[k] = v
 	}
 
-	// Apply NTH Labels
-	nth := b.Cluster.Spec.NodeTerminationHandler
-	if nth != nil && fi.BoolValue(nth.Enabled) && fi.BoolValue(nth.EnableSQSTerminationDraining) {
-		labels[fi.StringValue(nth.ManagedASGTag)] = ""
+	if b.Cluster.Spec.CloudProvider.AWS != nil {
+		// Apply NTH Labels
+		nth := b.Cluster.Spec.CloudProvider.AWS.NodeTerminationHandler
+		if nth.IsQueueMode() {
+			k := fi.ValueOf(nth.ManagedASGTag)
+			if _, ok := labels[k]; !ok && k != "" {
+				labels[k] = ""
+			}
+		}
 	}
 
 	// Apply labels for cluster autoscaler node labels
-	for k, v := range nodelabels.BuildNodeLabels(b.Cluster, ig) {
-		labels[nodeidentityaws.ClusterAutoscalerNodeTemplateLabel+k] = v
+	nodeLabels, err := nodelabels.BuildNodeLabels(b.Cluster, ig)
+	if err != nil {
+		return nil, fmt.Errorf("error building node labels: %w", err)
+	}
+	for k, v := range nodeLabels {
+		switch b.Cluster.GetCloudProvider() {
+		case kops.CloudProviderHetzner:
+			labels[hetzner.TagKubernetesNodeLabelPrefix+k] = v
+		case kops.CloudProviderGCE:
+			// TODO: Do nothing for now while we figure out how to address GCE label length limit of 63
+		case kops.CloudProviderLinode:
+			// Akamai (Linode) Cloud tags have a 50 character limit
+			// Only store the critical kops.k8s.io/instancegroup label
+			// Role labels will be derived from the instance role tag by the identifier
+			if k == linode.TagKubernetesInstanceGroup {
+				labels[k] = v
+			}
+		default:
+			labels[nodeidentityaws.ClusterAutoscalerNodeTemplateLabel+k] = v
+		}
 	}
 
 	// Apply labels for cluster autoscaler node taints
 	for _, v := range ig.Spec.Taints {
-		splits := strings.SplitN(v, "=", 2)
-		if len(splits) > 1 {
-			labels[clusterAutoscalerNodeTemplateTaint+splits[0]] = splits[1]
+		taint, err := util.ParseTaint(v)
+		if err != nil || taint["effect"] == "" {
+			continue
 		}
+		labels[clusterAutoscalerNodeTemplateTaint+taint["key"]] = taint["value"] + ":" + taint["effect"]
 	}
 
-	// The system tags take priority because the cluster likely breaks without them...
+	switch b.Cluster.GetCloudProvider() {
+	case kops.CloudProviderHetzner:
+		labels[hetzner.TagKubernetesInstanceRole] = string(ig.Spec.Role)
+		labels[hetzner.TagKubernetesClusterName] = b.ClusterName()
+		labels[hetzner.TagKubernetesInstanceGroup] = ig.Name
+		if ig.Spec.Role.HasNode() {
+			labels[hetzner.TagClusterAutoscalerNodeGroup] = ig.Name
+		}
+	case kops.CloudProviderGCE:
+		clusterLabel := gce.LabelForCluster(b.ClusterName())
+		roleLabel := gce.GceLabelNameRolePrefix + ig.Spec.Role.ToLowerString()
+		labels[clusterLabel.Key] = clusterLabel.Value
+		labels[roleLabel] = ig.Spec.Role.ToLowerString()
+		labels[gce.GceLabelNameInstanceGroup] = ig.ObjectMeta.Name
+		if ig.Spec.Role.HasControlPlane() {
+			labels[gce.GceLabelNameRolePrefix+"master"] = "master"
+		}
+	case kops.CloudProviderLinode:
+		labels[linode.TagKubernetesClusterName] = b.ClusterName()
+		labels[linode.TagKubernetesInstanceGroup] = ig.Name
+		labels[linode.TagKubernetesInstanceRole] = string(ig.Spec.Role)
+	default:
+		// The system tags take priority because the cluster likely breaks without them...
 
-	if ig.Spec.Role == kops.InstanceGroupRoleMaster {
-		labels[awstasks.CloudTagInstanceGroupRolePrefix+strings.ToLower(string(kops.InstanceGroupRoleMaster))] = "1"
+		if ig.Spec.Role.HasControlPlane() {
+			labels[awstasks.CloudTagInstanceGroupRolePrefix+"master"] = "1"
+			labels[awstasks.CloudTagInstanceGroupRolePrefix+kops.InstanceGroupRoleControlPlane.ToLowerString()] = "1"
+		}
+
+		if ig.Spec.Role.HasAPIServer() {
+			labels[awstasks.CloudTagInstanceGroupRolePrefix+strings.ToLower(string(kops.InstanceGroupRoleAPIServer))] = "1"
+		}
+
+		if ig.Spec.Role.HasNode() {
+			labels[awstasks.CloudTagInstanceGroupRolePrefix+strings.ToLower(string(kops.InstanceGroupRoleNode))] = "1"
+		}
+
+		if ig.Spec.Role.HasBastion() {
+			labels[awstasks.CloudTagInstanceGroupRolePrefix+strings.ToLower(string(kops.InstanceGroupRoleBastion))] = "1"
+		}
+
+		labels[nodeidentityaws.CloudTagInstanceGroupName] = ig.Name
 	}
-
-	if ig.Spec.Role == kops.InstanceGroupRoleAPIServer {
-		labels[awstasks.CloudTagInstanceGroupRolePrefix+strings.ToLower(string(kops.InstanceGroupRoleAPIServer))] = "1"
-	}
-
-	if ig.Spec.Role == kops.InstanceGroupRoleNode {
-		labels[awstasks.CloudTagInstanceGroupRolePrefix+strings.ToLower(string(kops.InstanceGroupRoleNode))] = "1"
-	}
-
-	if ig.Spec.Role == kops.InstanceGroupRoleBastion {
-		labels[awstasks.CloudTagInstanceGroupRolePrefix+strings.ToLower(string(kops.InstanceGroupRoleBastion))] = "1"
-	}
-
-	labels[nodeidentityaws.CloudTagInstanceGroupName] = ig.Name
-
 	return labels, nil
+}
+
+func (b *KopsModelContext) CloudTagsForServiceAccount(name string, sa types.NamespacedName) map[string]string {
+	tags := b.CloudTags(name, false)
+	tags[awstasks.CloudTagServiceAccountName] = sa.Name
+	tags[awstasks.CloudTagServiceAccountNamespace] = strings.ReplaceAll(sa.Namespace, "*", "wildcard")
+	return tags
 }
 
 // CloudTags computes the tags to apply to a normal cloud resource with the specified name
 func (b *KopsModelContext) CloudTags(name string, shared bool) map[string]string {
 	tags := make(map[string]string)
 
-	switch kops.CloudProviderID(b.Cluster.Spec.CloudProvider) {
+	switch b.Cluster.GetCloudProvider() {
 	case kops.CloudProviderAWS:
 		if shared {
 			// If the resource is shared, we don't try to set the Name - we presume that is managed externally
@@ -219,28 +294,23 @@ func (b *KopsModelContext) CloudTags(name string, shared bool) map[string]string
 				tags[k] = v
 			}
 		}
-
+	case kops.CloudProviderScaleway:
+		for k, v := range b.Cluster.Spec.CloudLabels {
+			if k == scaleway.TagClusterName && shared {
+				klog.V(4).Infof("Skipping %q tag for shared resource", scaleway.TagClusterName)
+				continue
+			}
+			tags[k] = v
+		}
+	case kops.CloudProviderHetzner:
+		tags[hetzner.TagKubernetesClusterName] = b.ClusterName()
 	}
 	return tags
 }
 
-// UseKopsControllerForNodeBootstrap checks if nodeup should use kops-controller to bootstrap.
-func (b *KopsModelContext) UseKopsControllerForNodeBootstrap() bool {
-	return model.UseKopsControllerForNodeBootstrap(b.Cluster)
-}
-
-// UseBootstrapTokens checks if bootstrap tokens are enabled
-func (b *KopsModelContext) UseBootstrapTokens() bool {
-	if b.Cluster.Spec.KubeAPIServer == nil || b.UseKopsControllerForNodeBootstrap() {
-		return false
-	}
-
-	return fi.BoolValue(b.Cluster.Spec.KubeAPIServer.EnableBootstrapAuthToken)
-}
-
 // UsesBastionDns checks if we should use a specific name for the bastion dns
 func (b *KopsModelContext) UsesBastionDns() bool {
-	if b.Cluster.Spec.Topology.Bastion != nil && b.Cluster.Spec.Topology.Bastion.BastionPublicName != "" {
+	if b.Cluster.Spec.Networking.Topology.Bastion != nil && b.Cluster.Spec.Networking.Topology.Bastion.PublicName != "" {
 		return true
 	}
 	return false
@@ -248,8 +318,8 @@ func (b *KopsModelContext) UsesBastionDns() bool {
 
 // UsesSSHBastion checks if we have a Bastion in the cluster
 func (b *KopsModelContext) UsesSSHBastion() bool {
-	for _, ig := range b.InstanceGroups {
-		if ig.Spec.Role == kops.InstanceGroupRoleBastion {
+	for _, ig := range b.AllInstanceGroups {
+		if ig.Spec.Role.HasBastion() {
 			return true
 		}
 	}
@@ -259,9 +329,6 @@ func (b *KopsModelContext) UsesSSHBastion() bool {
 
 // UseLoadBalancerForAPI checks if we are using a load balancer for the kubeapi
 func (b *KopsModelContext) UseLoadBalancerForAPI() bool {
-	if b.Cluster.Spec.API == nil {
-		return false
-	}
 	return b.Cluster.Spec.API.LoadBalancer != nil
 }
 
@@ -270,44 +337,12 @@ func (b *KopsModelContext) UseLoadBalancerForAPI() bool {
 // HA - see https://github.com/kubernetes/kops/issues/4252
 func (b *KopsModelContext) UseLoadBalancerForInternalAPI() bool {
 	return b.UseLoadBalancerForAPI() &&
-		b.Cluster.Spec.API.LoadBalancer.UseForInternalApi
-}
-
-// APILoadBalancerClass returns which type of load balancer to use for the api
-func (b *KopsModelContext) APILoadBalancerClass() kops.LoadBalancerClass {
-	if b.Cluster.Spec.API != nil && b.Cluster.Spec.API.LoadBalancer != nil {
-		return b.Cluster.Spec.API.LoadBalancer.Class
-	}
-	return kops.LoadBalancerClassClassic
-}
-
-// UsePrivateDNS checks if we are using private DNS
-func (b *KopsModelContext) UsePrivateDNS() bool {
-	topology := b.Cluster.Spec.Topology
-	if topology != nil && topology.DNS != nil {
-		switch topology.DNS.Type {
-		case kops.DNSTypePublic:
-			return false
-		case kops.DNSTypePrivate:
-			return true
-
-		default:
-			klog.Warningf("Unknown DNS type %q", topology.DNS.Type)
-			return false
-		}
-	}
-
-	return false
-}
-
-// UseClassicLoadBalancer checks if we are using Classic LoadBalancer
-func (b *KopsModelContext) UseClassicLoadBalancer() bool {
-	return b.Cluster.Spec.API.LoadBalancer.Class == kops.LoadBalancerClassClassic
+		b.Cluster.Spec.API.LoadBalancer.UseForInternalAPI
 }
 
 // UseNetworkLoadBalancer checks if we are using Network LoadBalancer
 func (b *KopsModelContext) UseNetworkLoadBalancer() bool {
-	return b.Cluster.Spec.API.LoadBalancer.Class == kops.LoadBalancerClassNetwork
+	return b.Cluster.Spec.API.LoadBalancer != nil && b.Cluster.Spec.API.LoadBalancer.Class == kops.LoadBalancerClassNetwork
 }
 
 // UseSSHKey returns true if SSHKeyName from the cluster spec is set to a nonempty string
@@ -351,28 +386,9 @@ func (b *KopsModelContext) IsIPv6Only() bool {
 	return b.Cluster.Spec.IsIPv6Only()
 }
 
-func (b *KopsModelContext) UseIPv6ForAPI() bool {
-	for _, ig := range b.InstanceGroups {
-		if ig.Spec.Role != kops.InstanceGroupRoleMaster && ig.Spec.Role != kops.InstanceGroupRoleAPIServer {
-			break
-		}
-		for _, igSubnetName := range ig.Spec.Subnets {
-			for _, clusterSubnet := range b.Cluster.Spec.Subnets {
-				if igSubnetName != clusterSubnet.Name {
-					continue
-				}
-				if clusterSubnet.IPv6CIDR != "" {
-					return true
-				}
-			}
-		}
-	}
-	return false
-}
-
 // WellKnownServiceIP returns a service ip with the service cidr
 func (b *KopsModelContext) WellKnownServiceIP(id int) (net.IP, error) {
-	return components.WellKnownServiceIP(&b.Cluster.Spec, id)
+	return components.WellKnownServiceIP(&b.Cluster.Spec.Networking, id)
 }
 
 // NodePortRange returns the range of ports allocated to NodePorts
@@ -393,12 +409,16 @@ func (b *KopsModelContext) NodePortRange() (utilnet.PortRange, error) {
 
 // UseServiceAccountExternalPermissions returns true if we are using service-account bound IAM roles.
 func (b *KopsModelContext) UseServiceAccountExternalPermissions() bool {
-
 	return b.Cluster.Spec.IAM != nil &&
-		fi.BoolValue(b.Cluster.Spec.IAM.UseServiceAccountExternalPermissions)
+		fi.ValueOf(b.Cluster.Spec.IAM.UseServiceAccountExternalPermissions)
 }
 
 // NetworkingIsCalico returns true if we are using calico networking
 func (b *KopsModelContext) NetworkingIsCalico() bool {
-	return b.Cluster.Spec.Networking != nil && b.Cluster.Spec.Networking.Calico != nil
+	return b.Cluster.Spec.Networking.Calico != nil
+}
+
+// NetworkingIsCilium returns true if we are using cilium networking
+func (b *KopsModelContext) NetworkingIsCilium() bool {
+	return b.Cluster.Spec.Networking.Cilium != nil
 }

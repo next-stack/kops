@@ -20,9 +20,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/gophercloud/gophercloud/openstack/loadbalancer/v2/loadbalancers"
-	"github.com/gophercloud/gophercloud/openstack/loadbalancer/v2/monitors"
-	"github.com/gophercloud/gophercloud/openstack/networking/v2/subnets"
+	"github.com/gophercloud/gophercloud/v2/openstack/loadbalancer/v2/loadbalancers"
+	"github.com/gophercloud/gophercloud/v2/openstack/loadbalancer/v2/monitors"
+	"github.com/gophercloud/gophercloud/v2/openstack/networking/v2/subnets"
 	"k8s.io/klog/v2"
 	"k8s.io/kops/pkg/resources"
 	"k8s.io/kops/upup/pkg/fi"
@@ -39,10 +39,7 @@ const (
 func (os *clusterDiscoveryOS) DeleteSubnetLBs(subnet subnets.Subnet) ([]*resources.Resource, error) {
 	var resourceTrackers []*resources.Resource
 
-	preExistingSubnet := false
-	if !strings.HasSuffix(subnet.Name, os.clusterName) {
-		preExistingSubnet = true
-	}
+	preExistingSubnet := !strings.HasSuffix(subnet.Name, os.clusterName)
 
 	opts := loadbalancers.ListOpts{
 		VipSubnetID: subnet.ID,
@@ -83,7 +80,7 @@ func (os *clusterDiscoveryOS) DeleteSubnetLBs(subnet subnets.Subnet) ([]*resourc
 			continue
 		}
 
-		//Identify pools associated to this LB
+		// Identify pools associated to this LB
 		for _, pool := range lb.Pools {
 
 			monitorList, err := os.cloud.(openstack.OpenstackCloud).ListMonitors(monitors.ListOpts{
@@ -115,7 +112,7 @@ func (os *clusterDiscoveryOS) DeleteSubnetLBs(subnet subnets.Subnet) ([]*resourc
 			resourceTrackers = append(resourceTrackers, resourceTracker)
 		}
 
-		//Identify listeners associated to this LB
+		// Identify listeners associated to this LB
 		for _, listener := range lb.Listeners {
 			resourceTracker := &resources.Resource{
 				Name: listener.Name,

@@ -27,15 +27,15 @@ type ResourceGroupModelBuilder struct {
 	Lifecycle fi.Lifecycle
 }
 
-var _ fi.ModelBuilder = &ResourceGroupModelBuilder{}
+var _ fi.CloudupModelBuilder = &ResourceGroupModelBuilder{}
 
 // Build builds a task for creating a Resource Group.
-func (b *ResourceGroupModelBuilder) Build(c *fi.ModelBuilderContext) error {
+func (b *ResourceGroupModelBuilder) Build(c *fi.CloudupModelBuilderContext) error {
 	t := &azuretasks.ResourceGroup{
-		Name:      fi.String(b.NameForResourceGroup()),
+		Name:      new(b.NameForResourceGroup()),
 		Lifecycle: b.Lifecycle,
 		Tags:      map[string]*string{},
-		Shared:    fi.Bool(b.Cluster.IsSharedAzureResourceGroup()),
+		Shared:    new(b.Cluster.IsSharedAzureResourceGroup()),
 	}
 	c.AddTask(t)
 	return nil

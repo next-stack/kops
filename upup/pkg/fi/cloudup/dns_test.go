@@ -21,45 +21,98 @@ import (
 	"sort"
 	"testing"
 
+	"k8s.io/kops/dnsprovider/pkg/dnsprovider/rrstype"
 	"k8s.io/kops/pkg/apis/kops"
 )
 
 func TestPrecreateDNSNames(t *testing.T) {
-
 	grid := []struct {
 		cluster  *kops.Cluster
-		expected []string
+		expected []recordKey
 	}{
 		{
-			cluster: &kops.Cluster{},
-			expected: []string{
-				"api.cluster1.example.com",
-				"api.internal.cluster1.example.com",
-			},
-		},
-		{
 			cluster: &kops.Cluster{
 				Spec: kops.ClusterSpec{
-					API: &kops.AccessSpec{
+					API: kops.APISpec{
 						LoadBalancer: &kops.LoadBalancerAccessSpec{},
 					},
+					CloudProvider: kops.CloudProviderSpec{
+						AWS: &kops.AWSSpec{},
+					},
 				},
 			},
-			expected: []string{
-				"api.internal.cluster1.example.com",
+			expected: []recordKey{
+				{"api.internal.cluster1.example.com", rrstype.A},
+				{"kops-controller.internal.cluster1.example.com", rrstype.A},
 			},
 		},
 		{
 			cluster: &kops.Cluster{
 				Spec: kops.ClusterSpec{
-					API: &kops.AccessSpec{
-						LoadBalancer: &kops.LoadBalancerAccessSpec{
-							UseForInternalApi: true,
-						},
+					API: kops.APISpec{
+						LoadBalancer: &kops.LoadBalancerAccessSpec{},
+					},
+					CloudProvider: kops.CloudProviderSpec{
+						AWS: &kops.AWSSpec{},
+					},
+					Networking: kops.NetworkingSpec{
+						NonMasqueradeCIDR: "::/0",
 					},
 				},
 			},
-			expected: []string{},
+			expected: []recordKey{
+				{"api.internal.cluster1.example.com", rrstype.AAAA},
+				{"kops-controller.internal.cluster1.example.com", rrstype.AAAA},
+			},
+		},
+		{
+			cluster: &kops.Cluster{
+				Spec: kops.ClusterSpec{
+					API: kops.APISpec{
+						LoadBalancer: &kops.LoadBalancerAccessSpec{
+							UseForInternalAPI: true,
+						},
+					},
+					CloudProvider: kops.CloudProviderSpec{
+						AWS: &kops.AWSSpec{},
+					},
+				},
+			},
+			expected: []recordKey{
+				{"kops-controller.internal.cluster1.example.com", rrstype.A},
+			},
+		},
+		{
+			cluster: &kops.Cluster{
+				Spec: kops.ClusterSpec{
+					CloudProvider: kops.CloudProviderSpec{
+						AWS: &kops.AWSSpec{},
+					},
+				},
+			},
+			expected: []recordKey{
+				{"api.cluster1.example.com", rrstype.A},
+				{"api.internal.cluster1.example.com", rrstype.A},
+				{"kops-controller.internal.cluster1.example.com", rrstype.A},
+			},
+		},
+		{
+			cluster: &kops.Cluster{
+				Spec: kops.ClusterSpec{
+					CloudProvider: kops.CloudProviderSpec{
+						AWS: &kops.AWSSpec{},
+					},
+					Networking: kops.NetworkingSpec{
+						NonMasqueradeCIDR: "::/0",
+					},
+				},
+			},
+			expected: []recordKey{
+				{"api.cluster1.example.com", rrstype.A},
+				{"api.cluster1.example.com", rrstype.AAAA},
+				{"api.internal.cluster1.example.com", rrstype.AAAA},
+				{"kops-controller.internal.cluster1.example.com", rrstype.AAAA},
+			},
 		},
 	}
 
@@ -67,8 +120,7 @@ func TestPrecreateDNSNames(t *testing.T) {
 		cluster := g.cluster
 
 		cluster.ObjectMeta.Name = "cluster1.example.com"
-		cluster.Spec.MasterPublicName = "api." + cluster.ObjectMeta.Name
-		cluster.Spec.MasterInternalName = "api.internal." + cluster.ObjectMeta.Name
+		cluster.Spec.API.PublicName = "api." + cluster.ObjectMeta.Name
 		cluster.Spec.EtcdClusters = []kops.EtcdClusterSpec{
 			{
 				Name: "main",
@@ -91,11 +143,41 @@ func TestPrecreateDNSNames(t *testing.T) {
 		actual := buildPrecreateDNSHostnames(cluster)
 
 		expected := g.expected
-		sort.Strings(actual)
-		sort.Strings(expected)
+		sort.Slice(actual, func(i, j int) bool {
+			if actual[i].hostname < actual[j].hostname {
+				return true
+			}
+			if actual[i].hostname == actual[j].hostname && actual[i].rrsType < actual[j].rrsType {
+				return true
+			}
+			return false
+		})
 
 		if !reflect.DeepEqual(expected, actual) {
 			t.Errorf("unexpected records.  expected=%v actual=%v", expected, actual)
+		}
+	}
+}
+
+func TestExternalDNSOwnerTXTName(t *testing.T) {
+	grid := []struct {
+		key      recordKey
+		expected string
+	}{
+		{
+			key:      recordKey{hostname: "api.internal.cluster1.example.com.", rrsType: rrstype.A},
+			expected: "a-api.internal.cluster1.example.com.",
+		},
+		{
+			key:      recordKey{hostname: "kops-controller.internal.cluster1.example.com.", rrsType: rrstype.AAAA},
+			expected: "aaaa-kops-controller.internal.cluster1.example.com.",
+		},
+	}
+
+	for _, g := range grid {
+		actual := externalDNSOwnerTXTName(g.key)
+		if actual != g.expected {
+			t.Errorf("unexpected TXT name for %v: expected %q, got %q", g.key, g.expected, actual)
 		}
 	}
 }

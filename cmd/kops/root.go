@@ -28,6 +28,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/homedir"
@@ -35,7 +37,6 @@ import (
 	"k8s.io/kops/cmd/kops/util"
 	kopsapi "k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/client/simple"
-	"k8s.io/kops/pkg/commands"
 	"k8s.io/kops/pkg/commands/commandutils"
 	"k8s.io/kubectl/pkg/util/i18n"
 	"k8s.io/kubectl/pkg/util/templates"
@@ -89,18 +90,24 @@ var rootCommand = RootCmd{
 	},
 }
 
-func Execute() {
+func Execute(ctx context.Context) error {
+	ctx, span := tracer.Start(ctx, "kops", trace.WithAttributes(attribute.StringSlice("args", os.Args)))
+	defer span.End()
+
 	goflag.Set("logtostderr", "true")
 	goflag.CommandLine.Parse([]string{})
-	if err := rootCommand.cobraCommand.Execute(); err != nil {
-		os.Exit(1)
-	}
+	return rootCommand.cobraCommand.ExecuteContext(ctx)
 }
 
 func init() {
 	cobra.OnInitialize(initConfig)
 
 	klog.InitFlags(nil)
+	// Opt into the new klog behavior so that -stderrthreshold is honored even
+	// when -logtostderr=true (the default).
+	// Ref: kubernetes/klog#212, kubernetes/klog#432
+	_ = goflag.Set("legacy_stderr_threshold_behavior", "false")
+	_ = goflag.Set("stderrthreshold", "INFO")
 
 	factory := util.NewFactory(&rootCommand.FactoryOptions)
 	rootCommand.factory = factory
@@ -109,15 +116,33 @@ func init() {
 }
 
 func NewCmdRoot(f *util.Factory, out io.Writer) *cobra.Command {
-
 	cmd := rootCommand.cobraCommand
 
-	//cmd.PersistentFlags().AddGoFlagSet(goflag.CommandLine)
+	// cmd.PersistentFlags().AddGoFlagSet(goflag.CommandLine)
 	goflag.CommandLine.VisitAll(func(goflag *goflag.Flag) {
 		switch goflag.Name {
 		case "cloud-provider-gce-lb-src-cidrs":
 		case "cloud-provider-gce-l7lb-src-cidrs":
 			// Skip; these is dragged in by the google cloudprovider dependency
+
+		// Hide klog flags that just clutter the --help output; they are still supported, we just don't show them
+		case "add_dir_header",
+			"alsologtostderr",
+			"log_backtrace_at",
+			"log_dir",
+			"log_file",
+			"log_file_max_size",
+			"logtostderr",
+			"one_output",
+			"s2a_enable_appengine_dialer",
+			"s2a_timeout",
+			"skip_headers",
+			"skip_log_headers",
+			"stderrthreshold",
+			"vmodule":
+			// We keep "v" as that flag is generally useful
+			cmd.PersistentFlags().AddGoFlag(goflag)
+			cmd.PersistentFlags().Lookup(goflag.Name).Hidden = true
 
 		default:
 			cmd.PersistentFlags().AddGoFlag(goflag)
@@ -148,8 +173,9 @@ func NewCmdRoot(f *util.Factory, out io.Writer) *cobra.Command {
 	cmd.AddCommand(NewCmdExport(f, out))
 	cmd.AddCommand(NewCmdGenCLIDocs(f, out))
 	cmd.AddCommand(NewCmdGet(f, out))
-	cmd.AddCommand(commands.NewCmdHelpers(f, out))
+	cmd.AddCommand(NewCmdHelpers(f, out))
 	cmd.AddCommand(NewCmdPromote(f, out))
+	cmd.AddCommand(NewCmdReconcile(f, out))
 	cmd.AddCommand(NewCmdReplace(f, out))
 	cmd.AddCommand(NewCmdRollingUpdate(f, out))
 	cmd.AddCommand(NewCmdToolbox(f, out))
@@ -232,9 +258,21 @@ func (c *RootCmd) clusterNameArgsNoKubeconfig(clusterName *string) func(cmd *cob
 	}
 }
 
+func (c *RootCmd) clusterNameArgsAllowNoCluster(clusterName *string) func(cmd *cobra.Command, args []string) error {
+	return func(cmd *cobra.Command, args []string) error {
+		if err := c.ProcessArgs(args); err != nil {
+			return err
+		}
+
+		*clusterName = c.clusterName
+		return nil
+	}
+}
+
 // ProcessArgs will parse the positional args.  It assumes one of these formats:
-//  * <no arguments at all>
-//  * <clustername> (and --name not specified)
+//   - <no arguments at all>
+//   - <clustername> (and --name not specified)
+//
 // Everything else is an error.
 func (c *RootCmd) ProcessArgs(args []string) error {
 	if len(args) == 0 {
@@ -301,7 +339,7 @@ func GetCluster(ctx context.Context, factory commandutils.Factory, clusterName s
 		return nil, field.Required(field.NewPath("clusterName"), "Cluster name is required")
 	}
 
-	clientset, err := factory.Clientset()
+	clientset, err := factory.KopsClient()
 	if err != nil {
 		return nil, err
 	}
@@ -330,7 +368,6 @@ func GetClusterNameForCompletionNoKubeconfig(clusterArgs []string) (clusterName 
 	}
 
 	return "", []string{"--name"}, cobra.ShellCompDirectiveNoFileComp
-
 }
 
 func GetClusterForCompletion(ctx context.Context, factory commandutils.Factory, clusterArgs []string) (cluster *kopsapi.Cluster, clientSet simple.Clientset, completions []string, directive cobra.ShellCompDirective) {
@@ -352,7 +389,7 @@ func GetClusterForCompletion(ctx context.Context, factory commandutils.Factory, 
 		return nil, nil, completions, directive
 	}
 
-	clientSet, err = factory.Clientset()
+	clientSet, err = factory.KopsClient()
 	if err != nil {
 		completions, directive := commandutils.CompletionError("getting clientset", err)
 		return nil, nil, completions, directive

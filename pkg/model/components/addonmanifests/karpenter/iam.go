@@ -1,0 +1,70 @@
+/*
+Copyright 2021 The Kubernetes Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package karpenter
+
+import (
+	"k8s.io/apimachinery/pkg/types"
+
+	"k8s.io/kops/pkg/model/iam"
+	"k8s.io/kops/upup/pkg/fi"
+)
+
+// ServiceAccount represents the service-account used by Karpenter.
+// It implements iam.Subject to get AWS IAM permissions.
+type ServiceAccount struct{}
+
+var _ iam.Subject = &ServiceAccount{}
+
+// BuildAWSPolicy generates a custom policy for a ServiceAccount IAM role.
+func (r *ServiceAccount) BuildAWSPolicy(b *iam.PolicyBuilder) (*iam.Policy, error) {
+	clusterName := b.Cluster.ObjectMeta.Name
+	p := iam.NewPolicy(clusterName, b.Partition, b.Region)
+
+	// Instance groups with custom IAM instance profiles contain roles with names that kOps
+	// cannot predict.
+	useCustomInstanceProfiles := false
+	// The generated EC2NodeClass block device mapping carries the root volume encryption key, which
+	// Karpenter has to be authorized to use.
+	useCustomerManagedKeys := false
+	for _, ig := range b.AllInstanceGroups {
+		if !ig.IsKarpenterManaged() {
+			continue
+		}
+		if ig.Spec.IAM != nil && ig.Spec.IAM.Profile != nil {
+			useCustomInstanceProfiles = true
+		}
+		if rootVolume := ig.Spec.RootVolume; rootVolume != nil {
+			if fi.ValueOf(rootVolume.Encryption) && fi.ValueOf(rootVolume.EncryptionKey) != "" {
+				useCustomerManagedKeys = true
+			}
+		}
+	}
+
+	if err := iam.AddKarpenterPermissions(p, useCustomInstanceProfiles, useCustomerManagedKeys); err != nil {
+		return nil, err
+	}
+
+	return p, nil
+}
+
+// ServiceAccount returns the kubernetes service account used.
+func (r *ServiceAccount) ServiceAccount() (types.NamespacedName, bool) {
+	return types.NamespacedName{
+		Namespace: "kube-system",
+		Name:      "karpenter",
+	}, true
+}

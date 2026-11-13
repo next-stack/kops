@@ -21,7 +21,8 @@ import (
 	"regexp"
 	"testing"
 
-	"github.com/aws/amazon-ec2-instance-selector/v2/pkg/cli"
+	"github.com/aws/amazon-ec2-instance-selector/v3/pkg/cli"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"k8s.io/kops/pkg/apis/kops"
 )
 
@@ -142,7 +143,7 @@ func TestValidateUserSubnetsWithClusterSubnets(t *testing.T) {
 func TestCreateInstanceGroup(t *testing.T) {
 	zones := []string{"us-east-2a", "us-east-2b", "us-east-2c"}
 	actualIG := createInstanceGroup("testGroup", "clusterTest", zones)
-	if actualIG.Spec.Role != kops.InstanceGroupRoleNode {
+	if !actualIG.Spec.Role.HasNode() {
 		t.Fatalf("instance group should have the \"%s\" role but got %s", kops.InstanceGroupRoleNode, actualIG.Spec.Role)
 	}
 	if !reflect.DeepEqual(actualIG.Spec.Subnets, zones) {
@@ -165,8 +166,8 @@ func TestDecorateWithInstanceGroupSpecs(t *testing.T) {
 	if *actualIG.Spec.MinSize != instanceGroupOpts.NodeCountMin {
 		t.Fatalf("expected instance group MinSize to be %d but got %d", instanceGroupOpts.NodeCountMin, actualIG.Spec.MinSize)
 	}
-	if *actualIG.Spec.RootVolumeSize != *instanceGroupOpts.NodeVolumeSize {
-		t.Fatalf("expected instance group RootVolumeSize to be %d but got %d", instanceGroupOpts.NodeVolumeSize, actualIG.Spec.RootVolumeSize)
+	if *actualIG.Spec.RootVolume.Size != *instanceGroupOpts.NodeVolumeSize {
+		t.Fatalf("expected instance group RootVolumeSize to be %d but got %d", instanceGroupOpts.NodeVolumeSize, actualIG.Spec.RootVolume.Size)
 	}
 	if !reflect.DeepEqual(actualIG.Spec.AdditionalSecurityGroups, instanceGroupOpts.NodeSecurityGroups) {
 		t.Fatalf("expected instance group MaxSize to be %d but got %d", instanceGroupOpts.NodeCountMax, actualIG.Spec.MaxSize)
@@ -175,7 +176,7 @@ func TestDecorateWithInstanceGroupSpecs(t *testing.T) {
 
 func TestDecorateWithMixedInstancesPolicy(t *testing.T) {
 	selectedInstanceTypes := []string{"m3.medium", "m4.medium", "m5.medium"}
-	usageClasses := []string{"spot", "on-demand"}
+	usageClasses := []ec2types.UsageClassType{ec2types.UsageClassTypeSpot, ec2types.UsageClassTypeOnDemand}
 	for _, usageClass := range usageClasses {
 		actualIG, err := decorateWithMixedInstancesPolicy(&kops.InstanceGroup{}, usageClass, selectedInstanceTypes)
 		if err != nil {

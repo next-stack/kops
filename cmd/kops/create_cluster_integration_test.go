@@ -19,20 +19,22 @@ package main
 import (
 	"bytes"
 	"context"
-	"io/ioutil"
+	"os"
 	"path"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+
 	"k8s.io/kops/cloudmock/aws/mockec2"
 	"k8s.io/kops/cmd/kops/util"
 	"k8s.io/kops/pkg/apis/kops"
+	"k8s.io/kops/pkg/featureflag"
 	"k8s.io/kops/pkg/kopscodecs"
 	"k8s.io/kops/pkg/testutils"
 	"k8s.io/kops/pkg/testutils/golden"
@@ -44,12 +46,50 @@ var MagicTimestamp = metav1.Time{Time: time.Date(2017, 1, 1, 0, 0, 0, 0, time.UT
 
 // TestCreateClusterMinimal runs kops create cluster minimal.example.com --zones us-test-1a
 func TestCreateClusterMinimal(t *testing.T) {
-	runCreateClusterIntegrationTest(t, "../../tests/integration/create_cluster/minimal-1.18", "v1alpha2")
-	runCreateClusterIntegrationTest(t, "../../tests/integration/create_cluster/minimal-1.19", "v1alpha2")
-	runCreateClusterIntegrationTest(t, "../../tests/integration/create_cluster/minimal-1.20", "v1alpha2")
-	runCreateClusterIntegrationTest(t, "../../tests/integration/create_cluster/minimal-1.21", "v1alpha2")
-	runCreateClusterIntegrationTest(t, "../../tests/integration/create_cluster/minimal-1.22", "v1alpha2")
-	runCreateClusterIntegrationTest(t, "../../tests/integration/create_cluster/minimal-1.23", "v1alpha2")
+	runCreateClusterIntegrationTest(t, "../../tests/integration/create_cluster/minimal-1.32", "v1alpha2")
+	runCreateClusterIntegrationTest(t, "../../tests/integration/create_cluster/minimal-1.35", "v1alpha2")
+	runCreateClusterIntegrationTest(t, "../../tests/integration/create_cluster/minimal-1.36", "v1alpha2")
+	runCreateClusterIntegrationTest(t, "../../tests/integration/create_cluster/minimal-arm64", "v1alpha2")
+	runCreateClusterIntegrationTest(t, "../../tests/integration/create_cluster/minimal-irsa", "v1alpha2")
+}
+
+// TestCreateClusterHetzner runs kops create cluster minimal.k8s.local --zones fsn1
+func TestCreateClusterHetzner(t *testing.T) {
+	t.Setenv("HCLOUD_TOKEN", "REDACTED")
+	runCreateClusterIntegrationTest(t, "../../tests/integration/create_cluster/ha_hetzner", "v1alpha2")
+	runCreateClusterIntegrationTest(t, "../../tests/integration/create_cluster/minimal_hetzner", "v1alpha2")
+}
+
+func TestCreateClusterOpenStack(t *testing.T) {
+	t.Setenv("OS_REGION_NAME", "us-test1")
+	runCreateClusterIntegrationTest(t, "../../tests/integration/create_cluster/ha_openstack", "v1alpha2")
+}
+
+func TestCreateClusterOpenStackOctavia(t *testing.T) {
+	t.Setenv("OS_REGION_NAME", "us-test1")
+	runCreateClusterIntegrationTest(t, "../../tests/integration/create_cluster/ha_openstack_octavia", "v1alpha2")
+}
+
+func TestCreateClusterOpenStackNoDNS(t *testing.T) {
+	t.Setenv("OS_REGION_NAME", "us-test1")
+	runCreateClusterIntegrationTest(t, "../../tests/integration/create_cluster/ha_openstack_nodns", "v1alpha2")
+}
+
+// TestCreateClusterCilium runs kops with the cilium networking flags
+// TestCreateClusterCalicoBPF verifies that --set cluster.spec.networking.calico.bpfEnabled=true
+// causes kops to default spec.kubeProxy.enabled=false, because Calico's BPF mode replaces
+// kube-proxy and from v3.31 binds the kube-proxy healthz port.
+func TestCreateClusterCalicoBPF(t *testing.T) {
+	runCreateClusterIntegrationTest(t, "../../tests/integration/create_cluster/calico_bpf", "v1alpha2")
+}
+
+func TestCreateClusterCilium(t *testing.T) {
+	runCreateClusterIntegrationTest(t, "../../tests/integration/create_cluster/cilium-eni", "v1alpha2")
+}
+
+// TestCreateClusterVolumeType tests the control plane volume type flag
+func TestCreateClusterVolumeType(t *testing.T) {
+	runCreateClusterIntegrationTest(t, "../../tests/integration/create_cluster/volume_type", "v1alpha2")
 }
 
 // TestCreateClusterOverride tests the override flag
@@ -57,15 +97,31 @@ func TestCreateClusterOverride(t *testing.T) {
 	runCreateClusterIntegrationTest(t, "../../tests/integration/create_cluster/overrides", "v1alpha2")
 }
 
+// TestCreateClusterKubernetesFeatureGates tests the override flag
+func TestCreateClusterKubernetesFeatureGates(t *testing.T) {
+	runCreateClusterIntegrationTest(t, "../../tests/integration/create_cluster/minimal_feature-gates", "v1alpha2")
+}
+
 // TestCreateClusterComplex runs kops create cluster, with a grab-bag of edge cases
 func TestCreateClusterComplex(t *testing.T) {
 	runCreateClusterIntegrationTest(t, "../../tests/integration/create_cluster/complex", "v1alpha2")
+}
+
+// TestCreateClusterComplexPrivate runs kops create cluster, with a grab-bag of edge cases
+func TestCreateClusterComplexPrivate(t *testing.T) {
+	runCreateClusterIntegrationTest(t, "../../tests/integration/create_cluster/complex-private", "v1alpha2")
 }
 
 // TestCreateClusterHA runs kops create cluster ha.example.com --zones us-test-1a,us-test-1b,us-test-1c --master-zones us-test-1a,us-test-1b,us-test-1c
 func TestCreateClusterHA(t *testing.T) {
 	runCreateClusterIntegrationTest(t, "../../tests/integration/create_cluster/ha", "v1alpha2")
 	runCreateClusterIntegrationTest(t, "../../tests/integration/create_cluster/ha_encrypt", "v1alpha2")
+}
+
+// TestCreateClusterMinimalGCE runs kops create cluster minimal.example.com --cloud gce --zones us-test1-a
+func TestCreateClusterMinimalGCE(t *testing.T) {
+	runCreateClusterIntegrationTest(t, "../../tests/integration/create_cluster/minimal-gce", "v1alpha2")
+	runCreateClusterIntegrationTest(t, "../../tests/integration/create_cluster/minimal-gce-dns-none", "v1alpha2")
 }
 
 // TestCreateClusterHAGCE runs kops create cluster ha-gce.example.com --cloud gce --zones us-test1-a,us-test1-b,us-test1-c --master-zones us-test1-a,us-test1-b,us-test1-c
@@ -76,6 +132,14 @@ func TestCreateClusterHAGCE(t *testing.T) {
 // TestCreateClusterGCE runs kops create cluster gce.example.com --cloud gce --zones us-test1-a --gce-service-account=test-account@testproject.iam.gserviceaccounts.com
 func TestCreateClusterGCE(t *testing.T) {
 	runCreateClusterIntegrationTest(t, "../../tests/integration/create_cluster/gce_byo_sa", "v1alpha2")
+}
+
+// TestCreateClusterExperimentalRoles tests kops create cluster with ExperimentalRoles and control-plane-count=0
+func TestCreateClusterExperimentalRoles(t *testing.T) {
+	featureflag.ParseFlags("+APIServerNodes,+ExperimentalRoles")
+	defer featureflag.ParseFlags("-APIServerNodes,-ExperimentalRoles")
+
+	runCreateClusterIntegrationTest(t, "../../tests/integration/create_cluster/experimental-roles", "v1alpha2")
 }
 
 // TestCreateClusterHASharedZone tests kops create cluster when the master count is bigger than the number of zones
@@ -133,6 +197,21 @@ func TestCreateClusterIPv6(t *testing.T) {
 	runCreateClusterIntegrationTest(t, "../../tests/integration/create_cluster/ipv6", "v1alpha2")
 }
 
+// TestCreateClusterDifferentAMIs runs kops create cluster with different AMI inputs
+func TestCreateClusterDifferentAMIs(t *testing.T) {
+	featureflag.ParseFlags("+APIServerNodes")
+	unsetFeatureFlags := func() {
+		featureflag.ParseFlags("-APIServerNodes")
+	}
+	defer unsetFeatureFlags()
+	runCreateClusterIntegrationTest(t, "../../tests/integration/create_cluster/different-amis", "v1alpha2")
+}
+
+// TestCreateClusterKarpenter runs kops create cluster --instance-manager=karpenter
+func TestCreateClusterKarpenter(t *testing.T) {
+	runCreateClusterIntegrationTest(t, "../../tests/integration/create_cluster/karpenter", "v1alpha2")
+}
+
 func runCreateClusterIntegrationTest(t *testing.T, srcDir string, version string) {
 	ctx := context.Background()
 
@@ -149,6 +228,7 @@ func runCreateClusterIntegrationTest(t *testing.T, srcDir string, version string
 
 	h.SetupMockAWS()
 	h.SetupMockGCE()
+	testutils.SetupMockOpenstack()
 
 	cloudTags := map[string]string{}
 	awsCloud, _ := awsup.NewAWSCloud("us-test-1", cloudTags)
@@ -156,13 +236,13 @@ func runCreateClusterIntegrationTest(t *testing.T, srcDir string, version string
 		CidrBlock: aws.String("10.0.0.0/12"),
 	}, "vpc-12345678")
 
-	awsCloud.EC2().CreateSubnet(&ec2.CreateSubnetInput{
+	awsCloud.EC2().CreateSubnet(ctx, &ec2.CreateSubnetInput{
 		AvailabilityZone: aws.String("us-test-1a"),
 		VpcId:            aws.String("vpc-12345678"),
 		CidrBlock:        aws.String("10.10.0.0/24"),
 	})
 
-	awsCloud.EC2().CreateSubnet(&ec2.CreateSubnetInput{
+	awsCloud.EC2().CreateSubnet(ctx, &ec2.CreateSubnetInput{
 		AvailabilityZone: aws.String("us-test-1a"),
 		VpcId:            aws.String("vpc-12345678"),
 		CidrBlock:        aws.String("10.11.0.0/24"),
@@ -179,7 +259,7 @@ func runCreateClusterIntegrationTest(t *testing.T, srcDir string, version string
 	factory := util.NewFactory(factoryOptions)
 
 	{
-		optionsBytes, err := ioutil.ReadFile(path.Join(srcDir, optionsYAML))
+		optionsBytes, err := os.ReadFile(path.Join(srcDir, optionsYAML))
 		if err != nil {
 			t.Fatalf("error reading options file: %v", err)
 		}
@@ -197,7 +277,7 @@ func runCreateClusterIntegrationTest(t *testing.T, srcDir string, version string
 
 		// Use the public key we produced
 		{
-			publicKey, err := ioutil.ReadFile(publicKeyPath)
+			publicKey, err := os.ReadFile(publicKeyPath)
 			if err != nil {
 				t.Fatalf("error reading public key %q: %v", publicKeyPath, err)
 			}
@@ -212,7 +292,7 @@ func runCreateClusterIntegrationTest(t *testing.T, srcDir string, version string
 		}
 	}
 
-	clientset, err := factory.Clientset()
+	clientset, err := factory.KopsClient()
 	if err != nil {
 		t.Fatalf("error getting clientset: %v", err)
 	}
@@ -261,7 +341,7 @@ func runCreateClusterIntegrationTest(t *testing.T, srcDir string, version string
 	}
 
 	// Compare additional objects
-	addons, err := clientset.AddonsFor(&clusters.Items[0]).List()
+	addons, err := clientset.AddonsFor(&clusters.Items[0]).List(ctx)
 	if err != nil {
 		t.Fatalf("error listing addons: %v", err)
 	}

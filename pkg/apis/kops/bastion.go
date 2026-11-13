@@ -17,10 +17,9 @@ limitations under the License.
 package kops
 
 type BastionSpec struct {
-	BastionPublicName string `json:"bastionPublicName,omitempty"`
-	// IdleTimeoutSeconds is the bastion's Loadbalancer idle timeout
-	IdleTimeoutSeconds *int64 `json:"idleTimeoutSeconds,omitempty"`
-
+	// PublicName is the domain name for the bastion load balancer.
+	PublicName string `json:"publicName,omitempty"`
+	// LoadBalancer contains settings for the load balancer fronting bastion instances.
 	LoadBalancer *BastionLoadBalancerSpec `json:"loadBalancer,omitempty"`
 }
 

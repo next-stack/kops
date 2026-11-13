@@ -19,60 +19,93 @@ package azuremodel
 import (
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
-	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2020-06-01/compute"
-	"github.com/Azure/go-autorest/autorest/to"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
+	compute "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v7"
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/model"
 	"k8s.io/kops/pkg/model/defaults"
+	"k8s.io/kops/pkg/model/iam"
 	"k8s.io/kops/upup/pkg/fi"
+	"k8s.io/kops/upup/pkg/fi/cloudup/azure"
+	"k8s.io/kops/upup/pkg/fi/cloudup/azuretasks"
 	"k8s.io/kops/upup/pkg/fi/fitasks"
 )
 
 func TestVMScaleSetModelBuilder_Build(t *testing.T) {
-	b := VMScaleSetModelBuilder{
-		AzureModelContext: newTestAzureModelContext(),
-		BootstrapScriptBuilder: &model.BootstrapScriptBuilder{
-			Lifecycle: fi.LifecycleSync,
-			Cluster: &kops.Cluster{
-				Spec: kops.ClusterSpec{
-					Networking: &kops.NetworkingSpec{},
+	for _, resourceGroup := range []string{"", "shared"} {
+		t.Run("resource group="+resourceGroup, func(t *testing.T) {
+			b := VMScaleSetModelBuilder{
+				AzureModelContext: newTestAzureModelContext(),
+				BootstrapScriptBuilder: &model.BootstrapScriptBuilder{
+					Lifecycle: fi.LifecycleSync,
+					KopsModelContext: &model.KopsModelContext{
+						IAMModelContext: iam.IAMModelContext{
+							Cluster: &kops.Cluster{
+								Spec: kops.ClusterSpec{
+									Networking: kops.NetworkingSpec{},
+								},
+							},
+						},
+					},
 				},
-			},
-		},
-	}
-	c := &fi.ModelBuilderContext{
-		Tasks: make(map[string]fi.Task),
-	}
+			}
+			b.Cluster.Spec.CloudProvider.Azure.ResourceGroupName = resourceGroup
+			b.Cluster.Name = strings.Repeat("long-cluster-name-", 5) + "example.com"
+			controlPlane := newTestInstanceGroup()
+			controlPlane.Name = "control-plane-eastus-1"
+			controlPlane.Spec.Role = kops.InstanceGroupRoleControlPlane
+			b.InstanceGroups = append(b.InstanceGroups, controlPlane)
+			c := &fi.CloudupModelBuilderContext{
+				Tasks: make(map[string]fi.CloudupTask),
+			}
 
-	caTask := &fitasks.Keypair{
-		Name:    fi.String(fi.CertificateIDCA),
-		Subject: "cn=kubernetes",
-		Type:    "ca",
-	}
-	c.AddTask(caTask)
-	etcdCaTask := &fitasks.Keypair{
-		Name:    fi.String("etcd-clients-ca"),
-		Subject: "cn=etcd-clients-ca",
-		Type:    "ca",
-	}
-	c.AddTask(etcdCaTask)
-	for _, cert := range []string{
-		"kubelet",
-		"kube-proxy",
-	} {
-		c.AddTask(&fitasks.Keypair{
-			Name:    fi.String(cert),
-			Subject: "cn=" + cert,
-			Signer:  caTask,
-			Type:    "client",
+			caTask := &fitasks.Keypair{
+				Name:    new(fi.CertificateIDCA),
+				Subject: "cn=kubernetes",
+				Type:    "ca",
+			}
+			c.AddTask(caTask)
+			etcdCaTask := &fitasks.Keypair{
+				Name:    new("etcd-clients-ca"),
+				Subject: "cn=etcd-clients-ca",
+				Type:    "ca",
+			}
+			c.AddTask(etcdCaTask)
+			for _, cert := range []string{
+				"kubelet",
+				"kube-proxy",
+				"apiserver-aggregator-ca",
+				"service-account",
+			} {
+				c.AddTask(&fitasks.Keypair{
+					Name:    new(cert),
+					Subject: "cn=" + cert,
+					Signer:  caTask,
+					Type:    "client",
+				})
+			}
+
+			err := b.Build(c)
+			if err != nil {
+				t.Fatalf("unexpected error %s", err)
+			}
+			for _, ig := range b.InstanceGroups {
+				logicalName := b.AutoscalingGroupName(ig)
+				vmss, ok := c.Tasks["VMScaleSet/"+logicalName].(*azuretasks.VMScaleSet)
+				if !ok {
+					t.Fatalf("missing VMScaleSet task %q", logicalName)
+				}
+				if got := fi.ValueOf(vmss.Tags[azure.InstanceGroupNameTag]); got != ig.Name {
+					t.Errorf("instance-group tag = %q, want %q", got, ig.Name)
+				}
+				if fi.ValueOf(vmss.ComputerNamePrefix) != ig.Name {
+					t.Errorf("ComputerNamePrefix = %q, want %q", fi.ValueOf(vmss.ComputerNamePrefix), ig.Name)
+				}
+			}
 		})
-	}
-
-	err := b.Build(c)
-	if err != nil {
-		t.Errorf("unexpected error %s", err)
 	}
 }
 
@@ -84,16 +117,16 @@ func TestGetCapacity(t *testing.T) {
 	}{
 		{
 			spec: kops.InstanceGroupSpec{
-				Role:    kops.InstanceGroupRoleMaster,
-				MinSize: fi.Int32(3),
-				MaxSize: fi.Int32(3),
+				Role:    kops.InstanceGroupRoleControlPlane,
+				MinSize: new(int32(3)),
+				MaxSize: new(int32(3)),
 			},
 			success:  true,
 			capacity: 3,
 		},
 		{
 			spec: kops.InstanceGroupSpec{
-				Role: kops.InstanceGroupRoleMaster,
+				Role: kops.InstanceGroupRoleControlPlane,
 			},
 			success:  true,
 			capacity: 1,
@@ -107,9 +140,9 @@ func TestGetCapacity(t *testing.T) {
 		},
 		{
 			spec: kops.InstanceGroupSpec{
-				Role:    kops.InstanceGroupRoleMaster,
-				MinSize: fi.Int32(1),
-				MaxSize: fi.Int32(2),
+				Role:    kops.InstanceGroupRoleControlPlane,
+				MinSize: new(int32(1)),
+				MaxSize: new(int32(2)),
 			},
 			success: false,
 		},
@@ -142,48 +175,81 @@ func TestGetStorageProfile(t *testing.T) {
 	}{
 		{
 			spec: kops.InstanceGroupSpec{
-				Image:          "Canonical:UbuntuServer:18.04-LTS:latest",
-				RootVolumeType: fi.String(string(compute.StorageAccountTypesStandardLRS)),
-				RootVolumeSize: fi.Int32(128),
+				Image: "Canonical:UbuntuServer:18.04-LTS:latest",
+				RootVolume: &kops.InstanceRootVolumeSpec{
+					Type: new(string(compute.StorageAccountTypesUltraSSDLRS)),
+					Size: new(int32(128)),
+				},
 			},
 			profile: &compute.VirtualMachineScaleSetStorageProfile{
 				ImageReference: &compute.ImageReference{
-					Publisher: to.StringPtr("Canonical"),
-					Offer:     to.StringPtr("UbuntuServer"),
-					Sku:       to.StringPtr("18.04-LTS"),
-					Version:   to.StringPtr("latest"),
+					Publisher: to.Ptr("Canonical"),
+					Offer:     to.Ptr("UbuntuServer"),
+					SKU:       to.Ptr("18.04-LTS"),
+					Version:   to.Ptr("latest"),
 				},
-				OsDisk: &compute.VirtualMachineScaleSetOSDisk{
-					OsType:       compute.OperatingSystemTypes(compute.Linux),
-					CreateOption: compute.DiskCreateOptionTypesFromImage,
-					DiskSizeGB:   to.Int32Ptr(128),
+				OSDisk: &compute.VirtualMachineScaleSetOSDisk{
+					OSType:       to.Ptr(compute.OperatingSystemTypesLinux),
+					CreateOption: to.Ptr(compute.DiskCreateOptionTypesFromImage),
+					DiskSizeGB:   to.Ptr[int32](128),
 					ManagedDisk: &compute.VirtualMachineScaleSetManagedDiskParameters{
-						StorageAccountType: compute.StorageAccountTypesStandardLRS,
+						StorageAccountType: to.Ptr(compute.StorageAccountTypesUltraSSDLRS),
 					},
-					Caching: compute.CachingTypes(compute.HostCachingReadWrite),
+					Caching: to.Ptr(compute.CachingTypesReadWrite),
+				},
+			},
+		},
+		{
+			// Ephemeral OS disk on the temp disk.
+			spec: kops.InstanceGroupSpec{
+				Image: "Canonical:ubuntu-24_04-lts:server:latest",
+				RootVolume: &kops.InstanceRootVolumeSpec{
+					Size: new(int32(300)),
+					Type: new("ResourceDisk"),
+				},
+			},
+			profile: &compute.VirtualMachineScaleSetStorageProfile{
+				ImageReference: &compute.ImageReference{
+					Publisher: to.Ptr("Canonical"),
+					Offer:     to.Ptr("ubuntu-24_04-lts"),
+					SKU:       to.Ptr("server"),
+					Version:   to.Ptr("latest"),
+				},
+				OSDisk: &compute.VirtualMachineScaleSetOSDisk{
+					OSType:       to.Ptr(compute.OperatingSystemTypesLinux),
+					CreateOption: to.Ptr(compute.DiskCreateOptionTypesFromImage),
+					DiskSizeGB:   to.Ptr[int32](300),
+					ManagedDisk: &compute.VirtualMachineScaleSetManagedDiskParameters{
+						StorageAccountType: to.Ptr(compute.StorageAccountTypesStandardSSDLRS),
+					},
+					Caching: to.Ptr(compute.CachingTypesReadOnly),
+					DiffDiskSettings: &compute.DiffDiskSettings{
+						Option:    to.Ptr(compute.DiffDiskOptionsLocal),
+						Placement: to.Ptr(compute.DiffDiskPlacementResourceDisk),
+					},
 				},
 			},
 		},
 		{
 			spec: kops.InstanceGroupSpec{
 				Image: "Canonical:UbuntuServer:18.04-LTS:latest",
-				Role:  kops.InstanceGroupRoleMaster,
+				Role:  kops.InstanceGroupRoleControlPlane,
 			},
 			profile: &compute.VirtualMachineScaleSetStorageProfile{
 				ImageReference: &compute.ImageReference{
-					Publisher: to.StringPtr("Canonical"),
-					Offer:     to.StringPtr("UbuntuServer"),
-					Sku:       to.StringPtr("18.04-LTS"),
-					Version:   to.StringPtr("latest"),
+					Publisher: to.Ptr("Canonical"),
+					Offer:     to.Ptr("UbuntuServer"),
+					SKU:       to.Ptr("18.04-LTS"),
+					Version:   to.Ptr("latest"),
 				},
-				OsDisk: &compute.VirtualMachineScaleSetOSDisk{
-					OsType:       compute.OperatingSystemTypes(compute.Linux),
-					CreateOption: compute.DiskCreateOptionTypesFromImage,
-					DiskSizeGB:   to.Int32Ptr(defaults.DefaultVolumeSizeMaster),
+				OSDisk: &compute.VirtualMachineScaleSetOSDisk{
+					OSType:       to.Ptr(compute.OperatingSystemTypesLinux),
+					CreateOption: to.Ptr(compute.DiskCreateOptionTypesFromImage),
+					DiskSizeGB:   to.Ptr[int32](defaults.DefaultVolumeSizeMaster),
 					ManagedDisk: &compute.VirtualMachineScaleSetManagedDiskParameters{
-						StorageAccountType: compute.StorageAccountTypesPremiumLRS,
+						StorageAccountType: to.Ptr(compute.StorageAccountTypesStandardSSDLRS),
 					},
-					Caching: compute.CachingTypes(compute.HostCachingReadWrite),
+					Caching: to.Ptr(compute.CachingTypesReadWrite),
 				},
 			},
 		},
@@ -212,17 +278,17 @@ func TestParseImage(t *testing.T) {
 			image:   "Canonical:UbuntuServer:18.04-LTS:latest",
 			success: true,
 			imageRef: &compute.ImageReference{
-				Publisher: to.StringPtr("Canonical"),
-				Offer:     to.StringPtr("UbuntuServer"),
-				Sku:       to.StringPtr("18.04-LTS"),
-				Version:   to.StringPtr("latest"),
+				Publisher: to.Ptr("Canonical"),
+				Offer:     to.Ptr("UbuntuServer"),
+				SKU:       to.Ptr("18.04-LTS"),
+				Version:   to.Ptr("latest"),
 			},
 		},
 		{
 			image:   "/subscriptions/<subscription id>/resourceGroups/<resource group>/providers/<provider>/images/<image>",
 			success: true,
 			imageRef: &compute.ImageReference{
-				ID: to.StringPtr("/subscriptions/<subscription id>/resourceGroups/<resource group>/providers/<provider>/images/<image>"),
+				ID: to.Ptr("/subscriptions/<subscription id>/resourceGroups/<resource group>/providers/<provider>/images/<image>"),
 			},
 		},
 		{

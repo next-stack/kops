@@ -26,29 +26,30 @@ type EtcdOptionsBuilder struct {
 	*OptionsContext
 }
 
-var _ loader.OptionsBuilder = &EtcdOptionsBuilder{}
+var _ loader.ClusterOptionsBuilder = &EtcdOptionsBuilder{}
 
 const (
-	DefaultEtcd3Version_1_17 = "3.4.3"
-	DefaultEtcd3Version_1_19 = "3.4.13"
-	DefaultEtcd3Version_1_22 = "3.5.0"
+	LatestEtcd35Version = "3.5.35"
+	LatestEtcd36Version = "3.6.16"
+	LatestEtcd37Version = "3.7.3"
 )
 
 // BuildOptions is responsible for filling in the defaults for the etcd cluster model
-func (b *EtcdOptionsBuilder) BuildOptions(o interface{}) error {
-	spec := o.(*kops.ClusterSpec)
+func (b *EtcdOptionsBuilder) BuildOptions(o *kops.Cluster) error {
+	spec := &o.Spec
 
 	for i := range spec.EtcdClusters {
 		c := &spec.EtcdClusters[i]
 		// Ensure the version is set
 		if c.Version == "" {
 			// We run the k8s-recommended versions of etcd
-			if b.IsKubernetesGTE("1.22") {
-				c.Version = DefaultEtcd3Version_1_22
-			} else if b.IsKubernetesGTE("1.19") {
-				c.Version = DefaultEtcd3Version_1_19
-			} else {
-				c.Version = DefaultEtcd3Version_1_17
+			switch {
+			case b.ControlPlaneKubernetesVersion().IsLT("1.34.0"):
+				c.Version = LatestEtcd35Version
+			case b.ControlPlaneKubernetesVersion().IsLT("1.37.0"):
+				c.Version = LatestEtcd36Version
+			default:
+				c.Version = LatestEtcd37Version
 			}
 		}
 	}

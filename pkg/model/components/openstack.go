@@ -17,23 +17,25 @@ limitations under the License.
 package components
 
 import (
+	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/kops/pkg/apis/kops"
-	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/loader"
 )
 
-// OpenStackOptionsBulder adds options for OpenStack to the model
-type OpenStackOptionsBulder struct {
+// OpenStackOptionsBuilder adds options for OpenStack to the model
+type OpenStackOptionsBuilder struct {
 	Context *OptionsContext
 }
 
-var _ loader.OptionsBuilder = &OpenStackOptionsBulder{}
+var _ loader.ClusterOptionsBuilder = &OpenStackOptionsBuilder{}
 
-func (b *OpenStackOptionsBulder) BuildOptions(o interface{}) error {
+func (b *OpenStackOptionsBuilder) BuildOptions(o *kops.Cluster) error {
+	clusterSpec := &o.Spec
+	openstack := clusterSpec.CloudProvider.Openstack
 
-	clusterSpec := o.(*kops.ClusterSpec)
-
-	if kops.CloudProviderID(clusterSpec.CloudProvider) != kops.CloudProviderOpenstack {
+	if openstack == nil {
 		return nil
 	}
 
@@ -41,27 +43,35 @@ func (b *OpenStackOptionsBulder) BuildOptions(o interface{}) error {
 		clusterSpec.CloudConfig = &kops.CloudConfiguration{}
 	}
 
-	if clusterSpec.CloudConfig.Openstack == nil {
-		clusterSpec.CloudConfig.Openstack = &kops.OpenstackConfiguration{}
-	}
-	if clusterSpec.CloudConfig.Openstack.BlockStorage == nil {
-		clusterSpec.CloudConfig.Openstack.BlockStorage = &kops.OpenstackBlockStorageConfig{}
+	if openstack.BlockStorage == nil {
+		openstack.BlockStorage = &kops.OpenstackBlockStorageConfig{}
 	}
 
-	if clusterSpec.CloudConfig.Openstack.BlockStorage.CreateStorageClass == nil {
-		clusterSpec.CloudConfig.Openstack.BlockStorage.CreateStorageClass = fi.Bool(true)
+	if openstack.BlockStorage.CreateStorageClass == nil {
+		openstack.BlockStorage.CreateStorageClass = new(true)
 	}
 
-	if clusterSpec.CloudConfig.Openstack.Metadata == nil {
-		clusterSpec.CloudConfig.Openstack.Metadata = &kops.OpenstackMetadata{}
+	if openstack.Metadata == nil {
+		openstack.Metadata = &kops.OpenstackMetadata{}
 	}
-	if clusterSpec.CloudConfig.Openstack.Metadata.ConfigDrive == nil {
-		clusterSpec.CloudConfig.Openstack.Metadata.ConfigDrive = fi.Bool(false)
+	if openstack.Metadata.ConfigDrive == nil {
+		openstack.Metadata.ConfigDrive = new(false)
 	}
 
 	if clusterSpec.ExternalCloudControllerManager == nil {
 		clusterSpec.ExternalCloudControllerManager = &kops.CloudControllerManagerConfig{}
 	}
-	return nil
 
+	// No significant downside to always doing a leader election.
+	// Also, having a replicated (HA) control plane requires leader election.
+	clusterSpec.ExternalCloudControllerManager.LeaderElection = &kops.LeaderElectionConfiguration{LeaderElect: new(true)}
+
+	// Node status updates are happening unnecessarily often in kOps OpenStack.
+	// Node status updates are useful if we are updating existing node flavor type or node addresses.
+	// However, that will not happen when using kOps.
+	// see more discussion in https://github.com/kubernetes/cloud-provider-openstack/pull/2133
+	clusterSpec.ExternalCloudControllerManager.NodeStatusUpdateFrequency = &metav1.Duration{
+		Duration: time.Minute * 60,
+	}
+	return nil
 }

@@ -27,7 +27,7 @@ import (
 
 // MirrorSecrets
 
-var _ fi.HasLifecycle = &MirrorSecrets{}
+var _ fi.HasLifecycle = (*MirrorSecrets)(nil)
 
 // GetLifecycle returns the Lifecycle of the object, implementing fi.HasLifecycle
 func (o *MirrorSecrets) GetLifecycle() fi.Lifecycle {
@@ -39,7 +39,7 @@ func (o *MirrorSecrets) SetLifecycle(lifecycle fi.Lifecycle) {
 	o.Lifecycle = lifecycle
 }
 
-var _ fi.HasName = &MirrorSecrets{}
+var _ fi.HasName = (*MirrorSecrets)(nil)
 
 // GetName returns the Name of the object, implementing fi.HasName
 func (o *MirrorSecrets) GetName() *string {
@@ -48,5 +48,5 @@ func (o *MirrorSecrets) GetName() *string {
 
 // String is the stringer function for the task, producing readable output using fi.TaskAsString
 func (o *MirrorSecrets) String() string {
-	return fi.TaskAsString(o)
+	return fi.CloudupTaskAsString(o)
 }

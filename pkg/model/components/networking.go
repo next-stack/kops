@@ -28,32 +28,15 @@ type NetworkingOptionsBuilder struct {
 	Context *OptionsContext
 }
 
-var _ loader.OptionsBuilder = &NetworkingOptionsBuilder{}
+var _ loader.ClusterOptionsBuilder = &NetworkingOptionsBuilder{}
 
-func (b *NetworkingOptionsBuilder) BuildOptions(o interface{}) error {
-	clusterSpec := o.(*kops.ClusterSpec)
-
-	options := o.(*kops.ClusterSpec)
-	if options.Kubelet == nil {
-		options.Kubelet = &kops.KubeletConfigSpec{}
+func (b *NetworkingOptionsBuilder) BuildOptions(o *kops.Cluster) error {
+	clusterSpec := &o.Spec
+	if clusterSpec.Kubelet == nil {
+		clusterSpec.Kubelet = &kops.KubeletConfigSpec{}
 	}
 
-	networking := clusterSpec.Networking
-	if networking == nil {
-		return fmt.Errorf("networking not set")
-	}
-
-	if UsesCNI(networking) {
-		options.Kubelet.NetworkPluginName = "cni"
-
-		// ConfigureCBR0 flag removed from 1.5
-		options.Kubelet.ConfigureCBR0 = nil
-	}
-
-	if networking.GCE != nil {
-		// GCE IPAlias networking uses kubenet on the nodes
-		options.Kubelet.NetworkPluginName = "kubenet"
-	}
+	networking := &clusterSpec.Networking
 
 	if networking.Classic != nil {
 		return fmt.Errorf("classic networking not supported")

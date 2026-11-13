@@ -21,9 +21,11 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/klog/v2"
+
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/featureflag"
 	"k8s.io/kops/pkg/model"
@@ -35,7 +37,7 @@ import (
 
 const (
 	// DefaultVolumeType is the default volume type
-	DefaultVolumeType = ec2.VolumeTypeGp3
+	DefaultVolumeType = ec2types.VolumeTypeGp3
 	// DefaultVolumeIonIops is the default volume IOPS when volume type is io1 or io2
 	DefaultVolumeIonIops = 100
 	// DefaultVolumeGp3Iops is the default volume IOPS when volume type is gp3
@@ -58,10 +60,10 @@ type AutoscalingGroupModelBuilder struct {
 	Cluster                *kops.Cluster
 }
 
-var _ fi.ModelBuilder = &AutoscalingGroupModelBuilder{}
+var _ fi.CloudupModelBuilder = &AutoscalingGroupModelBuilder{}
 
 // Build is responsible for constructing the aws autoscaling group from the kops spec
-func (b *AutoscalingGroupModelBuilder) Build(c *fi.ModelBuilderContext) error {
+func (b *AutoscalingGroupModelBuilder) Build(c *fi.CloudupModelBuilderContext) error {
 	for _, ig := range b.InstanceGroups {
 		name := b.AutoscalingGroupName(ig)
 
@@ -72,55 +74,85 @@ func (b *AutoscalingGroupModelBuilder) Build(c *fi.ModelBuilderContext) error {
 			}
 		}
 
-		task, err := b.buildLaunchTemplateTask(c, name, ig)
+		// Always create the user data, even for Karpenter manged instance groups
+		// Kaprenter expects the user data to be available in the state store:
+		// ${KOPS_STATE_STORE}/${CLUSTER_NAME}/igconfig/node/${IG_NAME}/nodeupscript.sh
+		userData, err := b.BootstrapScriptBuilder.ResourceNodeUp(c, ig)
 		if err != nil {
 			return err
 		}
-		c.AddTask(task)
 
-		// @step: now lets build the autoscaling group task
-		tsk, err := b.buildAutoScalingGroupTask(c, name, ig)
-		if err != nil {
-			return err
-		}
-		tsk.LaunchTemplate = task
-		c.AddTask(tsk)
+		if ig.Spec.Manager != "Karpenter" {
+			lt, err := b.buildLaunchTemplateTask(c, name, ig, userData)
+			if err != nil {
+				return err
+			}
+			c.AddTask(lt)
 
-		warmPool := b.Cluster.Spec.WarmPool.ResolveDefaults(ig)
-		{
-			enabled := fi.Bool(warmPool.IsEnabled())
+			asg, err := b.buildAutoScalingGroupTask(c, name, ig)
+			if err != nil {
+				return err
+			}
+			asg.LaunchTemplate = lt
+			c.AddTask(asg)
+
+			warmPool := b.Cluster.Spec.CloudProvider.AWS.WarmPool.ResolveDefaults(ig)
+
+			enabled := new(warmPool.IsEnabled())
 			warmPoolTask := &awstasks.WarmPool{
-				Name:      &name,
-				Lifecycle: b.Lifecycle,
-				Enabled:   enabled,
+				Name:             &name,
+				Lifecycle:        b.Lifecycle,
+				Enabled:          enabled,
+				AutoscalingGroup: b.LinkToAutoscalingGroup(ig),
 			}
 			if warmPool.IsEnabled() {
-				warmPoolTask.MinSize = warmPool.MinSize
-				warmPoolTask.MaxSize = warmPool.MaxSize
-
-				if warmPool.EnableLifecycleHook {
-					hookName := "kops-warmpool"
-					name := fmt.Sprintf("%s-%s", hookName, ig.GetName())
-
-					lifecyleTask := &awstasks.AutoscalingLifecycleHook{
-						ID:               aws.String(name),
-						Name:             aws.String(name),
-						HookName:         aws.String(hookName),
-						Lifecycle:        b.Lifecycle,
-						AutoscalingGroup: b.LinkToAutoscalingGroup(ig),
-						DefaultResult:    aws.String("ABANDON"),
-						// We let nodeup have 10 min to complete. Normally this should happen much faster,
-						// but CP nodes need 5 min or so to start on new clusters, and we need to wait for that.
-						HeartbeatTimeout:    aws.Int64(600),
-						LifecycleTransition: aws.String("autoscaling:EC2_INSTANCE_LAUNCHING"),
-					}
-
-					c.AddTask(lifecyleTask)
-
+				warmPoolTask.MinSize = int32(warmPool.MinSize)
+				if warmPool.MaxSize != nil {
+					warmPoolTask.MaxSize = new(int32(aws.ToInt64(warmPool.MaxSize)))
 				}
-
+				asg.Metrics = append(asg.Metrics,
+					"WarmPoolMinSize",
+					"WarmPoolDesiredCapacity",
+					"WarmPoolPendingCapacity",
+					"WarmPoolTerminatingCapacity",
+					"WarmPoolWarmedCapacity",
+					"WarmPoolTotalCapacity",
+					"GroupAndWarmPoolDesiredCapacity",
+					"GroupAndWarmPoolTotalCapacity",
+				)
+				asg.WarmPool = warmPoolTask
+			} else {
+				asg.WarmPool = nil
 			}
 			c.AddTask(warmPoolTask)
+
+			hookName := "kops-warmpool"
+			name := fmt.Sprintf("%s-%s", hookName, ig.GetName())
+			enableHook := warmPool.IsEnabled() && warmPool.EnableLifecycleHook
+			heartbeatTimeout := aws.Int32(600)
+			// Check for heartbeatTimeout overrides at IG-level and cluster-level. IG-level takes precedence.
+			if ig.Spec.WarmPool != nil && ig.Spec.WarmPool.LifecycleHookTimeout != nil {
+				heartbeatTimeout = ig.Spec.WarmPool.LifecycleHookTimeout
+			} else if b.Cluster.Spec.CloudProvider.AWS.WarmPool != nil && b.Cluster.Spec.CloudProvider.AWS.WarmPool.LifecycleHookTimeout != nil {
+				heartbeatTimeout = b.Cluster.Spec.CloudProvider.AWS.WarmPool.LifecycleHookTimeout
+			}
+
+			lifecyleTask := &awstasks.AutoscalingLifecycleHook{
+				ID:               aws.String(name),
+				Name:             aws.String(name),
+				HookName:         aws.String(hookName),
+				AutoscalingGroup: b.LinkToAutoscalingGroup(ig),
+				Lifecycle:        b.Lifecycle,
+				DefaultResult:    aws.String("ABANDON"),
+				// We let nodeup have 10 min to complete. Normally this should happen much faster,
+				// but CP nodes need 5 min or so to start on new clusters, and we need to wait for that.
+				HeartbeatTimeout:    heartbeatTimeout,
+				LifecycleTransition: aws.String("autoscaling:EC2_INSTANCE_LAUNCHING"),
+				Enabled:             &enableHook,
+			}
+
+			c.AddTask(lifecyleTask)
+
 		}
 	}
 
@@ -128,7 +160,7 @@ func (b *AutoscalingGroupModelBuilder) Build(c *fi.ModelBuilderContext) error {
 }
 
 // buildLaunchTemplateTask is responsible for creating the template task into the aws model
-func (b *AutoscalingGroupModelBuilder) buildLaunchTemplateTask(c *fi.ModelBuilderContext, name string, ig *kops.InstanceGroup) (*awstasks.LaunchTemplate, error) {
+func (b *AutoscalingGroupModelBuilder) buildLaunchTemplateTask(c *fi.CloudupModelBuilderContext, name string, ig *kops.InstanceGroup, userData fi.Resource) (*awstasks.LaunchTemplate, error) {
 	// @step: add the iam instance profile
 	link, err := b.LinkToIAMInstanceProfile(ig)
 	if err != nil {
@@ -139,23 +171,27 @@ func (b *AutoscalingGroupModelBuilder) buildLaunchTemplateTask(c *fi.ModelBuilde
 	if err != nil {
 		return nil, err
 	}
-	if fi.Int32Value(ig.Spec.RootVolumeSize) > 0 {
-		rootVolumeSize = fi.Int32Value(ig.Spec.RootVolumeSize)
-	}
+	var rootVolumeType ec2types.VolumeType
+	rootVolumeEncryption := DefaultVolumeEncryption
+	rootVolumeKmsKey := ""
 
-	rootVolumeType := fi.StringValue(ig.Spec.RootVolumeType)
+	if ig.Spec.RootVolume != nil {
+		if fi.ValueOf(ig.Spec.RootVolume.Size) > 0 {
+			rootVolumeSize = fi.ValueOf(ig.Spec.RootVolume.Size)
+		}
+
+		rootVolumeType = ec2types.VolumeType(fi.ValueOf(ig.Spec.RootVolume.Type))
+
+		if ig.Spec.RootVolume.Encryption != nil {
+			rootVolumeEncryption = fi.ValueOf(ig.Spec.RootVolume.Encryption)
+		}
+
+		if fi.ValueOf(ig.Spec.RootVolume.Encryption) && ig.Spec.RootVolume.EncryptionKey != nil {
+			rootVolumeKmsKey = *ig.Spec.RootVolume.EncryptionKey
+		}
+	}
 	if rootVolumeType == "" {
 		rootVolumeType = DefaultVolumeType
-	}
-
-	rootVolumeEncryption := DefaultVolumeEncryption
-	if ig.Spec.RootVolumeEncryption != nil {
-		rootVolumeEncryption = fi.BoolValue(ig.Spec.RootVolumeEncryption)
-	}
-
-	rootVolumeKmsKey := ""
-	if fi.BoolValue(ig.Spec.RootVolumeEncryption) && ig.Spec.RootVolumeEncryptionKey != nil {
-		rootVolumeKmsKey = *ig.Spec.RootVolumeEncryptionKey
 	}
 
 	securityGroups, err := b.buildSecurityGroups(c, ig)
@@ -168,33 +204,38 @@ func (b *AutoscalingGroupModelBuilder) buildLaunchTemplateTask(c *fi.ModelBuilde
 		return nil, fmt.Errorf("error building cloud tags: %v", err)
 	}
 
-	userData, err := b.BootstrapScriptBuilder.ResourceNodeUp(c, ig)
-	if err != nil {
-		return nil, err
+	lt := &awstasks.LaunchTemplate{
+		Name:                    new(name),
+		Lifecycle:               b.Lifecycle,
+		CPUCredits:              new(fi.ValueOf(ig.Spec.CPUCredits)),
+		HTTPPutResponseHopLimit: new(int32(1)),
+		HTTPTokens:              new(ec2types.LaunchTemplateHttpTokensStateRequired),
+		HTTPProtocolIPv6:        new(ec2types.LaunchTemplateInstanceMetadataProtocolIpv6Disabled),
+		IAMInstanceProfile:      link,
+		ImageID:                 new(ig.Spec.Image),
+		InstanceMonitoring:      new(false),
+		IPv6AddressCount:        new(int32(0)),
+		RootVolumeIops:          new(int32(0)),
+		RootVolumeSize:          new(int32(rootVolumeSize)),
+		RootVolumeType:          rootVolumeType,
+		RootVolumeEncryption:    new(rootVolumeEncryption),
+		RootVolumeKmsKey:        new(rootVolumeKmsKey),
+		SecurityGroups:          securityGroups,
+		Tags:                    tags,
+		UserData:                userData,
+	}
+	if ig.Spec.InstanceInterruptionBehavior != nil {
+		lt.InstanceInterruptionBehavior = new(ec2types.InstanceInterruptionBehavior(fi.ValueOf(ig.Spec.InstanceInterruptionBehavior)))
+	}
+	if ig.Spec.RootVolume != nil {
+		if ig.Spec.RootVolume.IOPS != nil {
+			lt.RootVolumeIops = new(int32(fi.ValueOf(ig.Spec.RootVolume.IOPS)))
+		}
+		lt.RootVolumeOptimization = ig.Spec.RootVolume.Optimization
 	}
 
-	lt := &awstasks.LaunchTemplate{
-		Name:                         fi.String(name),
-		Lifecycle:                    b.Lifecycle,
-		CPUCredits:                   fi.String(fi.StringValue(ig.Spec.CPUCredits)),
-		HTTPPutResponseHopLimit:      fi.Int64(1),
-		HTTPTokens:                   fi.String(ec2.LaunchTemplateHttpTokensStateOptional),
-		HTTPProtocolIPv6:             fi.String(ec2.LaunchTemplateInstanceMetadataProtocolIpv6Disabled),
-		IAMInstanceProfile:           link,
-		ImageID:                      fi.String(ig.Spec.Image),
-		InstanceInterruptionBehavior: ig.Spec.InstanceInterruptionBehavior,
-		InstanceMonitoring:           fi.Bool(false),
-		InstanceType:                 fi.String(strings.Split(ig.Spec.MachineType, ",")[0]),
-		IPv6AddressCount:             fi.Int64(0),
-		RootVolumeIops:               fi.Int64(int64(fi.Int32Value(ig.Spec.RootVolumeIops))),
-		RootVolumeOptimization:       ig.Spec.RootVolumeOptimization,
-		RootVolumeSize:               fi.Int64(int64(rootVolumeSize)),
-		RootVolumeType:               fi.String(rootVolumeType),
-		RootVolumeEncryption:         fi.Bool(rootVolumeEncryption),
-		RootVolumeKmsKey:             fi.String(rootVolumeKmsKey),
-		SecurityGroups:               securityGroups,
-		Tags:                         tags,
-		UserData:                     userData,
+	if ig.Spec.Manager == kops.InstanceManagerCloudGroup {
+		lt.InstanceType = new(ec2types.InstanceType(strings.Split(ig.Spec.MachineType, ",")[0]))
 	}
 
 	{
@@ -204,26 +245,27 @@ func (b *AutoscalingGroupModelBuilder) buildLaunchTemplateTask(c *fi.ModelBuilde
 			return nil, err
 		}
 
-		// @step: check if we can add an public ip to this subnet
+		// @step: check if we can add a public ip to this subnet
 		switch subnets[0].Type {
 		case kops.SubnetTypePublic, kops.SubnetTypeUtility:
-			lt.AssociatePublicIP = fi.Bool(true)
+			lt.AssociatePublicIP = new(true)
 			if ig.Spec.AssociatePublicIP != nil {
 				lt.AssociatePublicIP = ig.Spec.AssociatePublicIP
 			}
-		case kops.SubnetTypePrivate:
-			lt.AssociatePublicIP = fi.Bool(false)
+		case kops.SubnetTypeDualStack, kops.SubnetTypePrivate:
+			lt.AssociatePublicIP = new(false)
 		}
 
 		// @step: add an IPv6 address
-		for _, clusterSubnet := range b.Cluster.Spec.Subnets {
+		for _, clusterSubnet := range b.Cluster.Spec.Networking.Subnets {
 			for _, igSubnet := range ig.Spec.Subnets {
 				if clusterSubnet.Name != igSubnet {
 					continue
 				}
 				if clusterSubnet.IPv6CIDR != "" {
-					lt.IPv6AddressCount = fi.Int64(1)
-					lt.HTTPProtocolIPv6 = fi.String(ec2.LaunchTemplateInstanceMetadataProtocolIpv6Enabled)
+					lt.IPv6AddressCount = new(int32(1))
+					lt.HTTPProtocolIPv6 = new(ec2types.LaunchTemplateInstanceMetadataProtocolIpv6Enabled)
+					lt.PrimaryIPv6 = new(true)
 				}
 			}
 		}
@@ -233,40 +275,46 @@ func (b *AutoscalingGroupModelBuilder) buildLaunchTemplateTask(c *fi.ModelBuilde
 	for i := range ig.Spec.Volumes {
 		x := &ig.Spec.Volumes[i]
 		if x.Type == "" {
-			x.Type = DefaultVolumeType
+			x.Type = string(DefaultVolumeType)
 		}
-		if x.Type == ec2.VolumeTypeIo1 || x.Type == ec2.VolumeTypeIo2 {
-			if x.Iops == nil {
-				x.Iops = fi.Int64(DefaultVolumeIonIops)
+		switch ec2types.VolumeType(x.Type) {
+		case ec2types.VolumeTypeIo1, ec2types.VolumeTypeIo2:
+			if x.IOPS == nil {
+				x.IOPS = new(int64(DefaultVolumeIonIops))
 			}
-		} else if x.Type == ec2.VolumeTypeGp3 {
-			if x.Iops == nil {
-				x.Iops = fi.Int64(DefaultVolumeGp3Iops)
+		case ec2types.VolumeTypeGp3:
+			if x.IOPS == nil {
+				x.IOPS = new(int64(DefaultVolumeGp3Iops))
 			}
 			if x.Throughput == nil {
-				x.Throughput = fi.Int64(DefaultVolumeGp3Throughput)
+				x.Throughput = new(int64(DefaultVolumeGp3Throughput))
 			}
-		} else {
-			x.Iops = nil
+		default:
+			x.IOPS = nil
 		}
 		deleteOnTermination := DefaultVolumeDeleteOnTermination
 		if x.DeleteOnTermination != nil {
-			deleteOnTermination = fi.BoolValue(x.DeleteOnTermination)
+			deleteOnTermination = fi.ValueOf(x.DeleteOnTermination)
 		}
 		encryption := DefaultVolumeEncryption
 		if x.Encrypted != nil {
-			encryption = fi.BoolValue(x.Encrypted)
+			encryption = fi.ValueOf(x.Encrypted)
 		}
-		lt.BlockDeviceMappings = append(lt.BlockDeviceMappings, &awstasks.BlockDeviceMapping{
-			DeviceName:             fi.String(x.Device),
-			EbsDeleteOnTermination: fi.Bool(deleteOnTermination),
-			EbsEncrypted:           fi.Bool(encryption),
+		bdm := &awstasks.BlockDeviceMapping{
+			DeviceName:             new(x.Device),
+			EbsDeleteOnTermination: new(deleteOnTermination),
+			EbsEncrypted:           new(encryption),
 			EbsKmsKey:              x.Key,
-			EbsVolumeIops:          x.Iops,
-			EbsVolumeSize:          fi.Int64(x.Size),
-			EbsVolumeThroughput:    x.Throughput,
-			EbsVolumeType:          fi.String(x.Type),
-		})
+			EbsVolumeSize:          new(int32(x.Size)),
+			EbsVolumeType:          ec2types.VolumeType(x.Type),
+		}
+		if x.IOPS != nil {
+			bdm.EbsVolumeIops = new(int32(fi.ValueOf(x.IOPS)))
+		}
+		if x.Throughput != nil {
+			bdm.EbsVolumeThroughput = new(int32(fi.ValueOf(x.Throughput)))
+		}
+		lt.BlockDeviceMappings = append(lt.BlockDeviceMappings, bdm)
 	}
 
 	if ig.Spec.DetailedInstanceMonitoring != nil {
@@ -274,27 +322,28 @@ func (b *AutoscalingGroupModelBuilder) buildLaunchTemplateTask(c *fi.ModelBuilde
 	}
 
 	if ig.Spec.InstanceMetadata != nil && ig.Spec.InstanceMetadata.HTTPPutResponseHopLimit != nil {
-		lt.HTTPPutResponseHopLimit = ig.Spec.InstanceMetadata.HTTPPutResponseHopLimit
+		lt.HTTPPutResponseHopLimit = new(int32(fi.ValueOf(ig.Spec.InstanceMetadata.HTTPPutResponseHopLimit)))
 	}
 
 	if ig.Spec.InstanceMetadata != nil && ig.Spec.InstanceMetadata.HTTPTokens != nil {
-		lt.HTTPTokens = ig.Spec.InstanceMetadata.HTTPTokens
+		lt.HTTPTokens = new(ec2types.LaunchTemplateHttpTokensState(fi.ValueOf(ig.Spec.InstanceMetadata.HTTPTokens)))
 	}
 
-	if rootVolumeType == ec2.VolumeTypeIo1 || rootVolumeType == ec2.VolumeTypeIo2 {
-		if fi.Int32Value(ig.Spec.RootVolumeIops) < 100 {
-			lt.RootVolumeIops = fi.Int64(int64(DefaultVolumeIonIops))
+	switch rootVolumeType {
+	case ec2types.VolumeTypeIo1, ec2types.VolumeTypeIo2:
+		if ig.Spec.RootVolume == nil || fi.ValueOf(ig.Spec.RootVolume.IOPS) < 100 {
+			lt.RootVolumeIops = new(int32(DefaultVolumeIonIops))
 		}
-	} else if rootVolumeType == ec2.VolumeTypeGp3 {
-		if fi.Int32Value(ig.Spec.RootVolumeIops) < 3000 {
-			lt.RootVolumeIops = fi.Int64(int64(DefaultVolumeGp3Iops))
+	case ec2types.VolumeTypeGp3:
+		if ig.Spec.RootVolume == nil || fi.ValueOf(ig.Spec.RootVolume.IOPS) < 3000 {
+			lt.RootVolumeIops = new(int32(DefaultVolumeGp3Iops))
 		}
-		if fi.Int32Value(ig.Spec.RootVolumeThroughput) < 125 {
-			lt.RootVolumeThroughput = fi.Int64(int64(DefaultVolumeGp3Throughput))
+		if ig.Spec.RootVolume == nil || fi.ValueOf(ig.Spec.RootVolume.Throughput) < 125 {
+			lt.RootVolumeThroughput = new(int32(DefaultVolumeGp3Throughput))
 		} else {
-			lt.RootVolumeThroughput = fi.Int64(int64(fi.Int32Value(ig.Spec.RootVolumeThroughput)))
+			lt.RootVolumeThroughput = new(int32(fi.ValueOf(ig.Spec.RootVolume.Throughput)))
 		}
-	} else {
+	default:
 		lt.RootVolumeIops = nil
 	}
 
@@ -311,46 +360,44 @@ func (b *AutoscalingGroupModelBuilder) buildLaunchTemplateTask(c *fi.ModelBuilde
 	if ig.Spec.MixedInstancesPolicy == nil && ig.Spec.MaxPrice != nil {
 		lt.SpotPrice = ig.Spec.MaxPrice
 	} else {
-		lt.SpotPrice = fi.String("")
+		lt.SpotPrice = new("")
 	}
 	if ig.Spec.SpotDurationInMinutes != nil {
-		lt.SpotDurationInMinutes = ig.Spec.SpotDurationInMinutes
+		lt.SpotDurationInMinutes = new(int32(fi.ValueOf(ig.Spec.SpotDurationInMinutes)))
 	}
 
 	if ig.Spec.Tenancy != "" {
-		lt.Tenancy = fi.String(ig.Spec.Tenancy)
+		lt.Tenancy = new(ec2types.Tenancy(ig.Spec.Tenancy))
 	}
 
 	return lt, nil
 }
 
 // buildSecurityGroups is responsible for building security groups for a launch template.
-func (b *AutoscalingGroupModelBuilder) buildSecurityGroups(c *fi.ModelBuilderContext, ig *kops.InstanceGroup) ([]*awstasks.SecurityGroup, error) {
+func (b *AutoscalingGroupModelBuilder) buildSecurityGroups(c *fi.CloudupModelBuilderContext, ig *kops.InstanceGroup) ([]*awstasks.SecurityGroup, error) {
 	// @step: if required we add the override for the security group for this instancegroup
 	sgLink := b.LinkToSecurityGroup(ig.Spec.Role)
 	if ig.Spec.SecurityGroupOverride != nil {
-		sgName := fmt.Sprintf("%v-%v", fi.StringValue(ig.Spec.SecurityGroupOverride), ig.Spec.Role)
+		sgName := fmt.Sprintf("%v-%v", fi.ValueOf(ig.Spec.SecurityGroupOverride), ig.Spec.Role)
 		sgLink = &awstasks.SecurityGroup{
 			ID:     ig.Spec.SecurityGroupOverride,
 			Name:   &sgName,
-			Shared: fi.Bool(true),
+			Shared: new(true),
 		}
 	}
 
 	securityGroups := []*awstasks.SecurityGroup{sgLink}
 
-	if ig.HasAPIServer() &&
-		b.APILoadBalancerClass() == kops.LoadBalancerClassNetwork {
+	if ig.RunsAPIServer() &&
+		b.UseNetworkLoadBalancer() {
 		for _, id := range b.Cluster.Spec.API.LoadBalancer.AdditionalSecurityGroups {
 			sgTask := &awstasks.SecurityGroup{
-				ID:        fi.String(id),
+				ID:        new(id),
 				Lifecycle: b.SecurityLifecycle,
-				Name:      fi.String("nlb-" + id),
-				Shared:    fi.Bool(true),
+				Name:      new("nlb-" + id),
+				Shared:    new(true),
 			}
-			if err := c.EnsureTask(sgTask); err != nil {
-				return nil, err
-			}
+			c.EnsureTask(sgTask)
 			securityGroups = append(securityGroups, sgTask)
 		}
 	}
@@ -358,28 +405,25 @@ func (b *AutoscalingGroupModelBuilder) buildSecurityGroups(c *fi.ModelBuilderCon
 	// @step: add any additional security groups to the instancegroup
 	for _, id := range ig.Spec.AdditionalSecurityGroups {
 		sgTask := &awstasks.SecurityGroup{
-			ID:        fi.String(id),
+			ID:        new(id),
 			Lifecycle: b.SecurityLifecycle,
-			Name:      fi.String(id),
-			Shared:    fi.Bool(true),
+			Name:      new(id),
+			Shared:    new(true),
 		}
-		if err := c.EnsureTask(sgTask); err != nil {
-			return nil, err
-		}
+		c.EnsureTask(sgTask)
 		securityGroups = append(securityGroups, sgTask)
 	}
 
 	return securityGroups, nil
 }
 
-// buildAutoscalingGroupTask is responsible for building the autoscaling task into the model
-func (b *AutoscalingGroupModelBuilder) buildAutoScalingGroupTask(c *fi.ModelBuilderContext, name string, ig *kops.InstanceGroup) (*awstasks.AutoscalingGroup, error) {
-
+// buildAutoScalingGroupTask is responsible for building the autoscaling task into the model
+func (b *AutoscalingGroupModelBuilder) buildAutoScalingGroupTask(c *fi.CloudupModelBuilderContext, name string, ig *kops.InstanceGroup) (*awstasks.AutoscalingGroup, error) {
 	t := &awstasks.AutoscalingGroup{
-		Name:      fi.String(name),
+		Name:      new(name),
 		Lifecycle: b.Lifecycle,
 
-		Granularity: fi.String("1Minute"),
+		Granularity: new("1Minute"),
 		Metrics: []string{
 			"GroupDesiredCapacity",
 			"GroupInServiceInstances",
@@ -391,20 +435,20 @@ func (b *AutoscalingGroupModelBuilder) buildAutoScalingGroupTask(c *fi.ModelBuil
 			"GroupTotalInstances",
 		},
 
-		InstanceProtection: fi.Bool(false),
+		InstanceProtection: new(false),
 	}
 
-	minSize := fi.Int64(1)
-	maxSize := fi.Int64(1)
+	minSize := new(int32(1))
+	maxSize := new(int32(1))
 	if ig.Spec.MinSize != nil {
-		minSize = fi.Int64(int64(*ig.Spec.MinSize))
-	} else if ig.Spec.Role == kops.InstanceGroupRoleNode {
-		minSize = fi.Int64(2)
+		minSize = new(int32(*ig.Spec.MinSize))
+	} else if ig.Spec.Role.HasNode() {
+		minSize = new(int32(2))
 	}
 	if ig.Spec.MaxSize != nil {
-		maxSize = fi.Int64(int64(*ig.Spec.MaxSize))
-	} else if ig.Spec.Role == kops.InstanceGroupRoleNode {
-		maxSize = fi.Int64(2)
+		maxSize = new(int32(*ig.Spec.MaxSize))
+	} else if ig.Spec.Role.HasNode() {
+		maxSize = new(int32(2))
 	}
 
 	t.MinSize = minSize
@@ -435,6 +479,10 @@ func (b *AutoscalingGroupModelBuilder) buildAutoScalingGroupTask(c *fi.ModelBuil
 		t.InstanceProtection = ig.Spec.InstanceProtection
 	}
 
+	if ig.Spec.CapacityRebalance != nil {
+		t.CapacityRebalance = ig.Spec.CapacityRebalance
+	}
+
 	t.LoadBalancers = []*awstasks.ClassicLoadBalancer{}
 	t.TargetGroups = []*awstasks.TargetGroup{}
 
@@ -443,19 +491,21 @@ func (b *AutoscalingGroupModelBuilder) buildAutoScalingGroupTask(c *fi.ModelBuil
 	// hybrid (+SpotinstHybrid) instance groups.
 	if !featureflag.Spotinst.Enabled() ||
 		(featureflag.SpotinstHybrid.Enabled() && !HybridInstanceGroup(ig)) {
-		if b.UseLoadBalancerForAPI() && ig.HasAPIServer() {
-			if b.UseNetworkLoadBalancer() {
-				t.TargetGroups = append(t.TargetGroups, b.LinkToTargetGroup("tcp"))
-				if b.Cluster.Spec.API.LoadBalancer.SSLCertificate != "" {
-					t.TargetGroups = append(t.TargetGroups, b.LinkToTargetGroup("tls"))
+		if b.UseLoadBalancerForAPI() && ig.RunsAPIServer() {
+			t.TargetGroups = append(t.TargetGroups, b.LinkToTargetGroup("tcp"))
+			if b.Cluster.UsesLoadBalancerForKopsController() && ig.IsControlPlane() {
+				t.TargetGroups = append(t.TargetGroups, b.LinkToTargetGroup("kops-controller"))
+				if b.Cluster.Spec.Networking.Cilium != nil && b.Cluster.Spec.Networking.Cilium.EtcdManaged {
+					t.TargetGroups = append(t.TargetGroups, b.LinkToTargetGroup("etcd-cilium"))
 				}
-			} else {
-				t.LoadBalancers = append(t.LoadBalancers, b.LinkToCLB("api"))
+			}
+			if b.Cluster.Spec.API.LoadBalancer.SSLCertificate != "" {
+				t.TargetGroups = append(t.TargetGroups, b.LinkToTargetGroup("tls"))
 			}
 		}
 
-		if ig.Spec.Role == kops.InstanceGroupRoleBastion {
-			t.LoadBalancers = append(t.LoadBalancers, b.LinkToCLB("bastion"))
+		if ig.Spec.Role.HasBastion() {
+			t.TargetGroups = append(t.TargetGroups, b.LinkToTargetGroup("bastion"))
 		}
 	}
 
@@ -465,42 +515,96 @@ func (b *AutoscalingGroupModelBuilder) buildAutoScalingGroupTask(c *fi.ModelBuil
 				Name:             extLB.LoadBalancerName,
 				Lifecycle:        b.Lifecycle,
 				LoadBalancerName: extLB.LoadBalancerName,
-				Shared:           fi.Bool(true),
+				Shared:           new(true),
 			}
 			t.LoadBalancers = append(t.LoadBalancers, lb)
 			c.EnsureTask(lb)
 		}
 
 		if extLB.TargetGroupARN != nil {
-			targetGroupName, err := awsup.GetTargetGroupNameFromARN(fi.StringValue(extLB.TargetGroupARN))
+			targetGroupName, err := awsup.NameForExternalTargetGroup(fi.ValueOf(extLB.TargetGroupARN))
 			if err != nil {
 				return nil, err
 			}
 			tg := &awstasks.TargetGroup{
-				Name:      fi.String(name + "-" + targetGroupName),
+				Name:      new(targetGroupName),
 				Lifecycle: b.Lifecycle,
 				ARN:       extLB.TargetGroupARN,
-				Shared:    fi.Bool(true),
+				Shared:    new(true),
 			}
 			t.TargetGroups = append(t.TargetGroups, tg)
-			c.AddTask(tg)
+			c.EnsureTask(tg)
 		}
 	}
 	sort.Stable(awstasks.OrderLoadBalancersByName(t.LoadBalancers))
 	sort.Stable(awstasks.OrderTargetGroupsByName(t.TargetGroups))
 
 	// @step: are we using a mixed instance policy
-	if ig.Spec.MixedInstancesPolicy != nil {
+	if ig.Spec.MixedInstancesPolicy != nil && ig.Spec.Manager == kops.InstanceManagerCloudGroup {
 		spec := ig.Spec.MixedInstancesPolicy
 
+		if spec.InstanceRequirements != nil {
+
+			ir := &awstasks.InstanceRequirements{}
+
+			cpu := spec.InstanceRequirements.CPU
+			if cpu != nil {
+				if cpu.Max != nil {
+					cpuMax, _ := spec.InstanceRequirements.CPU.Max.AsInt64()
+					ir.CPUMax = new(int32(cpuMax))
+				}
+				if cpu.Min != nil {
+					cpuMin, _ := spec.InstanceRequirements.CPU.Min.AsInt64()
+					ir.CPUMin = new(int32(cpuMin))
+				}
+			} else {
+				ir.CPUMin = new(int32(0))
+			}
+
+			memory := spec.InstanceRequirements.Memory
+			if memory != nil {
+				if memory.Max != nil {
+					memoryMax := spec.InstanceRequirements.Memory.Max.ScaledValue(resource.Mega)
+					ir.MemoryMax = new(int32(memoryMax))
+				}
+				if memory.Min != nil {
+					memoryMin := spec.InstanceRequirements.Memory.Min.ScaledValue(resource.Mega)
+					ir.MemoryMin = new(int32(memoryMin))
+				}
+			} else {
+				ir.MemoryMin = new(int32(0))
+			}
+			if len(spec.InstanceRequirements.ExcludedInstanceTypes) > 0 {
+				ir.ExcludedInstanceTypes = spec.InstanceRequirements.ExcludedInstanceTypes
+			}
+			t.InstanceRequirements = ir
+		}
+
 		t.MixedInstanceOverrides = spec.Instances
-		t.MixedOnDemandAboveBase = spec.OnDemandAboveBase
+		if spec.OnDemandAboveBase != nil {
+			t.MixedOnDemandAboveBase = aws.Int32(int32(aws.ToInt64(spec.OnDemandAboveBase)))
+		}
 		t.MixedOnDemandAllocationStrategy = spec.OnDemandAllocationStrategy
-		t.MixedOnDemandBase = spec.OnDemandBase
+		if spec.OnDemandBase != nil {
+			t.MixedOnDemandBase = aws.Int32(int32(aws.ToInt64(spec.OnDemandBase)))
+		}
 		t.MixedSpotAllocationStrategy = spec.SpotAllocationStrategy
-		t.MixedSpotInstancePools = spec.SpotInstancePools
-		t.MixedSpotMaxPrice = ig.Spec.MaxPrice
+		if spec.SpotInstancePools != nil {
+			t.MixedSpotInstancePools = aws.Int32(int32(aws.ToInt64(spec.SpotInstancePools)))
+		}
+		// In order to unset maxprice, the value needs to be ""
+		if ig.Spec.MaxPrice == nil {
+			t.MixedSpotMaxPrice = new("")
+		} else {
+			t.MixedSpotMaxPrice = ig.Spec.MaxPrice
+		}
 	}
 
+	if ig.Spec.MaxInstanceLifetime != nil {
+		lifetimeSec := int32(ig.Spec.MaxInstanceLifetime.Seconds())
+		t.MaxInstanceLifetime = new(lifetimeSec)
+	} else {
+		t.MaxInstanceLifetime = new(int32(0))
+	}
 	return t, nil
 }

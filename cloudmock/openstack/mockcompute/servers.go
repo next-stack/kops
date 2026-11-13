@@ -24,12 +24,11 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/gophercloud/gophercloud/openstack/networking/v2/ports"
-	"k8s.io/kops/upup/pkg/fi"
+	"github.com/gophercloud/gophercloud/v2/openstack/networking/v2/ports"
 
 	"github.com/google/uuid"
-	"github.com/gophercloud/gophercloud"
-	"github.com/gophercloud/gophercloud/openstack/compute/v2/servers"
+	"github.com/gophercloud/gophercloud/v2"
+	"github.com/gophercloud/gophercloud/v2/openstack/compute/v2/servers"
 )
 
 type serverGetResponse struct {
@@ -137,6 +136,7 @@ func (m *MockClient) mockServers() {
 				r.ParseForm()
 				m.listServers(w, r.Form)
 			}
+			m.getServer(w, serverID)
 		case http.MethodPost:
 			m.createServer(w, r)
 		case http.MethodDelete:
@@ -147,6 +147,24 @@ func (m *MockClient) mockServers() {
 	}
 	m.Mux.HandleFunc("/servers/", handler)
 	m.Mux.HandleFunc("/servers", handler)
+}
+
+func (m *MockClient) getServer(w http.ResponseWriter, serverID string) {
+	if server, ok := m.servers[serverID]; ok {
+		getResponse := serverGetResponse{
+			Server: server,
+		}
+		jsonResponse, err := json.Marshal(getResponse)
+		if err != nil {
+			panic(fmt.Sprintf("failed to marshal %+v", getResponse))
+		}
+		_, err = w.Write(jsonResponse)
+		if err != nil {
+			panic("failed to write body")
+		}
+	} else {
+		w.WriteHeader(http.StatusNotFound)
+	}
 }
 
 func (m *MockClient) listServers(w http.ResponseWriter, vals url.Values) {
@@ -191,12 +209,23 @@ func (m *MockClient) createServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.WriteHeader(http.StatusCreated)
+	w.WriteHeader(http.StatusAccepted)
+
+	flavorId := create.Server.FlavorRef
+	flavor := m.flavors[flavorId]
 
 	server := servers.Server{
 		ID:       uuid.New().String(),
 		Name:     create.Server.Name,
 		Metadata: create.Server.Metadata,
+		Status:   "ACTIVE",
+		Flavor: map[string]any{
+			"id":    flavor.ID,
+			"name":  flavor.Name,
+			"ram":   flavor.RAM,
+			"vcpus": flavor.VCPUs,
+			"disk":  flavor.Disk,
+		},
 	}
 	securityGroups := make([]map[string]interface{}, len(create.Server.SecurityGroups))
 	for i, groupName := range create.Server.SecurityGroups {
@@ -205,8 +234,8 @@ func (m *MockClient) createServer(w http.ResponseWriter, r *http.Request) {
 	server.SecurityGroups = securityGroups
 
 	portID := create.Server.Networks[0].Port
-	ports.Update(m.networkClient, portID, ports.UpdateOpts{
-		DeviceID: fi.String(server.ID),
+	ports.Update(r.Context(), m.networkClient, portID, ports.UpdateOpts{
+		DeviceID: new(server.ID),
 	})
 
 	// Assign an IP address

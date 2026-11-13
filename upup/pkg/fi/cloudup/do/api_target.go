@@ -24,7 +24,7 @@ type DOAPITarget struct {
 	Cloud DOCloud
 }
 
-var _ fi.Target = &DOAPITarget{}
+var _ fi.CloudupTarget = (*DOAPITarget)(nil)
 
 func NewDOAPITarget(cloud DOCloud) *DOAPITarget {
 	return &DOAPITarget{
@@ -32,10 +32,10 @@ func NewDOAPITarget(cloud DOCloud) *DOAPITarget {
 	}
 }
 
-func (t *DOAPITarget) Finish(taskMap map[string]fi.Task) error {
+func (t *DOAPITarget) Finish(taskMap map[string]fi.CloudupTask) error {
 	return nil
 }
 
-func (t *DOAPITarget) ProcessDeletions() bool {
+func (t *DOAPITarget) DefaultCheckExisting() bool {
 	return true
 }

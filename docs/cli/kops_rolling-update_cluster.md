@@ -17,6 +17,9 @@ If rolling-update does not report that the cluster needs to be updated, you can 
 updated with the --force flag.  Rolling update drains and validates the cluster by default.  A cluster is
 deemed validated when all required nodes are running and all pods with a critical priority are operational.
 
+If the cluster is in a broken state and cannot be validated, rolling-update will get stuck and eventually 
+fail; you can force the update to proceed with the --cloudonly flag, which will skip validation.
+
 Note: terraform users will need to run all of the following commands from the same directory
 `kops update cluster --target=terraform` then `terraform plan` then
 `terraform apply` prior to running `kops rolling-update cluster`.
@@ -56,42 +59,36 @@ kops rolling-update cluster [CLUSTER] [flags]
 ### Options
 
 ```
-      --bastion-interval duration      Time to wait between restarting bastions (default 15s)
-      --cloudonly                      Perform rolling update without confirming progress with Kubernetes
-      --fail-on-drain-error            Fail if draining a node fails (default true)
-      --fail-on-validate-error         Fail if the cluster fails to validate (default true)
-      --force                          Force rolling update, even if no changes
-  -h, --help                           help for cluster
-      --instance-group strings         Instance groups to update (defaults to all if not specified)
-      --instance-group-roles strings   Instance group roles to update (master,apiserver,node,bastion)
-  -i, --interactive                    Prompt to continue after each instance is updated
-      --master-interval duration       Time to wait between restarting control plane nodes (default 15s)
-      --node-interval duration         Time to wait between restarting worker nodes (default 15s)
-      --post-drain-delay duration      Time to wait after draining each node (default 5s)
-      --validate-count int32           Number of times that a cluster needs to be validated after single node update (default 2)
-      --validation-timeout duration    Maximum time to wait for a cluster to validate (default 15m0s)
-  -y, --yes                            Perform rolling update immediately; without --yes rolling-update executes a dry-run
+      --admin duration                    a cluster admin user credential with the specified lifetime (default 18h0m0s)
+      --api-server string                 Override the API server URL without changing TLS or authentication settings
+      --bastion-interval duration         Time to wait between restarting bastions (default 15s)
+      --cloudonly                         Perform rolling update without validating cluster status (will cause downtime)
+      --control-plane-interval duration   Time to wait between restarting control plane nodes (default 15s)
+      --drain-timeout duration            Maximum time to wait for a node to drain (default 15m0s)
+      --fail-on-drain-error               Fail if draining a node fails (default true)
+      --fail-on-validate-error            Fail if the cluster fails to validate (default true)
+      --force                             Force rolling update, even if no changes
+  -h, --help                              help for cluster
+      --instance-group strings            Instance groups to update (defaults to all if not specified)
+      --instance-group-roles strings      Instance group roles to update (control-plane,apiserver,node,bastion,etcd,scheduler,kubecontrollermanager)
+  -i, --interactive                       Prompt to continue after each instance is updated
+      --node-interval duration            Time to wait between restarting worker nodes (default 15s)
+      --post-drain-delay duration         Time to wait after draining each node (default 5s)
+      --use-kubeconfig                    Use the cluster's local kubeconfig context, including TLS, proxy and authentication settings
+      --validate-count int32              Number of times that a cluster needs to be validated after single node update (default 2)
+      --validation-timeout duration       Maximum time to wait for a cluster to validate (default 15m0s)
+  -y, --yes                               Perform rolling update immediately; without --yes rolling-update executes a dry-run
 ```
 
 ### Options inherited from parent commands
 
 ```
-      --add_dir_header                   If true, adds the file directory to the header of the log messages
-      --alsologtostderr                  log to standard error as well as files
-      --config string                    yaml config file (default is $HOME/.kops.yaml)
-      --log_backtrace_at traceLocation   when logging hits line file:N, emit a stack trace (default :0)
-      --log_dir string                   If non-empty, write log files in this directory
-      --log_file string                  If non-empty, use this log file
-      --log_file_max_size uint           Defines the maximum size a log file can grow to. Unit is megabytes. If the value is 0, the maximum file size is unlimited. (default 1800)
-      --logtostderr                      log to standard error instead of files (default true)
-      --name string                      Name of cluster. Overrides KOPS_CLUSTER_NAME environment variable
-      --one_output                       If true, only write logs to their native severity level (vs also writing to each lower severity level)
-      --skip_headers                     If true, avoid header prefixes in the log messages
-      --skip_log_headers                 If true, avoid headers when opening log files
-      --state string                     Location of state storage (kops 'config' file). Overrides KOPS_STATE_STORE environment variable
-      --stderrthreshold severity         logs at or above this threshold go to stderr (default 2)
-  -v, --v Level                          number for the log level verbosity
-      --vmodule moduleSpec               comma-separated list of pattern=N settings for file-filtered logging
+      --alsologtostderrthreshold severity   logs at or above this threshold go to stderr when -alsologtostderr=true (no effect when -logtostderr=true)
+      --config string                       yaml config file (default is $HOME/.kops.yaml)
+      --legacy_stderr_threshold_behavior    If true, stderrthreshold is ignored when logtostderr=true (legacy behavior). If false, stderrthreshold is honored even when logtostderr=true
+      --name string                         Name of cluster. Overrides KOPS_CLUSTER_NAME environment variable
+      --state string                        Location of state storage (kops 'config' file). Overrides KOPS_STATE_STORE environment variable
+  -v, --v Level                             number for the log level verbosity
 ```
 
 ### SEE ALSO

@@ -18,47 +18,55 @@ package vfs
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path"
 	"strings"
 	"sync"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/awserr"
-	"github.com/aws/aws-sdk-go/service/s3"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"k8s.io/klog/v2"
+
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraformWriter"
 	"k8s.io/kops/util/pkg/hashing"
 )
 
 type S3Path struct {
-	s3Context     *S3Context
-	bucket        string
-	bucketDetails *S3BucketDetails
-	key           string
-	etag          *string
+	s3Context *S3Context
+	bucket    string
+	key       string
+	etag      *string
 
 	// scheme is configurable in case an S3 compatible custom
 	// endpoint is specified
 	scheme string
 	// sse specifies if server side encryption should be enabled
 	sse bool
+	// optFn configures provider-specific S3 client options.
+	optFn func(*s3.Options)
 }
 
-var _ Path = &S3Path{}
-var _ TerraformPath = &S3Path{}
-var _ HasHash = &S3Path{}
+var (
+	_ Path          = &S3Path{}
+	_ TerraformPath = &S3Path{}
+	_ HasHash       = &S3Path{}
+)
 
 // S3Acl is an ACL implementation for objects on S3
 type S3Acl struct {
-	RequestACL *string
+	RequestACL *types.ObjectCannedACL
 }
 
-func newS3Path(s3Context *S3Context, scheme string, bucket string, key string, sse bool) *S3Path {
+func newS3Path(s3Context *S3Context, scheme string, bucket string, key string, sse bool, optFn func(*s3.Options)) *S3Path {
 	bucket = strings.TrimSuffix(bucket, "/")
 	key = strings.TrimPrefix(key, "/")
 
@@ -68,7 +76,17 @@ func newS3Path(s3Context *S3Context, scheme string, bucket string, key string, s
 		key:       key,
 		scheme:    scheme,
 		sse:       sse,
+		optFn:     optFn,
 	}
+}
+
+func (p *S3Path) Region(ctx context.Context) (string, error) {
+	bucketDetails, err := p.getBucketDetails(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	return bucketDetails.region, nil
 }
 
 func (p *S3Path) Path() string {
@@ -87,23 +105,8 @@ func (p *S3Path) String() string {
 	return p.Path()
 }
 
-// TerraformProvider returns the provider name and necessary arguments
-func (p *S3Path) TerraformProvider() (*TerraformProvider, error) {
-	if err := p.ensureBucketDetails(); err != nil {
-		return nil, err
-	}
-
-	provider := &TerraformProvider{
-		Name: "aws",
-		Arguments: map[string]string{
-			"region": p.bucketDetails.region,
-		},
-	}
-	return provider, nil
-}
-
-func (p *S3Path) Remove() error {
-	client, err := p.client()
+func (p *S3Path) Remove(ctx context.Context) error {
+	client, err := p.client(ctx)
 	if err != nil {
 		return err
 	}
@@ -114,7 +117,7 @@ func (p *S3Path) Remove() error {
 	request.Bucket = aws.String(p.bucket)
 	request.Key = aws.String(p.key)
 
-	_, err = client.DeleteObject(request)
+	_, err = client.DeleteObject(ctx, request)
 	if err != nil {
 		// TODO: Check for not-exists, return os.NotExist
 
@@ -124,8 +127,57 @@ func (p *S3Path) Remove() error {
 	return nil
 }
 
-func (p *S3Path) RemoveAllVersions() error {
-	client, err := p.client()
+func (p *S3Path) RemoveAll(ctx context.Context) error {
+	client, err := p.client(ctx)
+	if err != nil {
+		return err
+	}
+
+	tree, err := p.ReadTree(ctx)
+	if err != nil {
+		return err
+	}
+
+	objects := make([]types.ObjectIdentifier, len(tree))
+	for i := range tree {
+		s3Object, isS3Object := tree[i].(*S3Path)
+		if !isS3Object {
+			return fmt.Errorf("invalid path in s3fs tree: %s", tree[i].Path())
+		}
+
+		objects[i] = types.ObjectIdentifier{
+			Key: aws.String(s3Object.key),
+		}
+	}
+
+	klog.V(8).Infof("removing all file in %s", p)
+
+	request := &s3.DeleteObjectsInput{
+		Bucket: aws.String(p.bucket),
+		Delete: &types.Delete{},
+	}
+
+	for len(objects) > 0 {
+		// DeleteObjects can only process 1000 objects per call
+		if len(objects) > 1000 {
+			request.Delete.Objects = objects[:1000]
+			objects = objects[1000:]
+		} else {
+			request.Delete.Objects = objects
+			objects = nil
+		}
+
+		_, err = client.DeleteObjects(ctx, request)
+		if err != nil {
+			return fmt.Errorf("error removing %d files: %w", len(request.Delete.Objects), err)
+		}
+	}
+
+	return nil
+}
+
+func (p *S3Path) RemoveAllVersions(ctx context.Context) error {
+	client, err := p.client(ctx)
 	if err != nil {
 		return err
 	}
@@ -137,42 +189,52 @@ func (p *S3Path) RemoveAllVersions() error {
 		Prefix: aws.String(p.key),
 	}
 
-	var versions []*s3.ObjectVersion
-	var deleteMarkers []*s3.DeleteMarkerEntry
-	if err := client.ListObjectVersionsPages(request, func(page *s3.ListObjectVersionsOutput, lastPage bool) bool {
-		versions = append(versions, page.Versions...)
-		deleteMarkers = append(deleteMarkers, page.DeleteMarkers...)
-		return true
-	}); err != nil {
-		return fmt.Errorf("error listing all versions of file %s: %v", p, err)
+	var versions []types.ObjectVersion
+	var deleteMarkers []types.DeleteMarkerEntry
+	paginator := s3.NewListObjectVersionsPaginator(client, request)
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return fmt.Errorf("error listing all versions of file %s: %v", p, err)
+		}
+		for _, version := range page.Versions {
+			if aws.ToString(version.Key) == p.key {
+				versions = append(versions, version)
+			}
+		}
+		for _, marker := range page.DeleteMarkers {
+			if aws.ToString(marker.Key) == p.key {
+				deleteMarkers = append(deleteMarkers, marker)
+			}
+		}
 	}
 
 	if len(versions) == 0 && len(deleteMarkers) == 0 {
 		return os.ErrNotExist
 	}
 
-	var objects []*s3.ObjectIdentifier
+	var objects []types.ObjectIdentifier
 	for _, version := range versions {
-		klog.V(8).Infof("removing file %s version %q", p, aws.StringValue(version.VersionId))
-		file := s3.ObjectIdentifier{
+		klog.V(8).Infof("removing file %s version %q", p, aws.ToString(version.VersionId))
+		file := types.ObjectIdentifier{
 			Key:       version.Key,
 			VersionId: version.VersionId,
 		}
-		objects = append(objects, &file)
+		objects = append(objects, file)
 	}
 	for _, version := range deleteMarkers {
-		klog.V(8).Infof("removing marker %s version %q", p, aws.StringValue(version.VersionId))
-		marker := s3.ObjectIdentifier{
+		klog.V(8).Infof("removing marker %s version %q", p, aws.ToString(version.VersionId))
+		marker := types.ObjectIdentifier{
 			Key:       version.Key,
 			VersionId: version.VersionId,
 		}
-		objects = append(objects, &marker)
+		objects = append(objects, marker)
 	}
 
 	for len(objects) > 0 {
 		request := &s3.DeleteObjectsInput{
 			Bucket: aws.String(p.bucket),
-			Delete: &s3.Delete{},
+			Delete: &types.Delete{},
 		}
 
 		// DeleteObjects can only process 1000 objects per call
@@ -186,9 +248,12 @@ func (p *S3Path) RemoveAllVersions() error {
 
 		klog.V(8).Infof("removing %d file/marker versions\n", len(request.Delete.Objects))
 
-		_, err = client.DeleteObjects(request)
+		deleteResult, err := client.DeleteObjects(ctx, request)
 		if err != nil {
 			return fmt.Errorf("error removing %d file/marker versions: %v", len(request.Delete.Objects), err)
+		}
+		if len(deleteResult.Errors) > 0 {
+			return fmt.Errorf("error removing file/marker versions: %v", deleteResult.Errors)
 		}
 	}
 
@@ -205,10 +270,11 @@ func (p *S3Path) Join(relativePath ...string) Path {
 		key:       joined,
 		scheme:    p.scheme,
 		sse:       p.sse,
+		optFn:     p.optFn,
 	}
 }
 
-func (p *S3Path) getServerSideEncryption() (sse *string, sseLog string, err error) {
+func (p *S3Path) getServerSideEncryption(ctx context.Context) (sse types.ServerSideEncryption, sseLog string, err error) {
 	// If we are on an S3 implementation that supports SSE (i.e. not
 	// DO), we use server-side-encryption, it doesn't really cost us
 	// anything.  But if the bucket has a defaultEncryption policy
@@ -216,28 +282,29 @@ func (p *S3Path) getServerSideEncryption() (sse *string, sseLog string, err erro
 	// standard.
 	sseLog = "-"
 	if p.sse {
-		err := p.ensureBucketDetails()
+		bucketDetails, err := p.getBucketDetails(ctx)
 		if err != nil {
-			return nil, "", err
+			return "", "", err
 		}
-		defaultEncryption := p.bucketDetails.hasServerSideEncryptionByDefault()
+		defaultEncryption := bucketDetails.hasServerSideEncryptionByDefault(ctx, p.optFn)
 		if defaultEncryption {
 			sseLog = "DefaultBucketEncryption"
 		} else {
 			sseLog = "AES256"
-			sse = aws.String("AES256")
+			sse = types.ServerSideEncryptionAes256
 		}
 	}
 
 	return sse, sseLog, nil
 }
 
-func (p *S3Path) getRequestACL(aclObj ACL) (*string, error) {
+func (p *S3Path) getRequestACL(aclObj ACL) (*types.ObjectCannedACL, error) {
 	acl := os.Getenv("KOPS_STATE_S3_ACL")
 	acl = strings.TrimSpace(acl)
 	if acl != "" {
+		cannedACL := types.ObjectCannedACL(acl)
 		klog.V(8).Infof("Using KOPS_STATE_S3_ACL=%s", acl)
-		return &acl, nil
+		return &cannedACL, nil
 	} else if aclObj != nil {
 		s3Acl, ok := aclObj.(*S3Acl)
 		if !ok {
@@ -248,8 +315,11 @@ func (p *S3Path) getRequestACL(aclObj ACL) (*string, error) {
 	return nil, nil
 }
 
-func (p *S3Path) WriteFile(data io.ReadSeeker, aclObj ACL) error {
-	client, err := p.client()
+func (p *S3Path) WriteFile(ctx context.Context, data io.ReadSeeker, aclObj ACL) error {
+	ctx, span := tracer.Start(ctx, "S3Path::WriteFile", trace.WithAttributes(attribute.String("path", p.String())))
+	defer span.End()
+
+	client, err := p.client(ctx)
 	if err != nil {
 		return err
 	}
@@ -262,21 +332,24 @@ func (p *S3Path) WriteFile(data io.ReadSeeker, aclObj ACL) error {
 	request.Key = aws.String(p.key)
 
 	var sseLog string
-	request.ServerSideEncryption, sseLog, _ = p.getServerSideEncryption()
+	request.ServerSideEncryption, sseLog, _ = p.getServerSideEncryption(ctx)
 
-	request.ACL, err = p.getRequestACL(aclObj)
+	acl, err := p.getRequestACL(aclObj)
 	if err != nil {
 		return err
+	}
+	if acl != nil {
+		request.ACL = *acl
 	}
 
 	// We don't need Content-MD5: https://github.com/aws/aws-sdk-go/issues/208
 
-	klog.V(8).Infof("Calling S3 PutObject Bucket=%q Key=%q SSE=%q ACL=%q", p.bucket, p.key, sseLog, aws.StringValue(request.ACL))
+	klog.V(8).Infof("Calling S3 PutObject Bucket=%q Key=%q SSE=%q ACL=%q", p.bucket, p.key, sseLog, request.ACL)
 
-	_, err = client.PutObject(request)
+	_, err = client.PutObject(ctx, request)
 	if err != nil {
-		if request.ACL != nil {
-			return fmt.Errorf("error writing %s (with ACL=%q): %v", p, aws.StringValue(request.ACL), err)
+		if len(request.ACL) > 0 {
+			return fmt.Errorf("error writing %s (with ACL=%q): %v", p, request.ACL, err)
 		}
 		return fmt.Errorf("error writing %s: %v", p, err)
 	}
@@ -290,12 +363,12 @@ func (p *S3Path) WriteFile(data io.ReadSeeker, aclObj ACL) error {
 // TODO: should we enable versioning?
 var createFileLockS3 sync.Mutex
 
-func (p *S3Path) CreateFile(data io.ReadSeeker, acl ACL) error {
+func (p *S3Path) CreateFile(ctx context.Context, data io.ReadSeeker, acl ACL) error {
 	createFileLockS3.Lock()
 	defer createFileLockS3.Unlock()
 
 	// Check if exists
-	_, err := p.ReadFile()
+	_, err := p.ReadFile(ctx)
 	if err == nil {
 		return os.ErrExist
 	}
@@ -304,13 +377,16 @@ func (p *S3Path) CreateFile(data io.ReadSeeker, acl ACL) error {
 		return err
 	}
 
-	return p.WriteFile(data, acl)
+	return p.WriteFile(ctx, data, acl)
 }
 
 // ReadFile implements Path::ReadFile
-func (p *S3Path) ReadFile() ([]byte, error) {
+func (p *S3Path) ReadFile(ctx context.Context) ([]byte, error) {
+	ctx, span := tracer.Start(ctx, "S3Path::ReadFile", trace.WithAttributes(attribute.String("path", p.String())))
+	defer span.End()
+
 	var b bytes.Buffer
-	_, err := p.WriteTo(&b)
+	_, err := p.WriteToWithContext(ctx, &b)
 	if err != nil {
 		return nil, err
 	}
@@ -319,7 +395,13 @@ func (p *S3Path) ReadFile() ([]byte, error) {
 
 // WriteTo implements io.WriterTo
 func (p *S3Path) WriteTo(out io.Writer) (int64, error) {
-	client, err := p.client()
+	ctx := context.TODO()
+	return p.WriteToWithContext(ctx, out)
+}
+
+// WriteToWithContext implements io.WriterTo, but adds a context
+func (p *S3Path) WriteToWithContext(ctx context.Context, out io.Writer) (int64, error) {
+	client, err := p.client(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -330,7 +412,7 @@ func (p *S3Path) WriteTo(out io.Writer) (int64, error) {
 	request.Bucket = aws.String(p.bucket)
 	request.Key = aws.String(p.key)
 
-	response, err := client.GetObject(request)
+	response, err := client.GetObject(ctx, request)
 	if err != nil {
 		if AWSErrorCode(err) == "NoSuchKey" {
 			return 0, os.ErrNotExist
@@ -347,7 +429,8 @@ func (p *S3Path) WriteTo(out io.Writer) (int64, error) {
 }
 
 func (p *S3Path) ReadDir() ([]Path, error) {
-	client, err := p.client()
+	ctx := context.TODO()
+	client, err := p.client(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -356,16 +439,21 @@ func (p *S3Path) ReadDir() ([]Path, error) {
 	if prefix != "" && !strings.HasSuffix(prefix, "/") {
 		prefix += "/"
 	}
-	request := &s3.ListObjectsInput{}
+	request := &s3.ListObjectsV2Input{}
 	request.Bucket = aws.String(p.bucket)
 	request.Prefix = aws.String(prefix)
 	request.Delimiter = aws.String("/")
 
 	klog.V(4).Infof("Listing objects in S3 bucket %q with prefix %q", p.bucket, prefix)
 	var paths []Path
-	err = client.ListObjectsPages(request, func(page *s3.ListObjectsOutput, lastPage bool) bool {
+	paginator := s3.NewListObjectsV2Paginator(client, request)
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("error listing %s: %v", p, err)
+		}
 		for _, o := range page.Contents {
-			key := aws.StringValue(o.Key)
+			key := aws.ToString(o.Key)
 			if key == prefix {
 				// We have reports (#548 and #520) of the directory being returned as a file
 				// And this will indeed happen if the directory has been created as a file,
@@ -381,25 +469,25 @@ func (p *S3Path) ReadDir() ([]Path, error) {
 				etag:      o.ETag,
 				scheme:    p.scheme,
 				sse:       p.sse,
+				optFn:     p.optFn,
 			}
 			paths = append(paths, child)
 		}
-		return true
-	})
-	if err != nil {
-		return nil, fmt.Errorf("error listing %s: %v", p, err)
 	}
 	klog.V(8).Infof("Listed files in %v: %v", p, paths)
 	return paths, nil
 }
 
-func (p *S3Path) ReadTree() ([]Path, error) {
-	client, err := p.client()
+func (p *S3Path) ReadTree(ctx context.Context) ([]Path, error) {
+	ctx, span := tracer.Start(ctx, "S3Path::ReadTree")
+	defer span.End()
+
+	client, err := p.client(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	request := &s3.ListObjectsInput{}
+	request := &s3.ListObjectsV2Input{}
 	request.Bucket = aws.String(p.bucket)
 	prefix := p.key
 	if prefix != "" && !strings.HasSuffix(prefix, "/") {
@@ -409,9 +497,14 @@ func (p *S3Path) ReadTree() ([]Path, error) {
 	// No delimiter for recursive search
 
 	var paths []Path
-	err = client.ListObjectsPages(request, func(page *s3.ListObjectsOutput, lastPage bool) bool {
+	paginator := s3.NewListObjectsV2Paginator(client, request)
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("error listing %s: %v", p, err)
+		}
 		for _, o := range page.Contents {
-			key := aws.StringValue(o.Key)
+			key := aws.ToString(o.Key)
 			child := &S3Path{
 				s3Context: p.s3Context,
 				bucket:    p.bucket,
@@ -419,37 +512,30 @@ func (p *S3Path) ReadTree() ([]Path, error) {
 				etag:      o.ETag,
 				scheme:    p.scheme,
 				sse:       p.sse,
+				optFn:     p.optFn,
 			}
 			paths = append(paths, child)
 		}
-		return true
-	})
-	if err != nil {
-		return nil, fmt.Errorf("error listing %s: %v", p, err)
 	}
 	return paths, nil
 }
 
-func (p *S3Path) ensureBucketDetails() error {
-	if p.bucketDetails == nil || p.bucketDetails.region == "" {
-		bucketDetails, err := p.s3Context.getDetailsForBucket(p.bucket)
-
-		p.bucketDetails = bucketDetails
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func (p *S3Path) client() (*s3.S3, error) {
-	err := p.ensureBucketDetails()
+func (p *S3Path) getBucketDetails(ctx context.Context) (*S3BucketDetails, error) {
+	bucketDetails, err := p.s3Context.getDetailsForBucket(ctx, p.bucket)
 	if err != nil {
 		return nil, err
 	}
 
-	client, err := p.s3Context.getClient(p.bucketDetails.region)
+	return bucketDetails, nil
+}
+
+func (p *S3Path) client(ctx context.Context) (*s3.Client, error) {
+	bucketDetails, err := p.getBucketDetails(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	client, err := p.s3Context.getClient(ctx, bucketDetails.region, p.optFn)
 	if err != nil {
 		return nil, err
 	}
@@ -484,24 +570,96 @@ func (p *S3Path) Hash(a hashing.HashAlgorithm) (*hashing.Hash, error) {
 	return &hashing.Hash{Algorithm: hashing.HashAlgorithmMD5, HashValue: md5Bytes}, nil
 }
 
-func (p *S3Path) GetHTTPsUrl() (string, error) {
-	if p.bucketDetails == nil {
-		bucketDetails, err := p.s3Context.getDetailsForBucket(p.bucket)
-		if err != nil {
-			return "", fmt.Errorf("failed to get bucket details for %q: %w", p.String(), err)
-		}
-		p.bucketDetails = bucketDetails
+func (p *S3Path) GetHTTPsUrl(dualstack bool) (string, error) {
+	ctx := context.TODO()
+
+	bucketDetails, err := p.getBucketDetails(ctx)
+	if err != nil {
+		return "", fmt.Errorf("failed to get bucket details for %q: %w", p.String(), err)
 	}
-	url := fmt.Sprintf("https://%s.s3.%s.amazonaws.com/%s", p.bucketDetails.name, p.bucketDetails.region, p.Key())
-	return strings.TrimSuffix(url, "/"), nil
+
+	resolver := s3.NewDefaultEndpointResolverV2()
+	endpoint, err := resolver.ResolveEndpoint(ctx, s3.EndpointParameters{
+		Bucket:       aws.String(bucketDetails.name),
+		Region:       aws.String(bucketDetails.region),
+		UseDualStack: aws.Bool(dualstack),
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve endpoint for %q: %w", p.String(), err)
+	}
+
+	endpoint.URI.Path = path.Join(endpoint.URI.Path, p.Key())
+	return endpoint.URI.String(), nil
 }
 
-func (p *S3Path) IsPublic() (bool, error) {
-	client, err := p.client()
+func (p *S3Path) IsBucketPublic(ctx context.Context) (bool, error) {
+	client, err := p.client(ctx)
 	if err != nil {
 		return false, err
 	}
-	acl, err := client.GetObjectAcl(&s3.GetObjectAclInput{
+
+	result, err := client.GetBucketPolicyStatus(ctx, &s3.GetBucketPolicyStatusInput{
+		Bucket: aws.String(p.bucket),
+	})
+	if err != nil && AWSErrorCode(err) != "NoSuchBucketPolicy" {
+		return false, fmt.Errorf("from AWS S3 GetBucketPolicyStatusWithContext: %w", err)
+	}
+	if err == nil && aws.ToBool(result.PolicyStatus.IsPublic) {
+		return true, nil
+	}
+	return false, nil
+
+	// We could check bucket ACLs also...
+
+	// acl, err := client.GetBucketAclWithContext(ctx, &s3.GetBucketAclInput{
+	// 	Bucket: &p.bucket,
+	// })
+	// if err != nil {
+	// 	return false, fmt.Errorf("failed to get ACL for bucket %q: %w", p.bucket, err)
+	// }
+
+	// allowsAnonymousRead := false
+	// for _, grant := range acl.Grants {
+	// 	isAllUsers := false
+
+	// 	switch aws.ToString(grant.Grantee.URI) {
+	// 	case "http://acs.amazonaws.com/groups/global/AllUsers":
+	// 		isAllUsers = true
+	// 	}
+
+	// 	if isAllUsers {
+	// 		permission := aws.ToString(grant.Permission)
+	// 		switch permission {
+	// 		case "FULL_CONTROL":
+	// 			klog.Warningf("bucket %q allows anonymous users full access", p.bucket)
+	// 			allowsAnonymousRead = true
+	// 		case "WRITE", "WRITE_ACP":
+	// 			klog.Warningf("bucket %q allows anonymous users write access", p.bucket)
+	// 			// it's not _read_ access
+	// 		case "READ":
+	// 			allowsAnonymousRead = true
+	// 		case "READ_ACP":
+	// 			// does not grant read
+	// 		default:
+	// 			klog.Warningf("bucket %q has unknown permission %q for anonymous access", p.bucket, permission)
+	// 		}
+	// 	}
+	// }
+
+	// return allowsAnonymousRead, nil
+}
+
+func (p *S3Path) IsPublic() (bool, error) {
+	if p.scheme == "linode" {
+		// Akamai (Linode) does not implement GetObjectAcl. In that case we conservatively treat the object as non-public and continue.
+		return false, nil
+	}
+	ctx := context.TODO()
+	client, err := p.client(ctx)
+	if err != nil {
+		return false, err
+	}
+	acl, err := client.GetObjectAcl(ctx, &s3.GetObjectAclInput{
 		Bucket: &p.bucket,
 		Key:    &p.key,
 	})
@@ -510,8 +668,8 @@ func (p *S3Path) IsPublic() (bool, error) {
 	}
 
 	for _, grant := range acl.Grants {
-		if aws.StringValue(grant.Grantee.URI) == "http://acs.amazonaws.com/groups/global/AllUsers" {
-			return aws.StringValue(grant.Permission) == "READ", nil
+		if aws.ToString(grant.Grantee.URI) == "http://acs.amazonaws.com/groups/global/AllUsers" {
+			return grant.Permission == types.PermissionRead, nil
 		}
 	}
 	return false, nil
@@ -526,42 +684,119 @@ type terraformS3File struct {
 	Provider *terraformWriter.Literal `json:"provider,omitempty" cty:"provider"`
 }
 
+type terraformDOFile struct {
+	Bucket  string                   `json:"bucket" cty:"bucket"`
+	Region  string                   `json:"region" cty:"region"`
+	Key     string                   `json:"key" cty:"key"`
+	Content *terraformWriter.Literal `json:"content,omitempty" cty:"content"`
+}
+
+type terraformScwFile struct {
+	Bucket  string                   `json:"bucket" cty:"bucket"`
+	Key     string                   `json:"key" cty:"key"`
+	Content *terraformWriter.Literal `json:"content,omitempty" cty:"content"`
+}
+
 func (p *S3Path) RenderTerraform(w *terraformWriter.TerraformWriter, name string, data io.Reader, acl ACL) error {
-	bytes, err := ioutil.ReadAll(data)
+	ctx := context.TODO()
+
+	bytes, err := io.ReadAll(data)
 	if err != nil {
 		return fmt.Errorf("reading data: %v", err)
 	}
 
-	content, err := w.AddFileBytes("aws_s3_bucket_object", name, "content", bytes, false)
-	if err != nil {
-		return fmt.Errorf("rendering S3 file: %v", err)
+	// render DO's terraform
+	switch p.scheme {
+	case "do":
+
+		content, err := w.AddFileBytes("digitalocean_spaces_bucket_object", name, "content", bytes, false)
+		if err != nil {
+			return fmt.Errorf("error rendering DO file: %w", err)
+		}
+
+		// retrieve space region from endpoint
+		endpoint := os.Getenv("S3_ENDPOINT")
+		if endpoint == "" {
+			return errors.New("S3 Endpoint is empty")
+		}
+		region := strings.Split(endpoint, ".")[0]
+
+		tf := &terraformDOFile{
+			Bucket:  p.Bucket(),
+			Region:  region,
+			Key:     p.Key(),
+			Content: content,
+		}
+		return w.RenderResource("digitalocean_spaces_bucket_object", name, tf)
+
+		// render Scaleway's Terraform objects
+	case "scw":
+
+		content, err := w.AddFileBytes("scaleway_object", name, "content", bytes, false)
+		if err != nil {
+			return fmt.Errorf("error rendering Scaleway file: %w", err)
+		}
+
+		tf := terraformScwFile{
+			Bucket:  p.Bucket(),
+			Key:     p.Key(),
+			Content: content,
+		}
+		return w.RenderResource("scaleway_object", name, tf)
+
+	default:
+		bucketDetails, err := p.getBucketDetails(ctx)
+		if err != nil {
+			return err
+		}
+
+		tfProviderArguments := map[string]string{
+			"region": bucketDetails.region,
+		}
+		w.EnsureTerraformProvider("aws", tfProviderArguments)
+
+		content, err := w.AddFileBytes("aws_s3_object", name, "content", bytes, false)
+		if err != nil {
+			return fmt.Errorf("rendering S3 file: %v", err)
+		}
+
+		sse, _, err := p.getServerSideEncryption(ctx)
+		if err != nil {
+			return err
+		}
+		sseVal := string(sse)
+
+		requestACL, err := p.getRequestACL(acl)
+		if err != nil {
+			return err
+		}
+		var aclVal string
+		if requestACL != nil {
+			aclVal = string(*requestACL)
+		}
+
+		tf := &terraformS3File{
+			Bucket:   p.Bucket(),
+			Key:      p.Key(),
+			Content:  content,
+			Provider: terraformWriter.LiteralTokens("aws", "files"),
+		}
+		if sseVal != "" {
+			tf.SSE = &sseVal
+		}
+		if aclVal != "" {
+			tf.Acl = &aclVal
+		}
+		return w.RenderResource("aws_s3_object", name, tf)
 	}
 
-	sse, _, err := p.getServerSideEncryption()
-	if err != nil {
-		return err
-	}
-
-	requestACL, err := p.getRequestACL(acl)
-	if err != nil {
-		return err
-	}
-
-	tf := &terraformS3File{
-		Bucket:   p.Bucket(),
-		Key:      p.Key(),
-		Content:  content,
-		SSE:      sse,
-		Acl:      requestACL,
-		Provider: terraformWriter.LiteralTokens("aws", "files"),
-	}
-	return w.RenderResource("aws_s3_bucket_object", name, tf)
 }
 
-// AWSErrorCode returns the aws error code, if it is an awserr.Error, otherwise ""
+// AWSErrorCode returns the aws error code, if it is an smity.APIError, otherwise ""
 func AWSErrorCode(err error) string {
-	if awsError, ok := err.(awserr.Error); ok {
-		return awsError.Code()
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.ErrorCode()
 	}
 	return ""
 }

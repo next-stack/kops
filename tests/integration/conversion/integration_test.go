@@ -18,7 +18,7 @@ package main
 
 import (
 	"bytes"
-	"io/ioutil"
+	"os"
 	"path"
 	"strings"
 	"testing"
@@ -38,16 +38,46 @@ func TestConversionMinimal(t *testing.T) {
 	runTest(t, "minimal", "v1alpha3", "v1alpha2")
 }
 
+func TestConversionAWS(t *testing.T) {
+	runTest(t, "aws", "v1alpha2", "v1alpha3")
+	runTest(t, "aws", "v1alpha3", "v1alpha2")
+}
+
+func TestConversionAzure(t *testing.T) {
+	runTest(t, "azure", "v1alpha2", "v1alpha3")
+	runTest(t, "azure", "v1alpha3", "v1alpha2")
+}
+
+func TestConversionCilium(t *testing.T) {
+	runTest(t, "cilium", "v1alpha2", "v1alpha3")
+	runTest(t, "cilium", "v1alpha3", "v1alpha2")
+}
+
+func TestConversionDO(t *testing.T) {
+	runTest(t, "do", "v1alpha2", "v1alpha3")
+	runTest(t, "do", "v1alpha3", "v1alpha2")
+}
+
+func TestConversionGCE(t *testing.T) {
+	runTest(t, "gce", "v1alpha2", "v1alpha3")
+	runTest(t, "gce", "v1alpha3", "v1alpha2")
+}
+
+func TestConversionOpenstack(t *testing.T) {
+	runTest(t, "openstack", "v1alpha2", "v1alpha3")
+	runTest(t, "openstack", "v1alpha3", "v1alpha2")
+}
+
 func runTest(t *testing.T, srcDir string, fromVersion string, toVersion string) {
 	t.Run(fromVersion+"-"+toVersion, func(t *testing.T) {
 		sourcePath := path.Join(srcDir, fromVersion+".yaml")
-		sourceBytes, err := ioutil.ReadFile(sourcePath)
+		sourceBytes, err := os.ReadFile(sourcePath)
 		if err != nil {
 			t.Fatalf("unexpected error reading sourcePath %q: %v", sourcePath, err)
 		}
 
 		expectedPath := path.Join(srcDir, toVersion+".yaml")
-		expectedBytes, err := ioutil.ReadFile(expectedPath)
+		expectedBytes, err := os.ReadFile(expectedPath)
 		if err != nil {
 			t.Fatalf("unexpected error reading expectedPath %q: %v", expectedPath, err)
 		}
@@ -97,8 +127,8 @@ func runTest(t *testing.T, srcDir string, fromVersion string, toVersion string) 
 		actualString := strings.TrimSpace(strings.Join(actual, "\n---\n\n"))
 		expectedString := strings.TrimSpace(string(expectedBytes))
 
-		actualString = strings.Replace(actualString, "\r", "", -1)
-		expectedString = strings.Replace(expectedString, "\r", "", -1)
+		actualString = strings.ReplaceAll(actualString, "\r", "")
+		expectedString = strings.ReplaceAll(expectedString, "\r", "")
 
 		if actualString != expectedString {
 			diffString := diff.FormatDiff(expectedString, actualString)

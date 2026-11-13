@@ -17,31 +17,35 @@ limitations under the License.
 package awstasks
 
 import (
+	"context"
 	"reflect"
 	"testing"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"k8s.io/kops/cloudmock/aws/mockec2"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
 )
 
 func TestSharedInternetGatewayDoesNotRename(t *testing.T) {
+	ctx := context.TODO()
+
 	cloud := awsup.BuildMockAWSCloud("us-east-1", "abc")
 	c := &mockec2.MockEC2{}
 	cloud.MockEC2 = c
 
 	// Pre-create the vpc / subnet
-	vpc, err := c.CreateVpc(&ec2.CreateVpcInput{
+	vpc, err := c.CreateVpc(ctx, &ec2.CreateVpcInput{
 		CidrBlock: aws.String("172.20.0.0/16"),
 	})
 	if err != nil {
 		t.Fatalf("error creating test VPC: %v", err)
 	}
-	_, err = c.CreateTags(&ec2.CreateTagsInput{
-		Resources: []*string{vpc.Vpc.VpcId},
-		Tags: []*ec2.Tag{
+	_, err = c.CreateTags(ctx, &ec2.CreateTagsInput{
+		Resources: []string{aws.ToString(vpc.Vpc.VpcId)},
+		Tags: []ec2types.Tag{
 			{
 				Key:   aws.String("Name"),
 				Value: aws.String("ExistingVPC"),
@@ -52,14 +56,14 @@ func TestSharedInternetGatewayDoesNotRename(t *testing.T) {
 		t.Fatalf("error tagging test vpc: %v", err)
 	}
 
-	internetGateway, err := c.CreateInternetGateway(&ec2.CreateInternetGatewayInput{})
+	internetGateway, err := c.CreateInternetGateway(ctx, &ec2.CreateInternetGatewayInput{})
 	if err != nil {
 		t.Fatalf("error creating test igw: %v", err)
 	}
 
-	_, err = c.CreateTags(&ec2.CreateTagsInput{
-		Resources: []*string{internetGateway.InternetGateway.InternetGatewayId},
-		Tags: []*ec2.Tag{
+	_, err = c.CreateTags(ctx, &ec2.CreateTagsInput{
+		Resources: []string{aws.ToString(internetGateway.InternetGateway.InternetGatewayId)},
+		Tags: []ec2types.Tag{
 			{
 				Key:   aws.String("Name"),
 				Value: aws.String("ExistingInternetGateway"),
@@ -70,7 +74,7 @@ func TestSharedInternetGatewayDoesNotRename(t *testing.T) {
 		t.Fatalf("error tagging test igw: %v", err)
 	}
 
-	_, err = c.AttachInternetGateway(&ec2.AttachInternetGatewayInput{
+	_, err = c.AttachInternetGateway(ctx, &ec2.AttachInternetGatewayInput{
 		InternetGatewayId: internetGateway.InternetGateway.InternetGatewayId,
 		VpcId:             vpc.Vpc.VpcId,
 	})
@@ -79,25 +83,25 @@ func TestSharedInternetGatewayDoesNotRename(t *testing.T) {
 	}
 
 	// We define a function so we can rebuild the tasks, because we modify in-place when running
-	buildTasks := func() map[string]fi.Task {
+	buildTasks := func() map[string]fi.CloudupTask {
 		vpc1 := &VPC{
 			Name:      s("vpc1"),
 			Lifecycle: fi.LifecycleSync,
 			CIDR:      s("172.20.0.0/16"),
 			Tags:      map[string]string{"kubernetes.io/cluster/cluster.example.com": "shared"},
-			Shared:    fi.Bool(true),
+			Shared:    new(true),
 			ID:        vpc.Vpc.VpcId,
 		}
 		igw1 := &InternetGateway{
 			Name:      s("igw1"),
 			Lifecycle: fi.LifecycleSync,
 			VPC:       vpc1,
-			Shared:    fi.Bool(true),
+			Shared:    new(true),
 			ID:        internetGateway.InternetGateway.InternetGatewayId,
 			Tags:      make(map[string]string),
 		}
 
-		return map[string]fi.Task{
+		return map[string]fi.CloudupTask{
 			"igw1": igw1,
 			"vpc1": vpc1,
 		}
@@ -107,21 +111,9 @@ func TestSharedInternetGatewayDoesNotRename(t *testing.T) {
 		allTasks := buildTasks()
 		igw1 := allTasks["igw1"].(*InternetGateway)
 
-		target := &awsup.AWSAPITarget{
-			Cloud: cloud,
-		}
+		runTasks(t, cloud, allTasks)
 
-		context, err := fi.NewContext(target, nil, cloud, nil, nil, nil, true, allTasks)
-		if err != nil {
-			t.Fatalf("error building context: %v", err)
-		}
-		defer context.Close()
-
-		if err := context.RunTasks(testRunTasksOptions); err != nil {
-			t.Fatalf("unexpected error during Run: %v", err)
-		}
-
-		if fi.StringValue(igw1.ID) == "" {
+		if fi.ValueOf(igw1.ID) == "" {
 			t.Fatalf("ID not set after create")
 		}
 
@@ -133,12 +125,12 @@ func TestSharedInternetGatewayDoesNotRename(t *testing.T) {
 		if actual == nil {
 			t.Fatalf("InternetGateway created but then not found")
 		}
-		expected := &ec2.InternetGateway{
+		expected := &ec2types.InternetGateway{
 			InternetGatewayId: aws.String("igw-1"),
 			Tags: buildTags(map[string]string{
 				"Name": "ExistingInternetGateway",
 			}),
-			Attachments: []*ec2.InternetGatewayAttachment{
+			Attachments: []ec2types.InternetGatewayAttachment{
 				{
 					VpcId: vpc.Vpc.VpcId,
 				},
@@ -155,6 +147,6 @@ func TestSharedInternetGatewayDoesNotRename(t *testing.T) {
 
 	{
 		allTasks := buildTasks()
-		checkNoChanges(t, cloud, allTasks)
+		checkNoChanges(t, ctx, cloud, allTasks)
 	}
 }

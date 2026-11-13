@@ -39,7 +39,7 @@ import (
 var (
 	getKeypairExample = templates.Examples(i18n.T(`
 	# List the cluster CA keypairs.
-	kops get keypairs ca
+	kops get keypairs kubernetes-ca
 
 	# List the service-account keypairs, including distrusted ones.
 	kops get keypairs service-account --distrusted`))
@@ -72,10 +72,10 @@ func NewCmdGetKeypairs(f *util.Factory, out io.Writer, getOptions *GetOptions) *
 			return nil
 		},
 		ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-			return completeGetKeypairs(f, options, args, toComplete)
+			return completeGetKeypairs(cmd.Context(), f, options, args, toComplete)
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return RunGetKeypairs(context.TODO(), f, out, options)
+			return RunGetKeypairs(cmd.Context(), f, out, options)
 		},
 	}
 
@@ -89,12 +89,12 @@ type keypairItem struct {
 	ID                string     `json:"id"`
 	DistrustTimestamp *time.Time `json:"distrustTimestamp,omitempty"`
 	IsPrimary         bool       `json:"isPrimary,omitempty"`
-	Subject           string     `json:"subject"`
-	Issuer            string     `json:"issuer"`
+	Subject           string     `json:"subject,omitempty"`
+	Issuer            string     `json:"issuer,omitempty"`
 	AlternateNames    []string   `json:"alternateNames,omitempty"`
 	IsCA              bool       `json:"isCA,omitempty"`
-	NotBefore         time.Time  `json:"notBefore"`
-	NotAfter          time.Time  `json:"notAfter"`
+	NotBefore         *time.Time `json:"notBefore,omitempty"`
+	NotAfter          *time.Time `json:"notAfter,omitempty"`
 	KeyLength         *int       `json:"keyLength,omitempty"`
 	HasPrivateKey     bool       `json:"hasPrivateKey,omitempty"`
 }
@@ -122,30 +122,39 @@ func listKeypairs(keyStore fi.CAStore, names []string, includeDistrusted bool) (
 		}
 
 		for _, item := range keyset.Items {
-			if includeDistrusted || item.DistrustTimestamp == nil {
-				var alternateNames []string
-				alternateNames = append(alternateNames, item.Certificate.Certificate.DNSNames...)
-				alternateNames = append(alternateNames, item.Certificate.Certificate.EmailAddresses...)
-				for _, ip := range item.Certificate.Certificate.IPAddresses {
-					alternateNames = append(alternateNames, ip.String())
-				}
-				sort.Strings(alternateNames)
-
+			if includeDistrusted || (item.DistrustTimestamp == nil && item.Certificate != nil) {
 				keypair := keypairItem{
 					Name:              name,
 					ID:                item.Id,
 					DistrustTimestamp: item.DistrustTimestamp,
 					IsPrimary:         item.Id == keyset.Primary.Id,
-					Subject:           item.Certificate.Subject.String(),
-					Issuer:            item.Certificate.Certificate.Issuer.String(),
-					AlternateNames:    alternateNames,
-					IsCA:              item.Certificate.IsCA,
-					NotBefore:         item.Certificate.Certificate.NotBefore.UTC(),
-					NotAfter:          item.Certificate.Certificate.NotAfter.UTC(),
 					HasPrivateKey:     item.PrivateKey != nil,
 				}
-				if rsaKey, ok := item.Certificate.PublicKey.(*rsa.PublicKey); ok {
-					keypair.KeyLength = fi.Int(rsaKey.N.BitLen())
+				if cert := item.Certificate; cert != nil {
+					keypair.Subject = cert.Subject.String()
+					keypair.Issuer = cert.Certificate.Issuer.String()
+					keypair.IsCA = cert.IsCA
+					{
+						t := cert.Certificate.NotBefore.UTC()
+						keypair.NotBefore = &t
+					}
+					{
+						t := cert.Certificate.NotAfter.UTC()
+						keypair.NotAfter = &t
+					}
+					{
+						var alternateNames []string
+						alternateNames = append(alternateNames, item.Certificate.Certificate.DNSNames...)
+						alternateNames = append(alternateNames, item.Certificate.Certificate.EmailAddresses...)
+						for _, ip := range item.Certificate.Certificate.IPAddresses {
+							alternateNames = append(alternateNames, ip.String())
+						}
+						sort.Strings(alternateNames)
+						keypair.AlternateNames = alternateNames
+					}
+					if rsaKey, ok := cert.PublicKey.(*rsa.PublicKey); ok {
+						keypair.KeyLength = new(rsaKey.N.BitLen())
+					}
 				}
 				items = append(items, &keypair)
 			}
@@ -156,7 +165,7 @@ func listKeypairs(keyStore fi.CAStore, names []string, includeDistrusted bool) (
 }
 
 func RunGetKeypairs(ctx context.Context, f commandutils.Factory, out io.Writer, options *GetKeypairsOptions) error {
-	clientset, err := f.Clientset()
+	clientset, err := f.KopsClient()
 	if err != nil {
 		return err
 	}
@@ -196,10 +205,16 @@ func RunGetKeypairs(ctx context.Context, f commandutils.Factory, out io.Writer, 
 			return ""
 		})
 		t.AddColumn("ISSUED", func(i *keypairItem) string {
-			return i.NotBefore.Local().Format("2006-01-02")
+			if t := i.NotBefore; t != nil {
+				return t.Local().Format("2006-01-02")
+			}
+			return ""
 		})
 		t.AddColumn("EXPIRES", func(i *keypairItem) string {
-			return i.NotAfter.Local().Format("2006-01-02")
+			if t := i.NotAfter; t != nil {
+				return t.Local().Format("2006-01-02")
+			}
+			return ""
 		})
 		t.AddColumn("PRIMARY", func(i *keypairItem) string {
 			if i.IsPrimary {
@@ -238,15 +253,14 @@ func RunGetKeypairs(ctx context.Context, f commandutils.Factory, out io.Writer, 
 		}
 
 	default:
-		return fmt.Errorf("Unknown output format: %q", options.Output)
+		return fmt.Errorf("unknown output format: %q", options.Output)
 	}
 
 	return nil
 }
 
-func completeGetKeypairs(f commandutils.Factory, options *GetKeypairsOptions, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+func completeGetKeypairs(ctx context.Context, f commandutils.Factory, options *GetKeypairsOptions, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 	commandutils.ConfigureKlogForCompletion()
-	ctx := context.TODO()
 
 	cluster, clientSet, completions, directive := GetClusterForCompletion(ctx, f, nil)
 	if cluster == nil {
@@ -254,7 +268,7 @@ func completeGetKeypairs(f commandutils.Factory, options *GetKeypairsOptions, ar
 	}
 
 	alreadySelected := sets.NewString(args...).Insert("all")
-	_, _, completions, directive = completeKeyset(cluster, clientSet, nil, func(name string, keyset *fi.Keyset) bool {
+	_, _, completions, directive = completeKeyset(ctx, cluster, clientSet, nil, func(name string, keyset *fi.Keyset) bool {
 		return !alreadySelected.Has(name)
 	})
 

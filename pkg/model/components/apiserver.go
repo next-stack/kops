@@ -21,7 +21,10 @@ import (
 	"strings"
 
 	v1 "k8s.io/api/core/v1"
+
 	"k8s.io/kops/pkg/apis/kops"
+	"k8s.io/kops/pkg/featureflag"
+	"k8s.io/kops/pkg/wellknownports"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/loader"
 
@@ -33,11 +36,11 @@ type KubeAPIServerOptionsBuilder struct {
 	*OptionsContext
 }
 
-var _ loader.OptionsBuilder = &KubeAPIServerOptionsBuilder{}
+var _ loader.ClusterOptionsBuilder = &KubeAPIServerOptionsBuilder{}
 
 // BuildOptions is responsible for filling in the default settings for the kube apiserver
-func (b *KubeAPIServerOptionsBuilder) BuildOptions(o interface{}) error {
-	clusterSpec := o.(*kops.ClusterSpec)
+func (b *KubeAPIServerOptionsBuilder) BuildOptions(cluster *kops.Cluster) error {
+	clusterSpec := &cluster.Spec
 	if clusterSpec.KubeAPIServer == nil {
 		clusterSpec.KubeAPIServer = &kops.KubeAPIServerConfig{}
 	}
@@ -48,7 +51,7 @@ func (b *KubeAPIServerOptionsBuilder) BuildOptions(o interface{}) error {
 		if count == 0 {
 			return fmt.Errorf("no instance groups found")
 		}
-		c.APIServerCount = fi.Int32(int32(count))
+		c.APIServerCount = new(int32(count))
 	}
 
 	// @question: should the question every be able to set this?
@@ -59,7 +62,7 @@ func (b *KubeAPIServerOptionsBuilder) BuildOptions(o interface{}) error {
 		if err != nil {
 			return err
 		}
-		c.StorageBackend = fi.String(fmt.Sprintf("etcd%d", sem.Major))
+		c.StorageBackend = new(fmt.Sprintf("etcd%d", sem.Major))
 	}
 
 	if c.KubeletPreferredAddressTypes == nil {
@@ -73,26 +76,17 @@ func (b *KubeAPIServerOptionsBuilder) BuildOptions(o interface{}) error {
 
 	if clusterSpec.Authentication != nil {
 		if clusterSpec.Authentication.Kopeio != nil {
-			c.AuthenticationTokenWebhookConfigFile = fi.String("/etc/kubernetes/authn.config")
+			c.AuthenticationTokenWebhookConfigFile = new("/etc/kubernetes/authn.config")
 		}
 	}
 
 	if clusterSpec.Authorization == nil || clusterSpec.Authorization.IsEmpty() {
-		// Do nothing - use the default as defined by the apiserver
-		// (this won't happen anyway because of our default logic)
+		// Do nothing - use the default as defined by the apiserver.
+		// In practice unreachable: defaulting sets RBAC when authorization is omitted.
 	} else if clusterSpec.Authorization.AlwaysAllow != nil {
-		clusterSpec.KubeAPIServer.AuthorizationMode = fi.String("AlwaysAllow")
+		clusterSpec.KubeAPIServer.AuthorizationMode = new("AlwaysAllow")
 	} else if clusterSpec.Authorization.RBAC != nil {
-		var modes []string
-
-		if b.IsKubernetesGTE("1.19") || fi.BoolValue(clusterSpec.KubeAPIServer.EnableBootstrapAuthToken) {
-			// Enable the Node authorizer, used for special per-node RBAC policies
-			// Enable by default from 1.19 - it's an important part of limiting blast radius
-			modes = append(modes, "Node")
-		}
-		modes = append(modes, "RBAC")
-
-		clusterSpec.KubeAPIServer.AuthorizationMode = fi.String(strings.Join(modes, ","))
+		clusterSpec.KubeAPIServer.AuthorizationMode = new("Node,RBAC")
 	}
 
 	if err := b.configureAggregation(clusterSpec); err != nil {
@@ -105,24 +99,7 @@ func (b *KubeAPIServerOptionsBuilder) BuildOptions(o interface{}) error {
 	}
 	c.Image = image
 
-	switch kops.CloudProviderID(clusterSpec.CloudProvider) {
-	case kops.CloudProviderAWS:
-		c.CloudProvider = "aws"
-	case kops.CloudProviderGCE:
-		c.CloudProvider = "gce"
-	case kops.CloudProviderDO:
-		c.CloudProvider = "external"
-	case kops.CloudProviderOpenstack:
-		c.CloudProvider = "openstack"
-	case kops.CloudProviderALI:
-		c.CloudProvider = "alicloud"
-	case kops.CloudProviderAzure:
-		c.CloudProvider = "azure"
-	default:
-		return fmt.Errorf("unknown cloudprovider %q", clusterSpec.CloudProvider)
-	}
-
-	if clusterSpec.ExternalCloudControllerManager != nil {
+	if b.controlPlaneKubernetesVersion.IsLT("1.33") {
 		c.CloudProvider = "external"
 	}
 
@@ -135,45 +112,64 @@ func (b *KubeAPIServerOptionsBuilder) BuildOptions(o interface{}) error {
 		c.BindAddress = "0.0.0.0"
 	}
 
-	c.AllowPrivileged = fi.Bool(true)
-	c.ServiceClusterIPRange = clusterSpec.ServiceClusterIPRange
+	c.AllowPrivileged = new(true)
+	c.ServiceClusterIPRange = clusterSpec.Networking.ServiceClusterIPRange
 	c.EtcdServers = nil
 	c.EtcdServersOverrides = nil
 
 	for _, etcdCluster := range clusterSpec.EtcdClusters {
 		switch etcdCluster.Name {
 		case "main":
-			c.EtcdServers = append(c.EtcdServers, "https://127.0.0.1:4001")
+			c.EtcdServers = append(c.EtcdServers, fmt.Sprintf("https://127.0.0.1:%d", wellknownports.EtcdMainClientPort))
 		case "events":
-			c.EtcdServersOverrides = append(c.EtcdServersOverrides, "/events#https://127.0.0.1:4002")
+			// Use HTTP for events etcd when EtcdEventsHTTP feature flag is enabled
+			scheme := "https"
+			if featureflag.EtcdEventsHTTP.Enabled() {
+				scheme = "http"
+			}
+			c.EtcdServersOverrides = append(c.EtcdServersOverrides, fmt.Sprintf("/events#%s://127.0.0.1:%d", scheme, wellknownports.EtcdEventsClientPort))
+		case "leases":
+			scheme := "https"
+			if featureflag.EtcdEventsHTTP.Enabled() {
+				scheme = "http"
+			}
+			c.EtcdServersOverrides = append(c.EtcdServersOverrides, fmt.Sprintf("coordination.k8s.io/leases#%s://127.0.0.1:%d", scheme, wellknownports.EtcdLeasesClientPort))
 		}
 	}
 
-	// TODO: We can probably rewrite these more clearly in descending order
 	// Based on recommendations from:
-	// https://kubernetes.io/docs/admin/admission-controllers/#is-there-a-recommended-set-of-admission-controllers-to-use
+	// https://kubernetes.io/docs/reference/access-authn-authz/admission-controllers/
 	{
 		c.EnableAdmissionPlugins = []string{
-			"NamespaceLifecycle",
-			"LimitRanger",
-			"ServiceAccount",
-			//"PersistentVolumeLabel",
 			"DefaultStorageClass",
 			"DefaultTolerationSeconds",
+			"LimitRanger",
 			"MutatingAdmissionWebhook",
-			"ValidatingAdmissionWebhook",
+			"NamespaceLifecycle",
 			"NodeRestriction",
 			"ResourceQuota",
+			"RuntimeClass",
+			"ServiceAccount",
+			"ValidatingAdmissionPolicy",
+			"ValidatingAdmissionWebhook",
 		}
 		c.EnableAdmissionPlugins = append(c.EnableAdmissionPlugins, c.AppendAdmissionPlugins...)
 	}
 
 	// We make sure to disable AnonymousAuth
-	c.AnonymousAuth = fi.Bool(false)
+	c.AnonymousAuth = new(false)
 
 	// We query via the kube-apiserver-healthcheck proxy, which listens on port 3990
 	c.InsecureBindAddress = ""
-	c.InsecurePort = 0
+	c.InsecurePort = nil
+
+	// If metrics-server is enabled, we want aggregator routing enabled so that requests are load balanced.
+	metricsServer := clusterSpec.MetricsServer
+	if metricsServer != nil && fi.ValueOf(metricsServer.Enabled) {
+		if c.EnableAggregatorRouting == nil {
+			c.EnableAggregatorRouting = new(true)
+		}
+	}
 
 	return nil
 }
@@ -186,12 +182,12 @@ func (b *KubeAPIServerOptionsBuilder) buildAPIServerCount(clusterSpec *kops.Clus
 
 	//count := 0
 	//for _, ig := range b.InstanceGroups {
-	//	if !ig.IsMaster() {
+	//	if !ig.IsControlPlane() {
 	//		continue
 	//	}
-	//	size := fi.IntValue(ig.Spec.MaxSize)
+	//	size := fi.ValueOf(ig.Spec.MaxSize)
 	//	if size == 0 {
-	//		size = fi.IntValue(ig.Spec.MinSize)
+	//		size = fi.ValueOf(ig.Spec.MinSize)
 	//	}
 	//	count += size
 	//}

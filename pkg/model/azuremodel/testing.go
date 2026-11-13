@@ -21,7 +21,6 @@ import (
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/model"
 	"k8s.io/kops/pkg/model/iam"
-	"k8s.io/kops/upup/pkg/fi"
 )
 
 func newTestAzureModelContext() *AzureModelContext {
@@ -32,8 +31,9 @@ func newTestAzureModelContext() *AzureModelContext {
 			IAMModelContext: iam.IAMModelContext{
 				Cluster: cluster,
 			},
-			InstanceGroups: []*kops.InstanceGroup{ig},
-			SSHPublicKeys:  [][]byte{[]byte("ssh-rsa ...")},
+			AllInstanceGroups: []*kops.InstanceGroup{ig},
+			InstanceGroups:    []*kops.InstanceGroup{ig},
+			SSHPublicKeys:     [][]byte{[]byte("ssh-rsa ...")},
 		},
 	}
 }
@@ -44,25 +44,26 @@ func newTestCluster() *kops.Cluster {
 			Name: "testcluster.test.com",
 		},
 		Spec: kops.ClusterSpec{
-			API: &kops.AccessSpec{
+			API: kops.APISpec{
 				LoadBalancer: &kops.LoadBalancerAccessSpec{
 					Type: kops.LoadBalancerTypeInternal,
 				},
 			},
-			Networking:  &kops.NetworkingSpec{},
-			NetworkID:   "test-virtual-network",
-			NetworkCIDR: "10.0.0.0/8",
-			Subnets: []kops.ClusterSubnetSpec{
-				{
-					Name: "test-subnet",
-					CIDR: "10.0.1.0/24",
-					Type: kops.SubnetTypePrivate,
-				},
-			},
-			CloudConfig: &kops.CloudConfiguration{
-				Azure: &kops.AzureConfiguration{
+			CloudProvider: kops.CloudProviderSpec{
+				Azure: &kops.AzureSpec{
 					ResourceGroupName: "test-resource-group",
 					RouteTableName:    "test-route-table",
+				},
+			},
+			Networking: kops.NetworkingSpec{
+				NetworkID:   "test-virtual-network",
+				NetworkCIDR: "10.0.0.0/8",
+				Subnets: []kops.ClusterSubnetSpec{
+					{
+						Name: "test-subnet",
+						CIDR: "10.0.1.0/24",
+						Type: kops.SubnetTypePrivate,
+					},
 				},
 			},
 		},
@@ -75,10 +76,12 @@ func newTestInstanceGroup() *kops.InstanceGroup {
 			Name: "nodes",
 		},
 		Spec: kops.InstanceGroupSpec{
-			Role:           kops.InstanceGroupRoleNode,
-			Image:          "Canonical:UbuntuServer:18.04-LTS:latest",
-			RootVolumeSize: fi.Int32(32),
-			Subnets:        []string{"test-subnet"},
+			Role:  kops.InstanceGroupRoleNode,
+			Image: "Canonical:UbuntuServer:18.04-LTS:latest",
+			RootVolume: &kops.InstanceRootVolumeSpec{
+				Size: new(int32(32)),
+			},
+			Subnets: []string{"test-subnet"},
 		},
 	}
 }

@@ -18,49 +18,42 @@ package vfs
 
 import (
 	"bytes"
-	"io/ioutil"
 	"os"
-	"path"
+	"path/filepath"
 	"testing"
+
+	"k8s.io/kops/pkg/testutils/testcontext"
 )
 
 func TestCreateFile(t *testing.T) {
-	TempDir, err := ioutil.TempDir("", "test")
-	if err != nil {
-		t.Fatalf("error creating temp dir: %v", err)
-	}
-	defer func() {
-		err := os.RemoveAll(TempDir)
-		if err != nil {
-			t.Errorf("failed to remove temp dir %q: %v", TempDir, err)
-		}
-	}()
+	ctx := testcontext.ForTest(t)
+	TempDir := t.TempDir()
 
 	tests := []struct {
 		path string
 		data []byte
 	}{
 		{
-			path: path.Join(TempDir, "SubDir", "test1.tmp"),
+			path: filepath.Join(TempDir, "SubDir", "test1.tmp"),
 			data: []byte("test data\nline 1\r\nline 2"),
 		},
 	}
 	for _, test := range tests {
 		fspath := &FSPath{test.path}
 		// Create file
-		err := fspath.CreateFile(bytes.NewReader(test.data), nil)
+		err := fspath.CreateFile(ctx, bytes.NewReader(test.data), nil)
 		if err != nil {
 			t.Fatalf("Error writing file %s, error: %v", test.path, err)
 		}
 
 		// Create file again should result in error
-		err = fspath.CreateFile(bytes.NewReader([]byte("data")), nil)
+		err = fspath.CreateFile(ctx, bytes.NewReader([]byte("data")), nil)
 		if err != os.ErrExist {
 			t.Errorf("Expected to get os.ErrExist, got: %v", err)
 		}
 
 		// Check file content
-		data, err := fspath.ReadFile()
+		data, err := fspath.ReadFile(ctx)
 		if err != nil {
 			t.Errorf("Error reading file %s, error: %v", test.path, err)
 		}
@@ -70,24 +63,56 @@ func TestCreateFile(t *testing.T) {
 	}
 }
 
-func TestWriteTo(t *testing.T) {
-	TempDir, err := ioutil.TempDir("", "test")
-	if err != nil {
-		t.Fatalf("error creating temp dir: %v", err)
+func TestFSPathJoin(t *testing.T) {
+	tests := []struct {
+		base         string
+		relativePath []string
+		expectedPath string
+		expectedBase string
+	}{
+		{
+			base:         filepath.Join("state", "cluster.example.com"),
+			relativePath: []string{"config"},
+			expectedPath: filepath.Join("state", "cluster.example.com", "config"),
+			expectedBase: "config",
+		},
+		{
+			base:         filepath.Join("state", "cluster.example.com"),
+			relativePath: []string{"secrets", "admin"},
+			expectedPath: filepath.Join("state", "cluster.example.com", "secrets", "admin"),
+			expectedBase: "admin",
+		},
+		{
+			// Callers may pass slash-separated relative paths; filepath.Join normalizes them to
+			// the OS path separator.
+			base:         "state",
+			relativePath: []string{"pki/private/ca"},
+			expectedPath: filepath.Join("state", "pki", "private", "ca"),
+			expectedBase: "ca",
+		},
 	}
-	defer func() {
-		err := os.RemoveAll(TempDir)
-		if err != nil {
-			t.Errorf("failed to remove temp dir %q: %v", TempDir, err)
+	for _, test := range tests {
+		joined := NewFSPath(test.base).Join(test.relativePath...)
+		if joined.Path() != test.expectedPath {
+			t.Errorf("Join(%q, %v): expected path %q, got %q", test.base, test.relativePath, test.expectedPath, joined.Path())
 		}
-	}()
+		if joined.Base() != test.expectedBase {
+			t.Errorf("Join(%q, %v): expected base %q, got %q", test.base, test.relativePath, test.expectedBase, joined.Base())
+		}
+	}
+}
+
+func TestWriteTo(t *testing.T) {
+	ctx := testcontext.ForTest(t)
+
+	TempDir := t.TempDir()
 
 	tests := []struct {
 		path string
 		data []byte
 	}{
 		{
-			path: path.Join(TempDir, "SubDir", "test1.tmp"),
+			path: filepath.Join(TempDir, "SubDir", "test1.tmp"),
 			data: []byte("test data\nline 1\r\nline 2"),
 		},
 	}
@@ -96,7 +121,7 @@ func TestWriteTo(t *testing.T) {
 
 		fspath := NewFSPath(test.path)
 		// Create file
-		err := fspath.CreateFile(bytes.NewReader(test.data), nil)
+		err := fspath.CreateFile(ctx, bytes.NewReader(test.data), nil)
 		if err != nil {
 			t.Fatalf("Error writing file %s, error: %v", test.path, err)
 		}

@@ -19,22 +19,25 @@ package clusterautoscaler
 import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/kops/pkg/model/iam"
+	"k8s.io/kops/upup/pkg/fi"
 )
 
-// ServiceAccount represents the service-account used by the dns-controller.
+// ServiceAccount represents the service account used by the cluster autoscaler.
 // It implements iam.Subject to get AWS IAM permissions.
-type ServiceAccount struct {
-}
+type ServiceAccount struct{}
 
 var _ iam.Subject = &ServiceAccount{}
 
 // BuildAWSPolicy generates a custom policy for a ServiceAccount IAM role.
 func (r *ServiceAccount) BuildAWSPolicy(b *iam.PolicyBuilder) (*iam.Policy, error) {
-
 	clusterName := b.Cluster.ObjectMeta.Name
-	p := iam.NewPolicy(clusterName)
+	p := iam.NewPolicy(clusterName, b.Partition, b.Region)
 
-	iam.AddClusterAutoscalerPermissions(p)
+	var useStaticInstanceList bool
+	if ca := b.Cluster.Spec.ClusterAutoscaler; ca != nil && fi.ValueOf(ca.AWSUseStaticInstanceList) {
+		useStaticInstanceList = true
+	}
+	iam.AddClusterAutoscalerPermissions(p, useStaticInstanceList)
 
 	return p, nil
 }

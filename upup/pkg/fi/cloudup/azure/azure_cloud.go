@@ -1,5 +1,5 @@
 /*
-Copyright 2020 The Kubernetes Authors.
+Copyright 2024 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,8 +20,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
+	"sync"
 
-	"github.com/Azure/go-autorest/autorest/azure/auth"
+	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/storage/armstorage/v3"
+	"k8s.io/klog/v2"
 	"k8s.io/kops/dnsprovider/pkg/dnsprovider"
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/cloudinstances"
@@ -33,6 +37,7 @@ const (
 	// Use dash (_) as a splitter. Other CSPs use slash (/), but slash is not
 	// allowed as a tag key in Azure.
 	TagNameRolePrefix        = "k8s.io_role_"
+	TagRoleControlPlane      = "control-plane"
 	TagRoleMaster            = "master"
 	TagNameEtcdClusterPrefix = "k8s.io_etcd_"
 )
@@ -40,16 +45,16 @@ const (
 // AzureCloud provides clients to make API calls to Azure.
 type AzureCloud interface {
 	fi.Cloud
-
 	AddClusterTags(tags map[string]*string)
-
 	FindVNetInfo(id, resourceGroup string) (*fi.VPCInfo, error)
-
+	FindStorageAccountInfo(name string) (*armstorage.Account, error)
 	SubscriptionID() string
 	ResourceGroup() ResourceGroupsClient
 	VirtualNetwork() VirtualNetworksClient
 	Subnet() SubnetsClient
 	RouteTable() RouteTablesClient
+	NetworkSecurityGroup() NetworkSecurityGroupsClient
+	ApplicationSecurityGroup() ApplicationSecurityGroupsClient
 	VMScaleSet() VMScaleSetsClient
 	VMScaleSetVM() VMScaleSetVMsClient
 	Disk() DisksClient
@@ -57,50 +62,116 @@ type AzureCloud interface {
 	NetworkInterface() NetworkInterfacesClient
 	LoadBalancer() LoadBalancersClient
 	PublicIPAddress() PublicIPAddressesClient
+	NatGateway() NatGatewaysClient
 }
 
 type azureCloudImplementation struct {
-	subscriptionID          string
-	location                string
-	tags                    map[string]string
-	resourceGroupsClient    ResourceGroupsClient
-	vnetsClient             VirtualNetworksClient
-	subnetsClient           SubnetsClient
-	routeTablesClient       RouteTablesClient
-	vmscaleSetsClient       VMScaleSetsClient
-	vmscaleSetVMsClient     VMScaleSetVMsClient
-	disksClient             DisksClient
-	roleAssignmentsClient   RoleAssignmentsClient
-	networkInterfacesClient NetworkInterfacesClient
-	loadBalancersClient     LoadBalancersClient
-	publicIPAddressesClient PublicIPAddressesClient
+	subscriptionID                  string
+	resourceGroupName               string
+	location                        string
+	tags                            map[string]string
+	resourceGroupsClient            ResourceGroupsClient
+	networkSecurityGroupsClient     NetworkSecurityGroupsClient
+	applicationSecurityGroupsClient ApplicationSecurityGroupsClient
+	vnetsClient                     VirtualNetworksClient
+	subnetsClient                   SubnetsClient
+	routeTablesClient               RouteTablesClient
+	vmscaleSetsClient               VMScaleSetsClient
+	vmscaleSetVMsClient             VMScaleSetVMsClient
+	disksClient                     DisksClient
+	roleAssignmentsClient           RoleAssignmentsClient
+	networkInterfacesClient         NetworkInterfacesClient
+	loadBalancersClient             LoadBalancersClient
+	publicIPAddressesClient         PublicIPAddressesClient
+	natGatewaysClient               NatGatewaysClient
+	storageAccountsClient           StorageAccountsClient
 }
 
-var _ fi.Cloud = &azureCloudImplementation{}
+var _ fi.Cloud = (*azureCloudImplementation)(nil)
 
-// NewAzureCloud creates a new AzureCloud.
-func NewAzureCloud(subscriptionID, location string, tags map[string]string) (AzureCloud, error) {
-	authorizer, err := auth.NewAuthorizerFromEnvironment()
+var azureCloudInstances = make(map[string]AzureCloud)
+var azureCloudInstancesMutex = sync.RWMutex{}
+
+// CacheAzureCloudInstance registers a cloud instance in the cache, used by NewAzureCloud.
+func CacheAzureCloudInstance(subscriptionID, resourceGroupName string, cloud AzureCloud) {
+	azureCloudInstancesMutex.Lock()
+	defer azureCloudInstancesMutex.Unlock()
+	azureCloudInstances[subscriptionID+"::"+resourceGroupName] = cloud
+}
+
+// NewAzureCloud creates a new AzureCloud, or returns a cached instance for the given subscription and resource group.
+func NewAzureCloud(subscriptionID, resourceGroupName, location string, tags map[string]string) (AzureCloud, error) {
+	azureCloudInstancesMutex.RLock()
+	i := azureCloudInstances[subscriptionID+"::"+resourceGroupName]
+	azureCloudInstancesMutex.RUnlock()
+	if i != nil {
+		return i, nil
+	}
+	return newAzureCloud(subscriptionID, resourceGroupName, location, tags)
+}
+
+func newAzureCloud(subscriptionID, resourceGroupName, location string, tags map[string]string) (AzureCloud, error) {
+	cred, err := azidentity.NewDefaultAzureCredential(nil)
 	if err != nil {
+		return nil, fmt.Errorf("error creating an identity: %s", err)
+	}
+
+	azureCloudImpl := &azureCloudImplementation{
+		subscriptionID:    subscriptionID,
+		resourceGroupName: resourceGroupName,
+		location:          location,
+		tags:              tags,
+	}
+
+	if azureCloudImpl.resourceGroupsClient, err = newResourceGroupsClientImpl(subscriptionID, cred); err != nil {
+		return nil, err
+	}
+	if azureCloudImpl.vnetsClient, err = newVirtualNetworksClientImpl(subscriptionID, cred); err != nil {
+		return nil, err
+	}
+	if azureCloudImpl.subnetsClient, err = newSubnetsClientImpl(subscriptionID, cred); err != nil {
+		return nil, err
+	}
+	if azureCloudImpl.routeTablesClient, err = newRouteTablesClientImpl(subscriptionID, cred); err != nil {
+		return nil, err
+	}
+	if azureCloudImpl.networkSecurityGroupsClient, err = newNetworkSecurityGroupsClientImpl(subscriptionID, cred); err != nil {
+		return nil, err
+	}
+	if azureCloudImpl.applicationSecurityGroupsClient, err = newApplicationSecurityGroupsClientImpl(subscriptionID, cred); err != nil {
+		return nil, err
+	}
+	if azureCloudImpl.vmscaleSetsClient, err = newVMScaleSetsClientImpl(subscriptionID, cred); err != nil {
+		return nil, err
+	}
+	if azureCloudImpl.vmscaleSetVMsClient, err = newVMScaleSetVMsClientImpl(subscriptionID, cred); err != nil {
+		return nil, err
+	}
+	if azureCloudImpl.disksClient, err = newDisksClientImpl(subscriptionID, cred); err != nil {
+		return nil, err
+	}
+	if azureCloudImpl.roleAssignmentsClient, err = newRoleAssignmentsClientImpl(subscriptionID, cred); err != nil {
+		return nil, err
+	}
+	if azureCloudImpl.networkInterfacesClient, err = newNetworkInterfacesClientImpl(subscriptionID, cred); err != nil {
+		return nil, err
+	}
+	if azureCloudImpl.loadBalancersClient, err = newLoadBalancersClientImpl(subscriptionID, cred); err != nil {
+		return nil, err
+	}
+	if azureCloudImpl.publicIPAddressesClient, err = newPublicIPAddressesClientImpl(subscriptionID, cred); err != nil {
+		return nil, err
+	}
+	if azureCloudImpl.natGatewaysClient, err = newNatGatewaysClientImpl(subscriptionID, cred); err != nil {
+		return nil, err
+	}
+	if azureCloudImpl.storageAccountsClient, err = newStorageAccountsClientImpl(subscriptionID, cred); err != nil {
 		return nil, err
 	}
 
-	return &azureCloudImplementation{
-		subscriptionID:          subscriptionID,
-		location:                location,
-		tags:                    tags,
-		resourceGroupsClient:    newResourceGroupsClientImpl(subscriptionID, authorizer),
-		vnetsClient:             newVirtualNetworksClientImpl(subscriptionID, authorizer),
-		subnetsClient:           newSubnetsClientImpl(subscriptionID, authorizer),
-		routeTablesClient:       newRouteTablesClientImpl(subscriptionID, authorizer),
-		vmscaleSetsClient:       newVMScaleSetsClientImpl(subscriptionID, authorizer),
-		vmscaleSetVMsClient:     newVMScaleSetVMsClientImpl(subscriptionID, authorizer),
-		disksClient:             newDisksClientImpl(subscriptionID, authorizer),
-		roleAssignmentsClient:   newRoleAssignmentsClientImpl(subscriptionID, authorizer),
-		networkInterfacesClient: newNetworkInterfacesClientImpl(subscriptionID, authorizer),
-		loadBalancersClient:     newLoadBalancersClientImpl(subscriptionID, authorizer),
-		publicIPAddressesClient: newPublicIPAddressesClientImpl(subscriptionID, authorizer),
-	}, nil
+	CacheAzureCloudInstance(subscriptionID, resourceGroupName, azureCloudImpl)
+
+	return azureCloudImpl, nil
 }
 
 func (c *azureCloudImplementation) Region() string {
@@ -116,7 +187,7 @@ func (c *azureCloudImplementation) DNS() (dnsprovider.Interface, error) {
 }
 
 func (c *azureCloudImplementation) FindVPCInfo(id string) (*fi.VPCInfo, error) {
-	return nil, errors.New("FindVPCInfo not implemented on azureCloud, use FindVNETInfo instead")
+	return nil, errors.New("FindVPCInfo not implemented on azureCloud, use FindVNetInfo instead")
 }
 
 func (c *azureCloudImplementation) FindVNetInfo(id, resourceGroup string) (*fi.VPCInfo, error) {
@@ -128,23 +199,53 @@ func (c *azureCloudImplementation) FindVNetInfo(id, resourceGroup string) (*fi.V
 		if *vnet.ID != id {
 			continue
 		}
+		if vnet.Properties == nil {
+			continue
+		}
 		subnets := make([]*fi.SubnetInfo, 0)
-		for _, subnet := range *vnet.Subnets {
+		for _, subnet := range vnet.Properties.Subnets {
+			if subnet.Properties == nil {
+				continue
+			}
 			subnets = append(subnets, &fi.SubnetInfo{
 				ID:   *subnet.ID,
-				CIDR: *subnet.AddressPrefix,
+				CIDR: *subnet.Properties.AddressPrefix,
 			})
 		}
+		if vnet.Properties.AddressSpace == nil || len(vnet.Properties.AddressSpace.AddressPrefixes) == 0 {
+			continue
+		}
 		return &fi.VPCInfo{
-			CIDR:    (*vnet.AddressSpace.AddressPrefixes)[0],
+			CIDR:    *vnet.Properties.AddressSpace.AddressPrefixes[0],
 			Subnets: subnets,
 		}, nil
 	}
 	return nil, nil
 }
 
+func (c *azureCloudImplementation) FindStorageAccountInfo(name string) (*armstorage.Account, error) {
+	sas, err := c.storageAccountsClient.List(context.TODO())
+	if err != nil {
+		return nil, err
+	}
+	for _, sa := range sas {
+		if *sa.Name == name {
+			return sa, nil
+		}
+	}
+	return nil, nil
+}
+
 func (c *azureCloudImplementation) DeleteInstance(i *cloudinstances.CloudInstance) error {
-	return errors.New("DeleteInstance not implemented on azureCloud")
+	vmssName := i.CloudInstanceGroup.HumanName
+	instanceID := strings.TrimPrefix(i.ID, vmssName+"_")
+	return c.vmscaleSetVMsClient.Delete(context.TODO(), c.resourceGroupName, vmssName, instanceID)
+}
+
+// DeregisterInstance drains a cloud instance and loadbalancers.
+func (c *azureCloudImplementation) DeregisterInstance(i *cloudinstances.CloudInstance) error {
+	klog.V(8).Info("Azure DeregisterInstance not implemented")
+	return nil
 }
 
 func (c *azureCloudImplementation) DeleteGroup(g *cloudinstances.CloudInstanceGroup) error {
@@ -164,14 +265,14 @@ func (c *azureCloudImplementation) AddClusterTags(tags map[string]*string) {
 
 func (c *azureCloudImplementation) GetApiIngressStatus(cluster *kops.Cluster) ([]fi.ApiIngressStatus, error) {
 	var ingresses []fi.ApiIngressStatus
-	var rg = cluster.AzureResourceGroupName()
+	rg := cluster.AzureResourceGroupName()
 
 	lbSpec := cluster.Spec.API.LoadBalancer
 	if lbSpec != nil {
-		// Get loadbalancers in cluster resource group
+		// Get load balancers in cluster resource group
 		lbs, err := c.loadBalancersClient.List(context.TODO(), rg)
 		if err != nil {
-			return nil, fmt.Errorf("error getting Loadbalancer for API Ingress Status: %s", err)
+			return nil, fmt.Errorf("getting Loadbalancer for API Ingress Status: %w", err)
 		}
 
 		for _, lb := range lbs {
@@ -179,32 +280,39 @@ func (c *azureCloudImplementation) GetApiIngressStatus(cluster *kops.Cluster) ([
 			if val == nil || *val != cluster.Name {
 				continue
 			}
-			if lb.LoadBalancerPropertiesFormat == nil {
+			if lb.Properties == nil {
 				continue
 			}
-			for _, i := range *lb.LoadBalancerPropertiesFormat.FrontendIPConfigurations {
-				if i.FrontendIPConfigurationPropertiesFormat == nil {
+			for _, i := range lb.Properties.FrontendIPConfigurations {
+				if i.Properties == nil {
 					continue
 				}
 				switch lbSpec.Type {
 				case kops.LoadBalancerTypeInternal:
-					if i.FrontendIPConfigurationPropertiesFormat.PrivateIPAddress == nil {
+					if i.Properties.PrivateIPAddress == nil {
 						continue
 					}
 					ingresses = append(ingresses, fi.ApiIngressStatus{
-						IP: *i.FrontendIPConfigurationPropertiesFormat.PrivateIPAddress,
+						IP: *i.Properties.PrivateIPAddress,
 					})
 				case kops.LoadBalancerTypePublic:
-					if i.FrontendIPConfigurationPropertiesFormat.PublicIPAddress == nil ||
-						i.FrontendIPConfigurationPropertiesFormat.PublicIPAddress.PublicIPAddressPropertiesFormat == nil ||
-						i.FrontendIPConfigurationPropertiesFormat.PublicIPAddress.PublicIPAddressPropertiesFormat.IPAddress == nil {
+					if i.Properties.PublicIPAddress == nil || i.Properties.PublicIPAddress.ID == nil {
 						continue
 					}
-					ingresses = append(ingresses, fi.ApiIngressStatus{
-						IP: *i.FrontendIPConfigurationPropertiesFormat.PublicIPAddress.PublicIPAddressPropertiesFormat.IPAddress,
-					})
+					pips, err := c.publicIPAddressesClient.List(context.TODO(), rg)
+					if err != nil {
+						return nil, fmt.Errorf("error getting PublicIPAddress for API Ingress Status: %w", err)
+					}
+					for _, pip := range pips {
+						if pip.ID == nil || pip.Properties == nil || pip.Properties.IPAddress == nil || *pip.ID != *i.Properties.PublicIPAddress.ID {
+							continue
+						}
+						ingresses = append(ingresses, fi.ApiIngressStatus{
+							IP: *pip.Properties.IPAddress,
+						})
+					}
 				default:
-					return nil, fmt.Errorf("unknown load balancer Type: %q", lbSpec.Type)
+					return nil, fmt.Errorf("unknown load balancer type: %q", lbSpec.Type)
 				}
 			}
 		}
@@ -212,38 +320,42 @@ func (c *azureCloudImplementation) GetApiIngressStatus(cluster *kops.Cluster) ([
 		// Get scale sets in cluster resource group and find masters scale set
 		scaleSets, err := c.vmscaleSetsClient.List(context.TODO(), rg)
 		if err != nil {
-			return nil, fmt.Errorf("error getting Cluster Master Scale Set for API Ingress Status: %s", err)
+			return nil, fmt.Errorf("getting cluster control plane VMSS for API ingress status: %w", err)
 		}
 		var vmssName string
 		for _, scaleSet := range scaleSets {
 			val, ok := scaleSet.Tags[TagClusterName]
-			val2, ok2 := scaleSet.Tags[TagNameRolePrefix+TagRoleMaster]
-			if ok && *val == cluster.Name && ok2 && *val2 == "1" {
+			val2, ok2 := scaleSet.Tags[TagNameRolePrefix+TagRoleControlPlane]
+			val3, ok3 := scaleSet.Tags[TagNameRolePrefix+TagRoleMaster]
+			if ok && *val == cluster.Name && (ok2 && *val2 == "1" || ok3 && *val3 == "1") {
 				vmssName = *scaleSet.Name
 				break
 			}
 		}
 		if vmssName == "" {
-			return nil, fmt.Errorf("error getting Master Scale Set Name for API Ingress Status")
+			return nil, fmt.Errorf("getting control plane VMSS name for API ingress status")
 		}
 
 		// Get masters scale set network interfaces and append to api ingress status
 		nis, err := c.NetworkInterface().ListScaleSetsNetworkInterfaces(context.TODO(), rg, vmssName)
 		if err != nil {
-			return nil, fmt.Errorf("error getting Master Scale Set Network Interfaces for API Ingress Status: %s", err)
+			return nil, fmt.Errorf("getting control plane VMSS network interfaces for API ingress status: %w", err)
 		}
 		for _, ni := range nis {
-			if !*ni.Primary {
+			if ni.Properties == nil || ni.Properties.Primary == nil || !*ni.Properties.Primary {
 				continue
 			}
-			for _, i := range *ni.IPConfigurations {
+			for _, i := range ni.Properties.IPConfigurations {
+				if i.Properties == nil || i.Properties.PrivateIPAddress == nil {
+					continue
+				}
 				ingresses = append(ingresses, fi.ApiIngressStatus{
-					IP: *i.PrivateIPAddress,
+					IP: *i.Properties.PrivateIPAddress,
 				})
 			}
 		}
 		if ingresses == nil {
-			return nil, fmt.Errorf("error getting API Ingress Status so make sure to update your kubecfg accordingly")
+			return nil, fmt.Errorf("getting API ingress status")
 		}
 	}
 
@@ -268,6 +380,14 @@ func (c *azureCloudImplementation) Subnet() SubnetsClient {
 
 func (c *azureCloudImplementation) RouteTable() RouteTablesClient {
 	return c.routeTablesClient
+}
+
+func (c *azureCloudImplementation) NetworkSecurityGroup() NetworkSecurityGroupsClient {
+	return c.networkSecurityGroupsClient
+}
+
+func (c *azureCloudImplementation) ApplicationSecurityGroup() ApplicationSecurityGroupsClient {
+	return c.applicationSecurityGroupsClient
 }
 
 func (c *azureCloudImplementation) VMScaleSet() VMScaleSetsClient {
@@ -296,4 +416,8 @@ func (c *azureCloudImplementation) LoadBalancer() LoadBalancersClient {
 
 func (c *azureCloudImplementation) PublicIPAddress() PublicIPAddressesClient {
 	return c.publicIPAddressesClient
+}
+
+func (c *azureCloudImplementation) NatGateway() NatGatewaysClient {
+	return c.natGatewaysClient
 }

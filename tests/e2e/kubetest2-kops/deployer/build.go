@@ -17,30 +17,65 @@ limitations under the License.
 package deployer
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path"
 	"strings"
 
+	"k8s.io/klog/v2"
+	"k8s.io/kops/tests/e2e/kubetest2-kops/aws"
+	"k8s.io/kops/tests/e2e/kubetest2-kops/do"
+	"k8s.io/kops/tests/e2e/kubetest2-kops/gce"
 	"k8s.io/kops/tests/e2e/pkg/util"
+	"k8s.io/kops/tests/e2e/pkg/version"
+	"sigs.k8s.io/kubetest2/pkg/build"
 	"sigs.k8s.io/kubetest2/pkg/exec"
 )
 
 const (
-	defaultJobName = "pull-kops-e2e-kubernetes-aws"
-	defaultGCSPath = "gs://kops-ci/pulls/%v/pull-%v"
+	defaultJobName    = "pull-kops-e2e-kubernetes-aws"
+	defaultGCSPath    = "gs://k8s-staging-kops/pulls/%v/pull-%v"
+	defaultSpacesPath = "s3://" + do.StagingBucket + "/pulls/%v/pull-%v"
 )
 
-func (d *deployer) Build() error {
+func (d *deployer) Build() (err error) {
+	// kubetest2 does not call Down() when Build() fails, so the staging bucket would leak.
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, d.deleteStagingStore())
+		}
+	}()
+
 	if err := d.init(); err != nil {
 		return err
 	}
-	if err := d.BuildOptions.Build(); err != nil {
+	results, err := d.BuildOptions.Build()
+	if err != nil {
 		return err
 	}
+	if results.KopsBaseURL != "" {
+		klog.Infof("setting kops base url to %q from build results", results.KopsBaseURL)
+		d.KopsBaseURL = results.KopsBaseURL
+		// In PreTestCmd, we need KOPS_BASE_URL to be set for kops calls
+		os.Setenv("KOPS_BASE_URL", d.maybeGSURL(d.KopsBaseURL))
+	}
+
+	if results.KubernetesBaseURL != "" {
+		klog.Infof("setting kubernetes base url to %q from build results", results.KubernetesBaseURL)
+		v, err := version.ParseKubernetesVersion(results.KubernetesBaseURL)
+		if err != nil {
+			return err
+		}
+		d.KubernetesVersion = v
+	}
+
+	if d.BuildOptions.BuildKubernetes {
+		build.StoreCommonBinaries(d.BuildOptions.KubeRoot, d.commonOptions.RunDir())
+	}
 	// Copy the kops binary into the test's RunDir to be included in the tester's PATH
-	if d.KopsBinaryPath != "" {
+	if d.KopsBinaryPath != "" && !d.BuildOptions.BuildKubernetes {
 		return util.Copy(d.KopsBinaryPath, path.Join(d.commonOptions.RunDir(), "kops"))
 	} else {
 		return nil
@@ -48,35 +83,117 @@ func (d *deployer) Build() error {
 }
 
 func (d *deployer) verifyBuildFlags() error {
-	if d.KopsRoot == "" {
+	if d.BuildOptions.TargetBuildArch != "" {
+		if !strings.HasPrefix(d.BuildOptions.TargetBuildArch, "linux/") {
+			return errors.New("--target-build-arch supports linux/amd64 and linux/arm64 only")
+		} else if d.BuildOptions.BuildKubernetes {
+			d.BuildOptions.TargetBuildArch = "linux/amd64"
+		}
+	}
+
+	if d.KopsBinaryPath != "" {
 		if goPath := os.Getenv("GOPATH"); goPath != "" {
 			d.KopsRoot = path.Join(goPath, "src", "k8s.io", "kops")
 		} else {
 			return errors.New("required --kops-root when building from source")
 		}
-	}
-	if d.StageLocation != "" {
-		if !strings.HasPrefix(d.StageLocation, "gs://") {
-			return errors.New("stage-location must be a gs:// path")
-		}
-	} else {
-		stageLocation, err := defaultStageLocation(d.KopsRoot)
+		fi, err := os.Stat(d.KopsRoot)
 		if err != nil {
 			return err
 		}
-		d.StageLocation = stageLocation
+		if !fi.Mode().IsDir() {
+			return errors.New("--kops-root must be a directory")
+		}
 	}
-	if d.KopsBaseURL == "" {
-		d.KopsBaseURL = strings.Replace(d.StageLocation, "gs://", "https://storage.googleapis.com/", 1)
+	if d.BuildOptions.BuildKubernetes {
+		var KubeRoot string
+		if goPath := os.Getenv("GOPATH"); goPath != "" {
+			KubeRoot = path.Join(goPath, "src", "k8s.io", "kubernetes")
+		} else {
+			return errors.New("$GOPATH is not set, please set this variable")
+		}
+		fi, err := os.Stat(KubeRoot)
+		if err != nil {
+			return err
+		}
+		if !fi.Mode().IsDir() {
+			return errors.New("unable to find kubernetes at $GOPATH/src/k8s.io/kubernetes")
+		}
+		d.BuildOptions.KubeRoot = KubeRoot
 	}
-	fi, err := os.Stat(d.KopsRoot)
-	if err != nil {
-		return err
+	ctx := context.Background()
+	if d.StageLocation == "" {
+		switch {
+		case d.boskos != nil:
+			d.StageLocation = d.stagingStore()
+			klog.Infof("creating staging bucket %s to hold kops/kubernetes build artifacts", d.StageLocation)
+			if err := gce.EnsureGCSBucket(d.StageLocation, d.region, d.GCPProject, true); err != nil {
+				return err
+			}
+		case d.CloudProvider == "aws":
+			d.StageLocation = d.stagingStore()
+			if d.createStagingStore {
+				// Public like the GCS staging buckets, because the nodes and the test scripts
+				// download the artifacts over https://.
+				klog.Infof("creating staging bucket %s to hold kops/kubernetes build artifacts", d.StageLocation)
+				if err := d.aws.EnsureS3Bucket(ctx, d.region, d.StageLocation, true); err != nil {
+					return err
+				}
+			}
+		case d.CloudProvider == "digitalocean":
+			stageLocation, err := defaultStageLocation(d.KopsRoot, defaultSpacesPath)
+			if err != nil {
+				return err
+			}
+			d.StageLocation = stageLocation
+		default:
+			stageLocation, err := defaultStageLocation(d.KopsRoot, defaultGCSPath)
+			if err != nil {
+				return err
+			}
+			d.StageLocation = stageLocation
+		}
 	}
-	if !fi.Mode().IsDir() {
-		return errors.New("--kops-root must be a directory")
+	// The location can also come from KOPS_STAGING_BUCKET.
+	if !strings.HasPrefix(d.StageLocation, "gs://") && !strings.HasPrefix(d.StageLocation, "s3://") {
+		return fmt.Errorf("stage-location %q must be a gs:// or s3:// path", d.StageLocation)
 	}
-	if d.KopsVersionMarker != "" {
+
+	stageURL := strings.Replace(d.StageLocation, "gs://", "https://storage.googleapis.com/", 1)
+	if strings.HasPrefix(d.StageLocation, "s3://") {
+		bucket, prefix, err := aws.SplitS3URL(d.StageLocation)
+		if err != nil {
+			return err
+		}
+		switch {
+		case d.CloudProvider == "digitalocean":
+			d.BuildOptions.StageEndpoint = do.SpacesEndpoint
+			stageURL, err = aws.EndpointObjectURL(do.SpacesEndpoint, bucket, prefix)
+			if err != nil {
+				return err
+			}
+		case d.aws == nil:
+			return errors.New("an s3:// stage-location requires --cloud-provider=aws or --cloud-provider=digitalocean")
+		default:
+			region := d.region
+			if !d.createStagingStore {
+				region, err = d.aws.BucketRegion(ctx, bucket)
+				if err != nil {
+					return fmt.Errorf("finding the region of stage-location %s: %w", d.StageLocation, err)
+				}
+			}
+			stageURL, err = aws.PublicObjectURL(ctx, region, bucket, prefix)
+			if err != nil {
+				return err
+			}
+			d.BuildOptions.StageRegion = region
+		}
+	}
+	if !d.BuildOptions.BuildKubernetes && d.KopsBaseURL == "" && os.Getenv("KOPS_BASE_URL") == "" {
+		d.KopsBaseURL = stageURL
+	}
+
+	if d.KopsVersionMarker != "" && !d.BuildOptions.BuildKubernetes {
 		return errors.New("cannot use --kops-version-marker with --build")
 	}
 
@@ -85,20 +202,25 @@ func (d *deployer) verifyBuildFlags() error {
 	return nil
 }
 
-func defaultStageLocation(kopsRoot string) (string, error) {
+// defaultStageLocation returns the stage location of the build of the pull request in the bucket
+// of pathFormat.
+func defaultStageLocation(kopsRoot, pathFormat string) (string, error) {
 	jobName := os.Getenv("JOB_NAME")
 	if jobName == "" {
 		jobName = defaultJobName
 	}
 
-	cmd := exec.Command("git", "describe", "--always")
-	cmd.SetDir(kopsRoot)
-	output, err := exec.CombinedOutputLines(cmd)
-	if err != nil {
-		return "", err
-	} else if len(output) != 1 {
-		return "", fmt.Errorf("unexpected output from git describe: %v", output)
+	sha := os.Getenv("PULL_PULL_SHA")
+	if sha == "" {
+		cmd := exec.Command("git", "rev-parse", "--short", "HEAD")
+		cmd.SetDir(kopsRoot)
+		output, err := exec.CombinedOutputLines(cmd)
+		if err != nil {
+			return "", err
+		} else if len(output) != 1 {
+			return "", fmt.Errorf("unexpected output from git describe: %v", output)
+		}
+		sha = strings.TrimSpace(output[0])
 	}
-	sha := strings.TrimSpace(output[0])
-	return fmt.Sprintf(defaultGCSPath, jobName, sha), nil
+	return fmt.Sprintf(pathFormat, jobName, sha), nil
 }

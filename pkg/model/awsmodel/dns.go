@@ -21,7 +21,6 @@ import (
 	"strings"
 
 	"k8s.io/kops/pkg/apis/kops"
-	"k8s.io/kops/pkg/dns"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awstasks"
 )
@@ -32,104 +31,85 @@ type DNSModelBuilder struct {
 	Lifecycle fi.Lifecycle
 }
 
-var _ fi.ModelBuilder = &DNSModelBuilder{}
+var _ fi.CloudupModelBuilder = &DNSModelBuilder{}
 
-func (b *DNSModelBuilder) ensureDNSZone(c *fi.ModelBuilderContext) error {
-	if dns.IsGossipHostname(b.Cluster.Name) {
+func (b *DNSModelBuilder) ensureDNSZone(c *fi.CloudupModelBuilderContext) error {
+	if !b.Cluster.PublishesDNSRecords() {
 		return nil
 	}
 
 	// Configuration for a DNS zone
 	dnsZone := &awstasks.DNSZone{
-		Name:      fi.String(b.NameForDNSZone()),
+		Name:      new(b.NameForDNSZone()),
 		Lifecycle: b.Lifecycle,
 	}
 
-	topology := b.Cluster.Spec.Topology
-	if topology != nil && topology.DNS != nil {
-		switch topology.DNS.Type {
+	topology := b.Cluster.Spec.Networking.Topology
+	if topology != nil {
+		switch topology.DNS {
 		case kops.DNSTypePublic:
 		// Ignore
 
 		case kops.DNSTypePrivate:
-			dnsZone.Private = fi.Bool(true)
+			dnsZone.Private = new(true)
 			dnsZone.PrivateVPC = b.LinkToVPC()
 
 		default:
-			return fmt.Errorf("unknown DNS type %q", topology.DNS.Type)
+			return fmt.Errorf("unknown DNS type %q", topology.DNS)
 		}
 	}
 
 	if !strings.Contains(b.Cluster.Spec.DNSZone, ".") {
 		// Looks like a hosted zone ID
-		dnsZone.ZoneID = fi.String(b.Cluster.Spec.DNSZone)
+		dnsZone.ZoneID = new(b.Cluster.Spec.DNSZone)
 	} else {
 		// Looks like a normal DNS name
-		dnsZone.DNSName = fi.String(b.Cluster.Spec.DNSZone)
+		dnsZone.DNSName = new(b.Cluster.Spec.DNSZone)
 	}
 
-	return c.EnsureTask(dnsZone)
+	c.EnsureTask(dnsZone)
+	return nil
 }
 
-func (b *DNSModelBuilder) Build(c *fi.ModelBuilderContext) error {
+func (b *DNSModelBuilder) Build(c *fi.CloudupModelBuilderContext) error {
 	// Add a HostedZone if we are going to publish a dns record that depends on it
-	if b.UsePrivateDNS() {
-		// Check to see if we are using a bastion DNS record that points to the hosted zone
-		// If we are, we need to make sure we include the hosted zone as a task
-
+	if b.Cluster.PublishesDNSRecords() {
 		if err := b.ensureDNSZone(c); err != nil {
 			return err
-		}
-	} else {
-		// We now create the DNS Zone for AWS even in the case of public zones;
-		// it has to exist for the IAM record anyway.
-		// TODO: We can now rationalize the code paths
-		if !dns.IsGossipHostname(b.Cluster.Name) {
-			if err := b.ensureDNSZone(c); err != nil {
-				return err
-			}
 		}
 	}
 
 	var targetLoadBalancer awstasks.DNSTarget
 
 	if b.UseLoadBalancerForAPI() || b.UseLoadBalancerForInternalAPI() {
-		lbSpec := b.Cluster.Spec.API.LoadBalancer
-		switch lbSpec.Class {
-		case kops.LoadBalancerClassClassic, "":
-			targetLoadBalancer = awstasks.DNSTarget(b.LinkToCLB("api"))
-		case kops.LoadBalancerClassNetwork:
-			targetLoadBalancer = awstasks.DNSTarget(b.LinkToNLB("api"))
-		}
+		targetLoadBalancer = awstasks.DNSTarget(b.LinkToNLB("api"))
 	}
 
 	if b.UseLoadBalancerForAPI() {
 		// This will point our external DNS record to the load balancer, and put the
 		// pieces together for kubectl to work
 
-		if !dns.IsGossipHostname(b.Cluster.Name) {
+		if b.Cluster.PublishesDNSRecords() {
 			if err := b.ensureDNSZone(c); err != nil {
 				return err
 			}
 
 			c.AddTask(&awstasks.DNSName{
-				Name:               fi.String(b.Cluster.Spec.MasterPublicName),
-				ResourceName:       fi.String(b.Cluster.Spec.MasterPublicName),
+				Name:               new(b.Cluster.Spec.API.PublicName),
+				ResourceName:       new(b.Cluster.Spec.API.PublicName),
 				Lifecycle:          b.Lifecycle,
 				Zone:               b.LinkToDNSZone(),
-				ResourceType:       fi.String("A"),
+				ResourceType:       new("A"),
 				TargetLoadBalancer: targetLoadBalancer,
 			})
-			if b.UseIPv6ForAPI() {
-				c.AddTask(&awstasks.DNSName{
-					Name:               fi.String(b.Cluster.Spec.MasterPublicName + "-AAAA"),
-					ResourceName:       fi.String(b.Cluster.Spec.MasterPublicName),
-					Lifecycle:          b.Lifecycle,
-					Zone:               b.LinkToDNSZone(),
-					ResourceType:       fi.String("AAAA"),
-					TargetLoadBalancer: targetLoadBalancer,
-				})
-			}
+			c.AddTask(&awstasks.DNSName{
+				Name:               new(b.Cluster.Spec.API.PublicName + "-AAAA"),
+				ResourceName:       new(b.Cluster.Spec.API.PublicName),
+				Lifecycle:          b.Lifecycle,
+				Zone:               b.LinkToDNSZone(),
+				ResourceType:       new("AAAA"),
+				TargetLoadBalancer: targetLoadBalancer,
+			})
 		}
 	}
 
@@ -137,38 +117,30 @@ func (b *DNSModelBuilder) Build(c *fi.ModelBuilderContext) error {
 		// This will point the internal API DNS record to the load balancer.
 		// This means kubelet connections go via the load balancer and are more HA.
 
-		if !dns.IsGossipHostname(b.Cluster.Name) {
+		if b.Cluster.PublishesDNSRecords() {
 			if err := b.ensureDNSZone(c); err != nil {
 				return err
 			}
 
-			// Using EnsureTask as MasterInternalName and MasterPublicName could be the same
+			// Using EnsureTask as APIInternalName() and APIPublicName could be the same
 			{
-				err := c.EnsureTask(&awstasks.DNSName{
-					Name:               fi.String(b.Cluster.Spec.MasterInternalName),
-					ResourceName:       fi.String(b.Cluster.Spec.MasterInternalName),
+				c.EnsureTask(&awstasks.DNSName{
+					Name:               new(b.Cluster.APIInternalName()),
+					ResourceName:       new(b.Cluster.APIInternalName()),
 					Lifecycle:          b.Lifecycle,
 					Zone:               b.LinkToDNSZone(),
-					ResourceType:       fi.String("A"),
+					ResourceType:       new("A"),
 					TargetLoadBalancer: targetLoadBalancer,
 				})
-				if err != nil {
-					return err
-				}
 			}
-			if b.UseIPv6ForAPI() {
-				err := c.EnsureTask(&awstasks.DNSName{
-					Name:               fi.String(b.Cluster.Spec.MasterInternalName + "-AAAA"),
-					ResourceName:       fi.String(b.Cluster.Spec.MasterInternalName),
-					Lifecycle:          b.Lifecycle,
-					Zone:               b.LinkToDNSZone(),
-					ResourceType:       fi.String("AAAA"),
-					TargetLoadBalancer: targetLoadBalancer,
-				})
-				if err != nil {
-					return err
-				}
-			}
+			c.EnsureTask(&awstasks.DNSName{
+				Name:               new(b.Cluster.APIInternalName() + "-AAAA"),
+				ResourceName:       new(b.Cluster.APIInternalName()),
+				Lifecycle:          b.Lifecycle,
+				Zone:               b.LinkToDNSZone(),
+				ResourceType:       new("AAAA"),
+				TargetLoadBalancer: targetLoadBalancer,
+			})
 		}
 	}
 
@@ -177,8 +149,10 @@ func (b *DNSModelBuilder) Build(c *fi.ModelBuilderContext) error {
 		// is similar to others, but I would like to keep it on it's own in case we need
 		// to change anything.
 
-		if err := b.ensureDNSZone(c); err != nil {
-			return err
+		if b.Cluster.PublishesDNSRecords() {
+			if err := b.ensureDNSZone(c); err != nil {
+				return err
+			}
 		}
 	}
 

@@ -21,29 +21,13 @@ import (
 	"testing"
 
 	"k8s.io/kops/pkg/model/iam"
-	"k8s.io/kops/pkg/util/stringorslice"
+	"k8s.io/kops/pkg/util/stringorset"
 )
-
-func TestIAMServiceEC2(t *testing.T) {
-	var expectations = map[string]string{
-		"us-east-1":      "ec2.amazonaws.com",
-		"randomunknown":  "ec2.amazonaws.com",
-		"us-gov-east-1":  "ec2.amazonaws.com",
-		"cn-north-1":     "ec2.amazonaws.com.cn",
-		"cn-northwest-1": "ec2.amazonaws.com.cn",
-	}
-
-	for region, expect := range expectations {
-		principal := IAMServiceEC2(region)
-		if principal != expect {
-			t.Errorf("expected %s for %s, but received %s", expect, region, principal)
-		}
-	}
-}
 
 func Test_formatAWSIAMStatement(t *testing.T) {
 	type args struct {
 		acountId     string
+		partition    string
 		oidcProvider string
 		namespace    string
 		name         string
@@ -58,6 +42,7 @@ func Test_formatAWSIAMStatement(t *testing.T) {
 			name: "namespace and name without wildcard",
 			args: args{
 				acountId:     "0123456789",
+				partition:    "aws-test",
 				oidcProvider: "oidc-test",
 				namespace:    "test",
 				name:         "test",
@@ -66,9 +51,9 @@ func Test_formatAWSIAMStatement(t *testing.T) {
 			want: &iam.Statement{
 				Effect: "Allow",
 				Principal: iam.Principal{
-					Federated: "arn:aws:iam::0123456789:oidc-provider/oidc-test",
+					Federated: "arn:aws-test:iam::0123456789:oidc-provider/oidc-test",
 				},
-				Action: stringorslice.String("sts:AssumeRoleWithWebIdentity"),
+				Action: stringorset.String("sts:AssumeRoleWithWebIdentity"),
 				Condition: map[string]interface{}{
 					"StringEquals": map[string]interface{}{
 						"oidc-test:sub": "system:serviceaccount:test:test",
@@ -80,6 +65,7 @@ func Test_formatAWSIAMStatement(t *testing.T) {
 			name: "name contains wildcard",
 			args: args{
 				acountId:     "0123456789",
+				partition:    "aws-test",
 				oidcProvider: "oidc-test",
 				namespace:    "test",
 				name:         "test-*",
@@ -90,6 +76,7 @@ func Test_formatAWSIAMStatement(t *testing.T) {
 			name: "namespace contains wildcard",
 			args: args{
 				acountId:     "0123456789",
+				partition:    "aws-test",
 				oidcProvider: "oidc-test",
 				namespace:    "test-*",
 				name:         "test",
@@ -98,9 +85,9 @@ func Test_formatAWSIAMStatement(t *testing.T) {
 			want: &iam.Statement{
 				Effect: "Allow",
 				Principal: iam.Principal{
-					Federated: "arn:aws:iam::0123456789:oidc-provider/oidc-test",
+					Federated: "arn:aws-test:iam::0123456789:oidc-provider/oidc-test",
 				},
-				Action: stringorslice.String("sts:AssumeRoleWithWebIdentity"),
+				Action: stringorset.String("sts:AssumeRoleWithWebIdentity"),
 				Condition: map[string]interface{}{
 					"StringLike": map[string]interface{}{
 						"oidc-test:sub": "system:serviceaccount:test-*:test",
@@ -111,7 +98,7 @@ func Test_formatAWSIAMStatement(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := formatAWSIAMStatement(tt.args.acountId, tt.args.oidcProvider, tt.args.namespace, tt.args.name)
+			got, err := formatAWSIAMStatement(tt.args.acountId, tt.args.partition, tt.args.oidcProvider, tt.args.namespace, tt.args.name)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("formatAWSIAMStatement() error = %v, wantErr %v", err, tt.wantErr)
 				return

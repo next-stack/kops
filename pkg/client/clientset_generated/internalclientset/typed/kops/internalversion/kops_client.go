@@ -19,13 +19,16 @@ limitations under the License.
 package internalversion
 
 import (
+	http "net/http"
+
 	rest "k8s.io/client-go/rest"
-	"k8s.io/kops/pkg/client/clientset_generated/internalclientset/scheme"
+	scheme "k8s.io/kops/pkg/client/clientset_generated/internalclientset/scheme"
 )
 
 type KopsInterface interface {
 	RESTClient() rest.Interface
 	ClustersGetter
+	HostsGetter
 	InstanceGroupsGetter
 	KeysetsGetter
 	SSHCredentialsGetter
@@ -38,6 +41,10 @@ type KopsClient struct {
 
 func (c *KopsClient) Clusters(namespace string) ClusterInterface {
 	return newClusters(c, namespace)
+}
+
+func (c *KopsClient) Hosts(namespace string) HostInterface {
+	return newHosts(c, namespace)
 }
 
 func (c *KopsClient) InstanceGroups(namespace string) InstanceGroupInterface {
@@ -53,12 +60,24 @@ func (c *KopsClient) SSHCredentials(namespace string) SSHCredentialInterface {
 }
 
 // NewForConfig creates a new KopsClient for the given config.
+// NewForConfig is equivalent to NewForConfigAndClient(c, httpClient),
+// where httpClient was generated with rest.HTTPClientFor(c).
 func NewForConfig(c *rest.Config) (*KopsClient, error) {
 	config := *c
-	if err := setConfigDefaults(&config); err != nil {
+	setConfigDefaults(&config)
+	httpClient, err := rest.HTTPClientFor(&config)
+	if err != nil {
 		return nil, err
 	}
-	client, err := rest.RESTClientFor(&config)
+	return NewForConfigAndClient(&config, httpClient)
+}
+
+// NewForConfigAndClient creates a new KopsClient for the given config and http client.
+// Note the http client provided takes precedence over the configured transport values.
+func NewForConfigAndClient(c *rest.Config, h *http.Client) (*KopsClient, error) {
+	config := *c
+	setConfigDefaults(&config)
+	client, err := rest.RESTClientForConfigAndClient(&config, h)
 	if err != nil {
 		return nil, err
 	}
@@ -80,7 +99,7 @@ func New(c rest.Interface) *KopsClient {
 	return &KopsClient{c}
 }
 
-func setConfigDefaults(config *rest.Config) error {
+func setConfigDefaults(config *rest.Config) {
 	config.APIPath = "/apis"
 	if config.UserAgent == "" {
 		config.UserAgent = rest.DefaultKubernetesUserAgent()
@@ -89,7 +108,7 @@ func setConfigDefaults(config *rest.Config) error {
 		gv := scheme.Scheme.PrioritizedVersionsForGroup("kops.k8s.io")[0]
 		config.GroupVersion = &gv
 	}
-	config.NegotiatedSerializer = scheme.Codecs
+	config.NegotiatedSerializer = rest.CodecFactoryForGeneratedClient(scheme.Scheme, scheme.Codecs)
 
 	if config.QPS == 0 {
 		config.QPS = 5
@@ -97,8 +116,6 @@ func setConfigDefaults(config *rest.Config) error {
 	if config.Burst == 0 {
 		config.Burst = 10
 	}
-
-	return nil
 }
 
 // RESTClient returns a RESTClient that is used to communicate

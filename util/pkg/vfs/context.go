@@ -19,7 +19,7 @@ package vfs
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -27,40 +27,69 @@ import (
 	"sync"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws/ec2metadata"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/denverdino/aliyungo/oss"
-	"github.com/gophercloud/gophercloud"
+	"cloud.google.com/go/storage"
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/feature/ec2/imds"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/gophercloud/gophercloud/v2"
 	"google.golang.org/api/option"
-	storage "google.golang.org/api/storage/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
-
-	vault "github.com/hashicorp/vault/api"
 )
 
 // VFSContext is a 'context' for VFS, that is normally a singleton
 // but allows us to configure S3 credentials, for example
 type VFSContext struct {
+	// mutex guards state
+	mutex sync.Mutex
+
+	// vfsContextState makes it easier to copy the state
+	vfsContextState
+}
+
+type vfsContextState struct {
 	s3Context    *S3Context
 	k8sContext   *KubernetesContext
 	memfsContext *MemFSContext
-	// mutex guards gcsClient
-	mutex sync.Mutex
+
 	// The google cloud storage client, if initialized
-	gcsClient *storage.Service
+	cachedGCSClient *storage.Client
+
 	// swiftClient is the openstack swift client
 	swiftClient *gophercloud.ServiceClient
-	// ossClient is the Aliyun Open Source Storage client
-	ossClient *oss.Client
 
-	vaultClient *vault.Client
-	azureClient *azureClient
+	azureClients map[string]*azblob.Client
 }
 
-var Context = VFSContext{
-	s3Context:  NewS3Context(),
-	k8sContext: NewKubernetesContext(),
+// Context holds the global VFS state.
+// Deprecated: prefer FromContext.
+var Context = NewVFSContext()
+
+// NewVFSContext builds a new VFSContext
+func NewVFSContext() *VFSContext {
+	v := &VFSContext{}
+	v.s3Context = NewS3Context()
+	v.k8sContext = NewKubernetesContext()
+	return v
+}
+
+func NewTestingVFSContext() *VFSContext {
+	vfsContext := NewVFSContext()
+	vfsContext.ResetMemfsContext(true)
+	return vfsContext
+}
+
+func (v *VFSContext) WithGCSClient(gcsClient *storage.Client) *VFSContext {
+	v.mutex.Lock()
+	defer v.mutex.Unlock()
+
+	v2 := &VFSContext{
+		vfsContextState: v.vfsContextState,
+	}
+	v2.cachedGCSClient = gcsClient
+	return v2
 }
 
 type vfsOptions struct {
@@ -78,8 +107,9 @@ func WithBackoff(backoff wait.Backoff) VFSOption {
 
 // ReadFile reads a file from a vfs URL
 // It supports additional schemes which don't (yet) have full VFS implementations:
-//   metadata: reads from instance metadata on GCE/AWS
-//   http / https: reads from HTTP
+//
+//	metadata: reads from instance metadata on GCE/AWS
+//	http / https: reads from HTTP
 func (c *VFSContext) ReadFile(location string, options ...VFSOption) ([]byte, error) {
 	ctx := context.TODO()
 
@@ -115,9 +145,6 @@ func (c *VFSContext) ReadFile(location string, options ...VFSOption) ([]byte, er
 			case "digitalocean":
 				httpURL := "http://169.254.169.254/metadata/v1" + u.Path
 				return c.readHTTPLocation(httpURL, nil, opts)
-			case "alicloud":
-				httpURL := "http://100.100.100.200/latest/meta-data/" + u.Path
-				return c.readHTTPLocation(httpURL, nil, opts)
 			case "openstack":
 				httpURL := "http://169.254.169.254/latest/meta-data/" + u.Path
 				return c.readHTTPLocation(httpURL, nil, opts)
@@ -136,10 +163,13 @@ func (c *VFSContext) ReadFile(location string, options ...VFSOption) ([]byte, er
 	if err != nil {
 		return nil, err
 	}
-	return p.ReadFile()
+	return p.ReadFile(ctx)
 }
 
 func (c *VFSContext) BuildVfsPath(p string) (Path, error) {
+	// NOTE: we do not want this function to take a context.Context, we consider this a "builder".
+	// Instead, we are aiming to defer creation of clients to the first "real" operation (read/write/etc)
+
 	if !strings.Contains(p, "://") {
 		return NewFSPath(p), nil
 	}
@@ -155,6 +185,14 @@ func (c *VFSContext) BuildVfsPath(p string) (Path, error) {
 
 	if strings.HasPrefix(p, "do://") {
 		return c.buildDOPath(p)
+	}
+
+	if strings.HasPrefix(p, "linode://") {
+		return c.buildLinodePath(p)
+	}
+
+	if strings.HasPrefix(p, "hos://") {
+		return c.buildHetznerPath(p)
 	}
 
 	if strings.HasPrefix(p, "memfs://") {
@@ -173,16 +211,12 @@ func (c *VFSContext) BuildVfsPath(p string) (Path, error) {
 		return c.buildOpenstackSwiftPath(p)
 	}
 
-	if strings.HasPrefix(p, "oss://") {
-		return c.buildOSSPath(p)
-	}
-
-	if strings.HasPrefix(p, "vault://") {
-		return c.buildVaultPath(p)
-	}
-
 	if strings.HasPrefix(p, "azureblob://") {
 		return c.buildAzureBlobPath(p)
+	}
+
+	if strings.HasPrefix(p, "scw://") {
+		return c.buildSCWPath(p)
 	}
 
 	return nil, fmt.Errorf("unknown / unhandled path type: %q", p)
@@ -190,17 +224,22 @@ func (c *VFSContext) BuildVfsPath(p string) (Path, error) {
 
 // readAWSMetadata reads the specified path from the AWS EC2 metadata service
 func (c *VFSContext) readAWSMetadata(ctx context.Context, path string) ([]byte, error) {
-	awsSession, err := session.NewSession()
+	config, err := awsconfig.LoadDefaultConfig(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("error building AWS session: %v", err)
+		return nil, fmt.Errorf("failed to load AWS config: %w", err)
 	}
-	client := ec2metadata.New(awsSession)
+
+	client := imds.NewFromConfig(config)
+
 	if strings.HasPrefix(path, "/meta-data/") {
-		s, err := client.GetMetadataWithContext(ctx, strings.TrimPrefix(path, "/meta-data/"))
+		s, err := client.GetMetadata(ctx, &imds.GetMetadataInput{
+			Path: strings.TrimPrefix(path, "/meta-data/"),
+		})
 		if err != nil {
 			return nil, fmt.Errorf("error reading from AWS metadata service: %v", err)
 		}
-		return []byte(s), nil
+		defer s.Content.Close()
+		return io.ReadAll(s.Content)
 	}
 	// There are others (e.g. user-data), but as we don't use them yet let's not expose them
 	return nil, fmt.Errorf("unhandled aws metadata path %q", path)
@@ -228,7 +267,7 @@ func (c *VFSContext) readHTTPLocation(httpURL string, httpHeaders map[string]str
 		if err != nil {
 			return false, fmt.Errorf("error fetching %q: %v", httpURL, err)
 		}
-		body, err = ioutil.ReadAll(response.Body)
+		body, err = io.ReadAll(response.Body)
 		if err != nil {
 			return false, fmt.Errorf("error reading response for %q: %v", httpURL, err)
 		}
@@ -258,6 +297,17 @@ func (c *VFSContext) readHTTPLocation(httpURL string, httpHeaders map[string]str
 	}
 }
 
+// nextBackoffDuration grows duration by backoff.Factor, clamped to backoff.Cap when one is set.
+// An uncapped backoff with a large Steps count grows without bound, which strands a caller for
+// far longer than the condition it is waiting on takes to become true.
+func nextBackoffDuration(duration time.Duration, backoff wait.Backoff) time.Duration {
+	next := time.Duration(float64(duration) * backoff.Factor)
+	if backoff.Cap > 0 && next > backoff.Cap {
+		return backoff.Cap
+	}
+	return next
+}
+
 // RetryWithBackoff runs until a condition function returns true, or until Steps attempts have been taken
 // As compared to wait.ExponentialBackoff, this function returns the results from the function on the final attempt
 func RetryWithBackoff(backoff wait.Backoff, condition func() (bool, error)) (bool, error) {
@@ -270,7 +320,7 @@ func RetryWithBackoff(backoff wait.Backoff, condition func() (bool, error)) (boo
 				adjusted = wait.Jitter(duration, backoff.Jitter)
 			}
 			time.Sleep(adjusted)
-			duration = time.Duration(float64(duration) * backoff.Factor)
+			duration = nextBackoffDuration(duration, backoff)
 		}
 
 		i++
@@ -292,6 +342,8 @@ func RetryWithBackoff(backoff wait.Backoff, condition func() (bool, error)) (boo
 }
 
 func (c *VFSContext) buildS3Path(p string) (*S3Path, error) {
+	endpoint := os.Getenv("S3_ENDPOINT")
+
 	u, err := url.Parse(p)
 	if err != nil {
 		return nil, fmt.Errorf("invalid s3 path: %q", p)
@@ -305,11 +357,24 @@ func (c *VFSContext) buildS3Path(p string) (*S3Path, error) {
 		return nil, fmt.Errorf("invalid s3 path: %q", p)
 	}
 
-	s3path := newS3Path(c.s3Context, u.Scheme, bucket, u.Path, true)
+	s3path := newS3Path(c.s3Context, u.Scheme, bucket, u.Path, true, func(o *s3.Options) {
+		if endpoint != "" {
+			o.BaseEndpoint = aws.String(endpoint)
+			o.UsePathStyle = true
+			o.DisableLogOutputChecksumValidationSkipped = true
+		} else {
+			o.EndpointResolverV2 = &ResolverV2{}
+		}
+	})
 	return s3path, nil
 }
 
 func (c *VFSContext) buildDOPath(p string) (*S3Path, error) {
+	endpoint := os.Getenv("S3_ENDPOINT")
+	if endpoint == "" {
+		return nil, fmt.Errorf("required S3_ENDPOINT env var for path: %q", p)
+	}
+
 	u, err := url.Parse(p)
 	if err != nil {
 		return nil, fmt.Errorf("invalid spaces path: %q", p)
@@ -323,7 +388,68 @@ func (c *VFSContext) buildDOPath(p string) (*S3Path, error) {
 		return nil, fmt.Errorf("invalid spaces path: %q", p)
 	}
 
-	s3path := newS3Path(c.s3Context, u.Scheme, bucket, u.Path, false)
+	s3path := newS3Path(c.s3Context, u.Scheme, bucket, u.Path, false, func(o *s3.Options) {
+		o.BaseEndpoint = aws.String(endpoint)
+		o.UsePathStyle = true
+		o.DisableLogOutputChecksumValidationSkipped = true
+	})
+	return s3path, nil
+}
+
+func (c *VFSContext) buildLinodePath(p string) (*S3Path, error) {
+	endpoint := os.Getenv("S3_ENDPOINT")
+	if endpoint == "" {
+		return nil, fmt.Errorf("required S3_ENDPOINT env var for path: %q", p)
+	}
+
+	u, err := url.Parse(p)
+	if err != nil {
+		return nil, fmt.Errorf("invalid Linode object storage path: %q", p)
+	}
+	if u.Scheme != "linode" {
+		return nil, fmt.Errorf("invalid Linode object storage path: %q", p)
+	}
+
+	bucket := strings.TrimSuffix(u.Host, "/")
+	if bucket == "" {
+		return nil, fmt.Errorf("invalid Linode object storage path: %q", p)
+	}
+
+	s3path := newS3Path(c.s3Context, u.Scheme, bucket, u.Path, false, func(o *s3.Options) {
+		o.BaseEndpoint = aws.String(endpoint)
+		o.UsePathStyle = true
+		o.DisableLogOutputChecksumValidationSkipped = true
+		// Akamai (Linode) requires checksum-when-required behavior
+		o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
+		o.ResponseChecksumValidation = aws.ResponseChecksumValidationWhenRequired
+	})
+	return s3path, nil
+}
+
+func (c *VFSContext) buildHetznerPath(p string) (*S3Path, error) {
+	endpoint := os.Getenv("S3_ENDPOINT")
+	if endpoint == "" {
+		return nil, fmt.Errorf("required S3_ENDPOINT env var for path: %q", p)
+	}
+
+	u, err := url.Parse(p)
+	if err != nil {
+		return nil, fmt.Errorf("invalid Hetzner Object Storage path: %q", p)
+	}
+	if u.Scheme != "hos" {
+		return nil, fmt.Errorf("invalid Hetzner object storage path: %q", p)
+	}
+
+	bucket := strings.TrimSuffix(u.Host, "/")
+	if bucket == "" {
+		return nil, fmt.Errorf("invalid Hetzner object storage path: %q", p)
+	}
+
+	s3path := newS3Path(c.s3Context, u.Scheme, bucket, u.Path, false, func(o *s3.Options) {
+		o.BaseEndpoint = aws.String(endpoint)
+		o.UsePathStyle = true
+		o.DisableLogOutputChecksumValidationSkipped = true
+	})
 	return s3path, nil
 }
 
@@ -376,36 +502,50 @@ func (c *VFSContext) buildGCSPath(p string) (*GSPath, error) {
 	}
 
 	bucket := strings.TrimSuffix(u.Host, "/")
-
-	gcsClient, err := c.getGCSClient()
-	if err != nil {
-		return nil, err
+	if bucket == "" {
+		return nil, fmt.Errorf("invalid google cloud storage path: %q", p)
 	}
 
-	gcsPath := NewGSPath(gcsClient, bucket, u.Path)
+	gcsPath := NewGSPath(c, bucket, u.Path)
 	return gcsPath, nil
 }
 
-// getGCSClient returns the google storage.Service client, caching it for future calls
-func (c *VFSContext) getGCSClient() (*storage.Service, error) {
+// getGCSClient returns the google cloud storage client, caching it for future calls
+func (c *VFSContext) getGCSClient(ctx context.Context) (*storage.Client, error) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
-	if c.gcsClient != nil {
-		return c.gcsClient, nil
+	if c.cachedGCSClient != nil {
+		return c.cachedGCSClient, nil
 	}
 
 	// TODO: Should we fall back to read-only?
-	scope := storage.DevstorageReadWriteScope
+	scope := storage.ScopeFullControl
 
-	ctx := context.Background()
-	gcsClient, err := storage.NewService(ctx, option.WithScopes(scope))
+	gcsClient, err := storage.NewClient(ctx, option.WithScopes(scope))
 	if err != nil {
 		return nil, fmt.Errorf("error building GCS client: %v", err)
 	}
 
-	c.gcsClient = gcsClient
+	c.cachedGCSClient = gcsClient
 	return gcsClient, nil
+}
+
+// getSwiftClient returns the openstack switch client, caching it for future calls
+func (c *VFSContext) getSwiftClient(ctx context.Context) (*gophercloud.ServiceClient, error) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	if c.swiftClient != nil {
+		return c.swiftClient, nil
+	}
+
+	swiftClient, err := NewSwiftClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	c.swiftClient = swiftClient
+	return swiftClient, nil
 }
 
 func (c *VFSContext) buildOpenstackSwiftPath(p string) (*SwiftPath, error) {
@@ -423,76 +563,14 @@ func (c *VFSContext) buildOpenstackSwiftPath(p string) (*SwiftPath, error) {
 		return nil, fmt.Errorf("invalid swift path: %q", p)
 	}
 
-	if c.swiftClient == nil {
-		swiftClient, err := NewSwiftClient()
-		if err != nil {
-			return nil, err
-		}
-		c.swiftClient = swiftClient
-	}
-
-	return NewSwiftPath(c.swiftClient, bucket, u.Path)
-}
-
-func (c *VFSContext) buildOSSPath(p string) (*OSSPath, error) {
-	u, err := url.Parse(p)
-	if err != nil {
-		return nil, fmt.Errorf("invalid aliyun oss path: %q", p)
-	}
-
-	if u.Scheme != "oss" {
-		return nil, fmt.Errorf("invalid aliyun oss path: %q", p)
-	}
-
-	bucket := strings.TrimSuffix(u.Host, "/")
-	if bucket == "" {
-		return nil, fmt.Errorf("invalid aliyun oss path: %q", p)
-	}
-
-	if c.ossClient == nil {
-		ossClient, err := NewAliOSSClient()
-		if err != nil {
-			return nil, err
-		}
-		c.ossClient = ossClient
-	}
-
-	return NewOSSPath(c.ossClient, bucket, u.Path)
-}
-
-func (c *VFSContext) buildVaultPath(p string) (*VaultPath, error) {
-	u, err := url.Parse(p)
-	if err != nil {
-		return nil, fmt.Errorf("invalid vault url: %q", p)
-	}
-
-	var scheme string
-
-	if u.Scheme != "vault" {
-		return nil, fmt.Errorf("invalid vault url: %q", p)
-	}
-
-	queryValues := u.Query()
-
-	scheme = "https://"
-	if queryValues.Get("tls") == "false" {
-		scheme = "http://"
-	}
-
-	if c.vaultClient == nil {
-
-		vaultClient, err := newVaultClient(scheme, u.Hostname(), u.Port())
-		if err != nil {
-			return nil, err
-		}
-
-		c.vaultClient = vaultClient
-	}
-
-	return newVaultPath(c.vaultClient, scheme, u.Path)
+	return NewSwiftPath(c, bucket, u.Path)
 }
 
 func (c *VFSContext) buildAzureBlobPath(p string) (*AzureBlobPath, error) {
+	if os.Getenv("AZURE_STORAGE_ACCOUNT") != "" {
+		return nil, fmt.Errorf("unset AZURE_STORAGE_ACCOUNT; the storage account belongs in the URL:  azureblob://<account>/<container>/<key>")
+	}
+
 	u, err := url.Parse(p)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse %q: %s", p, err)
@@ -502,31 +580,68 @@ func (c *VFSContext) buildAzureBlobPath(p string) (*AzureBlobPath, error) {
 		return nil, fmt.Errorf("invalid Azure Blob scheme: %q", p)
 	}
 
-	container := strings.TrimSuffix(u.Host, "/")
+	account := strings.TrimSuffix(u.Host, "/")
+	if account == "" {
+		return nil, fmt.Errorf("no storage account specified in %q; expected azureblob://<account>/<container>/<key>", p)
+	}
+
+	rest := strings.TrimPrefix(u.Path, "/")
+	container, key, _ := strings.Cut(rest, "/")
 	if container == "" {
-		return nil, fmt.Errorf("no container specified: %q", p)
+		return nil, fmt.Errorf("no container specified in %q; expected azureblob://<account>/<container>/<key>", p)
 	}
 
-	client, err := c.getAzureBlobClient()
-	if err != nil {
-		return nil, err
-	}
-
-	return NewAzureBlobPath(client, container, u.Path), nil
+	return NewAzureBlobPath(c, account, container, key), nil
 }
 
-func (c *VFSContext) getAzureBlobClient() (*azureClient, error) {
+// getAzureBlobClient returns the client for azure blob storage for the given
+// storage account, caching it for future reuse.
+func (c *VFSContext) getAzureBlobClient(ctx context.Context, account string) (*azblob.Client, error) {
+	if account == "" {
+		return nil, fmt.Errorf("Azure storage account is required")
+	}
+
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
-	if c.azureClient != nil {
-		return c.azureClient, nil
+	if client, ok := c.azureClients[account]; ok {
+		return client, nil
 	}
 
-	client, err := newAzureClient()
+	client, err := newAzureClient(ctx, account)
 	if err != nil {
 		return nil, err
 	}
-	c.azureClient = client
+	if c.azureClients == nil {
+		c.azureClients = make(map[string]*azblob.Client)
+	}
+	c.azureClients[account] = client
 	return client, nil
+}
+
+func (c *VFSContext) buildSCWPath(p string) (*S3Path, error) {
+	endpoint := os.Getenv("S3_ENDPOINT")
+	if endpoint == "" {
+		return nil, fmt.Errorf("required S3_ENDPOINT env var for path: %q", p)
+	}
+
+	u, err := url.Parse(p)
+	if err != nil {
+		return nil, fmt.Errorf("invalid bucket path: %q", p)
+	}
+	if u.Scheme != "scw" {
+		return nil, fmt.Errorf("invalid bucket path: %q", p)
+	}
+
+	bucket := strings.TrimSuffix(u.Host, "/")
+	if bucket == "" {
+		return nil, fmt.Errorf("invalid bucket path: %q", p)
+	}
+
+	s3path := newS3Path(c.s3Context, u.Scheme, bucket, u.Path, false, func(o *s3.Options) {
+		o.BaseEndpoint = aws.String(endpoint)
+		o.UsePathStyle = true
+		o.DisableLogOutputChecksumValidationSkipped = true
+	})
+	return s3path, nil
 }

@@ -24,7 +24,7 @@ spec:
         namespace: default
         aws:
           policyARNs:
-          - arn:aws:iam::123456789012:policy/UsersManageOwnCredentials
+          - arn:aws-test:iam::123456789012:policy/UsersManageOwnCredentials
       - name: myotherserviceaccount
         namespace: myapp
         aws:
@@ -43,8 +43,7 @@ spec:
             ]
   kubelet:
     anonymousAuth: false
-  kubernetesVersion: v1.20.0
-  masterInternalName: api.internal.123.example.com
+  kubernetesVersion: v1.32.0
   masterPublicName: api.123.example.com
   networkCIDR: 172.20.0.0/16
   networking:
@@ -55,9 +54,6 @@ spec:
     discoveryStore: memfs://discovery.example.com/123.example.com
   sshAccess:
     - 0.0.0.0/0
-  topology:
-    masters: public
-    nodes: public
   subnets:
   - cidr: 172.20.32.0/19
     name: us-test-1a
@@ -75,7 +71,7 @@ metadata:
     kops.k8s.io/cluster: 123.example.com
 spec:
   associatePublicIp: true
-  image: kope.io/k8s-1.4-debian-jessie-amd64-hvm-ebs-2016-10-21
+  image: ubuntu/images/hvm-ssd-gp3/ubuntu-resolute-26.04-amd64-server-20220404
   machineType: t2.medium
   maxSize: 2
   minSize: 2
@@ -94,7 +90,7 @@ metadata:
     kops.k8s.io/cluster: 123.example.com
 spec:
   associatePublicIp: true
-  image: kope.io/k8s-1.4-debian-jessie-amd64-hvm-ebs-2016-10-21
+  image: ubuntu/images/hvm-ssd-gp3/ubuntu-resolute-26.04-amd64-server-20220404
   machineType: m3.medium
   maxSize: 1
   minSize: 1

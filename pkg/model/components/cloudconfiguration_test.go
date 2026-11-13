@@ -20,15 +20,14 @@ import (
 	"testing"
 
 	kopsapi "k8s.io/kops/pkg/apis/kops"
-	"k8s.io/kops/upup/pkg/fi"
 )
 
 func TestCloudConfigurationOptionsBuilder(t *testing.T) {
 	ob := &CloudConfigurationOptionsBuilder{
 		Context: nil,
 	}
-	disabled := fi.Bool(false)
-	enabled := fi.Bool(true)
+	disabled := new(false)
+	enabled := new(true)
 	for _, test := range []struct {
 		description              string
 		generalManageSCs         *bool
@@ -93,24 +92,25 @@ func TestCloudConfigurationOptionsBuilder(t *testing.T) {
 		},
 	} {
 		t.Run(test.description, func(t *testing.T) {
-			spec := kopsapi.ClusterSpec{
-				CloudProvider: string(kopsapi.CloudProviderOpenstack),
-				CloudConfig: &kopsapi.CloudConfiguration{
-					Openstack: &kopsapi.OpenstackConfiguration{
+			cluster := &kopsapi.Cluster{}
+			cluster.Spec = kopsapi.ClusterSpec{
+				CloudConfig: &kopsapi.CloudConfiguration{},
+				CloudProvider: kopsapi.CloudProviderSpec{
+					Openstack: &kopsapi.OpenstackSpec{
 						BlockStorage: &kopsapi.OpenstackBlockStorageConfig{},
 					},
 				},
 			}
 			if p := test.generalManageSCs; p != nil {
-				spec.CloudConfig.ManageStorageClasses = p
+				cluster.Spec.CloudConfig.ManageStorageClasses = p
 			}
 			if p := test.openStackManageSCs; p != nil {
-				spec.CloudConfig.Openstack.BlockStorage.CreateStorageClass = p
+				cluster.Spec.CloudProvider.Openstack.BlockStorage.CreateStorageClass = p
 			}
-			if err := ob.BuildOptions(&spec); err != nil {
+			if err := ob.BuildOptions(cluster); err != nil {
 				t.Fatalf("failed to build options: %v", err)
 			}
-			if want, got := test.expectedGeneralManageSCs, spec.CloudConfig.ManageStorageClasses; (want == nil) != (got == nil) || (got != nil && *got != *want) {
+			if want, got := test.expectedGeneralManageSCs, cluster.Spec.CloudConfig.ManageStorageClasses; (want == nil) != (got == nil) || (got != nil && *got != *want) {
 				switch {
 				case want == nil:
 					t.Errorf("spec.cloudConfig.manageStorageClasses: want nil, got %t", *got)

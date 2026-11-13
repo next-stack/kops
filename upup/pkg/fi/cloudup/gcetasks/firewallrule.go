@@ -22,23 +22,30 @@ import (
 	"strings"
 
 	compute "google.golang.org/api/compute/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/gce"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraform"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraformWriter"
 )
 
+type AddressFamily string
+
+const AddressFamilyIPv4 AddressFamily = "ipv4"
+const AddressFamilyIPv6 AddressFamily = "ipv6"
+
 // FirewallRule represents a GCE firewall rules
 // +kops:fitask
 type FirewallRule struct {
 	Name      *string
+	Family    AddressFamily
 	Lifecycle fi.Lifecycle
 
 	Network      *Network
-	SourceTags   []string
-	SourceRanges []string
-	TargetTags   []string
-	Allowed      []string
+	SourceTags   sets.Set[string]
+	SourceRanges sets.Set[string]
+	TargetTags   sets.Set[string]
+	Allowed      sets.Set[string]
 
 	// Disabled: Denotes whether the firewall rule is disabled. When set to
 	// true, the firewall rule is not enforced and the network behaves as if
@@ -47,50 +54,58 @@ type FirewallRule struct {
 	Disabled bool
 }
 
-var _ fi.CompareWithID = &FirewallRule{}
+var _ fi.CompareWithID = (*FirewallRule)(nil)
+var _ fi.CloudupTaskNormalize = (*FirewallRule)(nil)
 
 func (e *FirewallRule) CompareWithID() *string {
 	return e.Name
 }
 
-func (e *FirewallRule) Find(c *fi.Context) (*FirewallRule, error) {
-	cloud := c.Cloud.(gce.GCECloud)
+func (e *FirewallRule) Find(c *fi.CloudupContext) (*FirewallRule, error) {
+	cloud := c.T.Cloud.(gce.GCECloud)
 
 	r, err := cloud.Compute().Firewalls().Get(cloud.Project(), *e.Name)
 	if err != nil {
 		if gce.IsNotFound(err) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("error listing FirewallRules: %v", err)
+		return nil, fmt.Errorf("getting FirewallRule %q: %w", *e.Name, err)
 	}
 
 	actual := &FirewallRule{}
 	actual.Name = &r.Name
-	actual.Network = &Network{Name: fi.String(lastComponent(r.Network))}
-	actual.TargetTags = r.TargetTags
-	actual.SourceRanges = r.SourceRanges
-	actual.SourceTags = r.SourceTags
+	actual.Network = &Network{Name: new(lastComponent(r.Network))}
+	if len(r.TargetTags) > 0 {
+		actual.TargetTags = sets.New(r.TargetTags...)
+	}
+	if len(r.SourceRanges) > 0 {
+		actual.SourceRanges = sets.New(r.SourceRanges...)
+	}
+	if len(r.SourceTags) > 0 {
+		actual.SourceTags = sets.New(r.SourceTags...)
+	}
 	actual.Disabled = r.Disabled
 	for _, a := range r.Allowed {
-		actual.Allowed = append(actual.Allowed, serializeFirewallAllowed(a))
+		if actual.Allowed == nil {
+			actual.Allowed = sets.New[string]()
+		}
+		actual.Allowed.Insert(serializeFirewallAllowed(a))
 	}
 
 	// Ignore "system" fields
 	actual.Lifecycle = e.Lifecycle
+	actual.Family = e.Family
 
 	return actual, nil
 }
 
-func (e *FirewallRule) Run(c *fi.Context) error {
-	if err := e.sanityCheck(); err != nil {
-		return err
-	}
-	return fi.DefaultDeltaRunMethod(e, c)
+func (e *FirewallRule) Run(c *fi.CloudupContext) error {
+	return fi.CloudupDefaultDeltaRunMethod(e, c)
 }
 
-// sanityCheck applies some validation that isn't technically required,
+// Normalize applies some validation that isn't technically required,
 // but avoids some problems with surprising behaviours.
-func (e *FirewallRule) sanityCheck() error {
+func (e *FirewallRule) Normalize(c *fi.CloudupContext) error {
 	if !e.Disabled {
 		// Treat it as an error if SourceRanges _and_ SourceTags empty with Disabled=false
 		// this is interpreted as SourceRanges="0.0.0.0/0", which is likely not what was intended.
@@ -105,23 +120,30 @@ func (e *FirewallRule) sanityCheck() error {
 		return fmt.Errorf("SourceRanges and SourceTags should not both be specified")
 	}
 
-	name := fi.StringValue(e.Name)
+	name := fi.ValueOf(e.Name)
 
 	// Make sure we've split the ipv4 / ipv6 addresses.
 	// A single firewall rule can't mix ipv4 and ipv6 addresses, so we split them into two rules.
-	for _, sourceRange := range e.SourceRanges {
+	for sourceRange := range e.SourceRanges {
 		_, cidr, err := net.ParseCIDR(sourceRange)
 		if err != nil {
 			return fmt.Errorf("sourceRange %q is not valid: %w", sourceRange, err)
 		}
+
+		if e.Family == "" {
+			// This is our own requirement, just for consistency checking.
+			// Previous we used the name, but that was confused when the cluster name was ipv6.example.com
+			return fmt.Errorf("must set Family when using SourceRanges")
+		}
+
 		if cidr.IP.To4() != nil {
 			// IPv4
-			if strings.Contains(name, "-ipv6") {
+			if e.Family != AddressFamilyIPv4 {
 				return fmt.Errorf("ipv4 ranges should not be in a ipv6-named rule (found %s in %s)", sourceRange, name)
 			}
 		} else {
 			// IPv6
-			if !strings.Contains(name, "-ipv6") {
+			if e.Family != AddressFamilyIPv6 {
 				return fmt.Errorf("ipv6 ranges should be in a ipv6-named rule (found %s in %s)", sourceRange, name)
 			}
 		}
@@ -170,7 +192,7 @@ func serializeFirewallAllowed(r *compute.FirewallAllowed) string {
 func (e *FirewallRule) mapToGCE(project string) (*compute.Firewall, error) {
 	var allowed []*compute.FirewallAllowed
 	if e.Allowed != nil {
-		for _, a := range e.Allowed {
+		for _, a := range sets.List(e.Allowed) {
 			p, err := parseFirewallAllowed(a)
 			if err != nil {
 				return nil, err
@@ -181,9 +203,9 @@ func (e *FirewallRule) mapToGCE(project string) (*compute.Firewall, error) {
 	firewall := &compute.Firewall{
 		Name:         *e.Name,
 		Network:      e.Network.URL(project),
-		SourceTags:   e.SourceTags,
-		SourceRanges: e.SourceRanges,
-		TargetTags:   e.TargetTags,
+		SourceTags:   sets.List(e.SourceTags),
+		SourceRanges: sets.List(e.SourceRanges),
+		TargetTags:   sets.List(e.TargetTags),
 		Allowed:      allowed,
 		Disabled:     e.Disabled,
 	}
@@ -213,22 +235,22 @@ func (_ *FirewallRule) RenderGCE(t *gce.GCEAPITarget, a, e, changes *FirewallRul
 }
 
 type terraformAllow struct {
-	Protocol string   `json:"protocol,omitempty" cty:"protocol"`
-	Ports    []string `json:"ports,omitempty" cty:"ports"`
+	Protocol string   `cty:"protocol"`
+	Ports    []string `cty:"ports"`
 }
 
 type terraformFirewall struct {
-	Name    string                   `json:"name" cty:"name"`
-	Network *terraformWriter.Literal `json:"network" cty:"network"`
+	Name    string                   `cty:"name"`
+	Network *terraformWriter.Literal `cty:"network"`
 
-	Allowed []*terraformAllow `json:"allow,omitempty" cty:"allow"`
+	Allowed []*terraformAllow `cty:"allow"`
 
-	SourceTags []string `json:"source_tags,omitempty" cty:"source_tags"`
+	SourceTags []string `cty:"source_tags"`
 
-	SourceRanges []string `json:"source_ranges,omitempty" cty:"source_ranges"`
-	TargetTags   []string `json:"target_tags,omitempty" cty:"target_tags"`
+	SourceRanges []string `cty:"source_ranges"`
+	TargetTags   []string `cty:"target_tags"`
 
-	Disabled bool `json:"disabled,omitempty" cty:"disabled"`
+	Disabled bool `cty:"disabled"`
 }
 
 func (_ *FirewallRule) RenderTerraform(t *terraform.TerraformTarget, a, e, changes *FirewallRule) error {
@@ -257,8 +279,7 @@ func (_ *FirewallRule) RenderTerraform(t *terraform.TerraformTarget, a, e, chang
 		Disabled:     g.Disabled,
 	}
 
-	// TODO: This doesn't seem right, but it looks like a TF problem
-	tf.Network = e.Network.TerraformName()
+	tf.Network = e.Network.TerraformLink()
 
 	return t.RenderResource("google_compute_firewall", *e.Name, tf)
 }

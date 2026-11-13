@@ -16,28 +16,18 @@ kOps is Kubernetes Operations.
 ### Options
 
 ```
-      --add_dir_header                   If true, adds the file directory to the header of the log messages
-      --alsologtostderr                  log to standard error as well as files
-      --config string                    yaml config file (default is $HOME/.kops.yaml)
-  -h, --help                             help for kops
-      --log_backtrace_at traceLocation   when logging hits line file:N, emit a stack trace (default :0)
-      --log_dir string                   If non-empty, write log files in this directory
-      --log_file string                  If non-empty, use this log file
-      --log_file_max_size uint           Defines the maximum size a log file can grow to. Unit is megabytes. If the value is 0, the maximum file size is unlimited. (default 1800)
-      --logtostderr                      log to standard error instead of files (default true)
-      --name string                      Name of cluster. Overrides KOPS_CLUSTER_NAME environment variable
-      --one_output                       If true, only write logs to their native severity level (vs also writing to each lower severity level)
-      --skip_headers                     If true, avoid header prefixes in the log messages
-      --skip_log_headers                 If true, avoid headers when opening log files
-      --state string                     Location of state storage (kops 'config' file). Overrides KOPS_STATE_STORE environment variable
-      --stderrthreshold severity         logs at or above this threshold go to stderr (default 2)
-  -v, --v Level                          number for the log level verbosity
-      --vmodule moduleSpec               comma-separated list of pattern=N settings for file-filtered logging
+      --alsologtostderrthreshold severity   logs at or above this threshold go to stderr when -alsologtostderr=true (no effect when -logtostderr=true)
+      --config string                       yaml config file (default is $HOME/.kops.yaml)
+  -h, --help                                help for kops
+      --legacy_stderr_threshold_behavior    If true, stderrthreshold is ignored when logtostderr=true (legacy behavior). If false, stderrthreshold is honored even when logtostderr=true
+      --name string                         Name of cluster. Overrides KOPS_CLUSTER_NAME environment variable
+      --state string                        Location of state storage (kops 'config' file). Overrides KOPS_STATE_STORE environment variable
+  -v, --v Level                             number for the log level verbosity
 ```
 
 ### SEE ALSO
 
-* [kops completion](kops_completion.md)	 - generate the autocompletion script for the specified shell
+* [kops completion](kops_completion.md)	 - Generate the autocompletion script for the specified shell
 * [kops create](kops_create.md)	 - Create a resource by command line, filename or stdin.
 * [kops delete](kops_delete.md)	 - Delete clusters, instancegroups, instances, and secrets.
 * [kops distrust](kops_distrust.md)	 - Distrust keypairs.
@@ -45,9 +35,10 @@ kOps is Kubernetes Operations.
 * [kops export](kops_export.md)	 - Export configuration.
 * [kops get](kops_get.md)	 - Get one or many resources.
 * [kops promote](kops_promote.md)	 - Promote a resource.
+* [kops reconcile](kops_reconcile.md)	 - Reconcile a cluster.
 * [kops replace](kops_replace.md)	 - Replace cluster resources.
 * [kops rolling-update](kops_rolling-update.md)	 - Rolling update a cluster.
-* [kops toolbox](kops_toolbox.md)	 - Miscellaneous, infrequently used commands.
+* [kops toolbox](kops_toolbox.md)	 - Miscellaneous, experimental, or infrequently used commands.
 * [kops trust](kops_trust.md)	 - Trust keypairs.
 * [kops update](kops_update.md)	 - Update a cluster.
 * [kops upgrade](kops_upgrade.md)	 - Upgrade a kubernetes cluster.

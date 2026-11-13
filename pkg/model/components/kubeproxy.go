@@ -17,8 +17,9 @@ limitations under the License.
 package components
 
 import (
+	"k8s.io/apimachinery/pkg/api/resource"
+
 	"k8s.io/kops/pkg/apis/kops"
-	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/loader"
 )
 
@@ -27,10 +28,10 @@ type KubeProxyOptionsBuilder struct {
 	Context *OptionsContext
 }
 
-var _ loader.OptionsBuilder = &KubeProxyOptionsBuilder{}
+var _ loader.ClusterOptionsBuilder = &KubeProxyOptionsBuilder{}
 
-func (b *KubeProxyOptionsBuilder) BuildOptions(o interface{}) error {
-	clusterSpec := o.(*kops.ClusterSpec)
+func (b *KubeProxyOptionsBuilder) BuildOptions(o *kops.Cluster) error {
+	clusterSpec := &o.Spec
 	if clusterSpec.KubeProxy == nil {
 		clusterSpec.KubeProxy = &kops.KubeProxyConfig{}
 	}
@@ -44,8 +45,8 @@ func (b *KubeProxyOptionsBuilder) BuildOptions(o interface{}) error {
 
 	// Any change here should be accompanied by a proportional change in CPU
 	// requests of other per-node add-ons (e.g. fluentd).
-	if config.CPURequest == "" {
-		config.CPURequest = "100m"
+	if config.CPURequest == nil {
+		config.CPURequest = resource.NewScaledQuantity(100, resource.Milli)
 	}
 
 	image, err := Image("kube-proxy", clusterSpec, b.Context.AssetBuilder)
@@ -62,35 +63,7 @@ func (b *KubeProxyOptionsBuilder) BuildOptions(o interface{}) error {
 
 	if config.ClusterCIDR == nil {
 		if b.needsClusterCIDR(clusterSpec) {
-			config.ClusterCIDR = fi.String(clusterSpec.KubeControllerManager.ClusterCIDR)
-		}
-	}
-
-	// Set the kube-proxy hostname-override (actually the NodeName), to avoid #2915 et al
-	cloudProvider := kops.CloudProviderID(clusterSpec.CloudProvider)
-	if cloudProvider == kops.CloudProviderAWS {
-		// Use the hostname from the AWS metadata service
-		// if hostnameOverride is not set.
-		if config.HostnameOverride == "" {
-			config.HostnameOverride = "@aws"
-		}
-	}
-
-	if cloudProvider == kops.CloudProviderDO {
-		if config.HostnameOverride == "" {
-			config.HostnameOverride = "@digitalocean"
-		}
-	}
-
-	if cloudProvider == kops.CloudProviderALI {
-		if config.HostnameOverride == "" {
-			config.HostnameOverride = "@alicloud"
-		}
-	}
-
-	if cloudProvider == kops.CloudProviderAzure {
-		if config.HostnameOverride == "" {
-			config.HostnameOverride = "@azure"
+			config.ClusterCIDR = new(clusterSpec.KubeControllerManager.ClusterCIDR)
 		}
 	}
 
@@ -99,7 +72,7 @@ func (b *KubeProxyOptionsBuilder) BuildOptions(o interface{}) error {
 
 func (*KubeProxyOptionsBuilder) needsClusterCIDR(clusterSpec *kops.ClusterSpec) bool {
 	// If we use podCIDR from cloud, we should not set cluster cidr.
-	if clusterSpec.PodCIDRFromCloud {
+	if clusterSpec.IsKopsControllerIPAM() {
 		return false
 	}
 

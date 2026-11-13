@@ -2,35 +2,42 @@
 # Sourced from https://github.com/kubernetes/autoscaler/
 ---
 # Source: cluster-autoscaler/templates/pdb.yaml
-apiVersion: policy/v1beta1
+apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   labels:
-    k8s-addon: cluster-autoscaler.addons.k8s.io
-    k8s-app: cluster-autoscaler
-  name: cluster-autoscaler
-spec:
-  selector:
-    matchLabels:
-      k8s-app: "cluster-autoscaler"
-  maxUnavailable: 1
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  labels:
+    app.kubernetes.io/name: "cluster-autoscaler"
     k8s-addon: cluster-autoscaler.addons.k8s.io
     k8s-app: cluster-autoscaler
   name: cluster-autoscaler
   namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      k8s-app: cluster-autoscaler
+  maxUnavailable: 1
 ---
+# Source: cluster-autoscaler/templates/serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    app.kubernetes.io/name: "cluster-autoscaler"
+    k8s-addon: cluster-autoscaler.addons.k8s.io
+    k8s-app: cluster-autoscaler
+  name: cluster-autoscaler
+  namespace: kube-system
+automountServiceAccountToken: true
+---
+# Source: cluster-autoscaler/templates/clusterrole.yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: cluster-autoscaler
   labels:
+    app.kubernetes.io/name: "cluster-autoscaler"
     k8s-addon: cluster-autoscaler.addons.k8s.io
     k8s-app: cluster-autoscaler
+  name: cluster-autoscaler
 rules:
   - apiGroups:
       - ""
@@ -71,8 +78,19 @@ rules:
     - get
     - update
   - apiGroups:
+    - resource.k8s.io
+    resources:
+      - resourceslices
+      - deviceclasses
+      - resourceclaims
+    verbs:
+      - watch
+      - list
+      - get
+  - apiGroups:
     - ""
     resources:
+      - namespaces
       - pods
       - services
       - replicationcontrollers
@@ -131,9 +149,10 @@ rules:
     - storage.k8s.io
     resources:
     - storageclasses
-    - csidrivers
     - csinodes
+    - csidrivers
     - csistoragecapacities
+    - volumeattachments
     verbs:
     - watch
     - list
@@ -145,6 +164,7 @@ rules:
     verbs:
       - list
       - watch
+      - get
   - apiGroups:
     - coordination.k8s.io
     resources:
@@ -161,14 +181,34 @@ rules:
     - get
     - update
 ---
+# Source: cluster-autoscaler/templates/clusterrolebinding.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: "cluster-autoscaler"
+    k8s-addon: cluster-autoscaler.addons.k8s.io
+    k8s-app: cluster-autoscaler
+  name: cluster-autoscaler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-autoscaler
+subjects:
+  - kind: ServiceAccount
+    name: cluster-autoscaler
+    namespace: kube-system
+---
+# Source: cluster-autoscaler/templates/role.yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: cluster-autoscaler
-  namespace: kube-system
   labels:
+    app.kubernetes.io/name: "cluster-autoscaler"
     k8s-addon: cluster-autoscaler.addons.k8s.io
     k8s-app: cluster-autoscaler
+  name: cluster-autoscaler
+  namespace: kube-system
 rules:
   - apiGroups:
       - ""
@@ -187,31 +227,16 @@ rules:
       - get
       - update
 ---
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: cluster-autoscaler
-  labels:
-    k8s-addon: cluster-autoscaler.addons.k8s.io
-    k8s-app: cluster-autoscaler
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: cluster-autoscaler
-subjects:
-  - kind: ServiceAccount
-    name: cluster-autoscaler
-    namespace: kube-system
-
----
+# Source: cluster-autoscaler/templates/rolebinding.yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: cluster-autoscaler
-  namespace: kube-system
   labels:
+    app.kubernetes.io/name: "cluster-autoscaler"
     k8s-addon: cluster-autoscaler.addons.k8s.io
     k8s-app: cluster-autoscaler
+  name: cluster-autoscaler
+  namespace: kube-system
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -220,92 +245,176 @@ subjects:
   - kind: ServiceAccount
     name: cluster-autoscaler
     namespace: kube-system
-
 ---
+# Source: cluster-autoscaler/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/name: "cluster-autoscaler"
+    k8s-addon: cluster-autoscaler.addons.k8s.io
+    k8s-app: cluster-autoscaler
+  name: cluster-autoscaler
+  namespace: kube-system
+spec:
+  ports:
+    - port: 8085
+      protocol: TCP
+      targetPort: 8085
+      name: http
+  selector:
+    app.kubernetes.io/name: "cluster-autoscaler"
+  type: "ClusterIP"
+---
+{{- if and (eq .Expander "priority") CreateClusterAutoscalerPriorityConfig }}
+# Source: cluster-autoscaler/templates/priotity-expander-configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-autoscaler-priority-expander
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: "cluster-autoscaler"
+    k8s-addon: cluster-autoscaler.addons.k8s.io
+    k8s-app: cluster-autoscaler
+data:
+  priorities: |- {{ ClusterAutoscalerPriorities | nindent 4 }}
+{{ end }}
+---
+{{ if (eq GetCloudProvider "hetzner") }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-autoscaler-hcloud-config
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: "cluster-autoscaler"
+    k8s-addon: cluster-autoscaler.addons.k8s.io
+    k8s-app: cluster-autoscaler
+data:
+  cluster-config.json: |
+{{ HCLOUD_CLUSTER_CONFIG | indent 4 }}
+---
+{{ end }}
+# Source: cluster-autoscaler/templates/deployment.yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  labels:
+    app.kubernetes.io/name: "cluster-autoscaler"
+    k8s-addon: cluster-autoscaler.addons.k8s.io
+    k8s-app: cluster-autoscaler
   name: cluster-autoscaler
   namespace: kube-system
-  labels:
-    k8s-app: cluster-autoscaler
 spec:
-  replicas: {{ ControlPlaneControllerReplicas }}
+  replicas: {{ ControlPlaneControllerReplicas true }}
   selector:
     matchLabels:
       app: cluster-autoscaler
+  {{ if not (UseServiceAccountExternalPermissions) }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+  {{ end }}
   template:
     metadata:
-      labels:
-        app: cluster-autoscaler
       annotations:
         prometheus.io/port: "8085"
         prometheus.io/scrape: "true"
+        {{ if (eq GetCloudProvider "hetzner") }}
+        checksum/hcloud-cluster-config: "{{ HCLOUD_CLUSTER_CONFIG_CHECKSUM }}"
+        {{ end }}
+        {{- range $key, $value := .PodAnnotations }}
+        {{ $key }}: "{{ $value }}"
+        {{- end }}
+      labels:
+        app: cluster-autoscaler
+        k8s-addon: cluster-autoscaler.addons.k8s.io
+        k8s-app: cluster-autoscaler
+        app.kubernetes.io/name: "cluster-autoscaler"
     spec:
+      nodeSelector: null
       affinity:
-        podAntiAffinity:
+        nodeAffinity:
+          {{ if not UseServiceAccountExternalPermissions }}
           requiredDuringSchedulingIgnoredDuringExecution:
-          - labelSelector:
-              matchExpressions:
-              - key: app
-                operator: In
-                values:
-                - cluster-autoscaler
-            topologyKey: kubernetes.com/hostname
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
+            - matchExpressions:
+              - key: node-role.kubernetes.io/master
+                operator: Exists
+          {{ else }}
           preferredDuringSchedulingIgnoredDuringExecution:
-          - weight: 100 
-            podAffinityTerm:
-              labelSelector:
-                matchExpressions:
-                - key: app
-                  operator: In
-                  values:
-                  - cluster-autoscaler
-              topologyKey: topology.kubernetes.io/zone
-      priorityClassName: system-cluster-critical
-      serviceAccountName: cluster-autoscaler
-      {{ if not UseServiceAccountExternalPermissions }}
-      tolerations:
-      - operator: "Exists"
-        key: node-role.kubernetes.io/master
-      nodeSelector:
-        node-role.kubernetes.io/master: ""
-      {{ end }}
+          - weight: 1
+            preference:
+              matchExpressions:
+              - key: node-role.kubernetes.io/spot-worker
+                operator: DoesNotExist
+          {{ end }}
+      priorityClassName: "system-cluster-critical"
+      dnsPolicy: "ClusterFirst"
       containers:
-        - image: {{ .Image }}
-          name: cluster-autoscaler
-          resources:
-            requests:
-              cpu: {{ or .CPURequest "100m"}}
-              memory: {{ or .MemoryRequest "300Mi"}}
+        - name: cluster-autoscaler
+          image: "{{ .Image }}"
+          imagePullPolicy: "IfNotPresent"
           command:
             - ./cluster-autoscaler
             - --balance-similar-node-groups={{ .BalanceSimilarNodeGroups }}
-            - --cloud-provider={{ $.CloudProvider }}
-            {{ if (eq $.CloudProvider "aws") }}
+            - --emit-per-nodegroup-metrics={{ .EmitPerNodegroupMetrics }}
+            - --cloud-provider={{ GetCloudProvider }}
+            {{ if (eq GetCloudProvider "aws") }}
             - --aws-use-static-instance-list={{ .AWSUseStaticInstanceList }}
             {{ end }}
             - --expander={{ .Expander }}
-            {{ range $name, $spec := GetNodeInstanceGroups }}
-            {{ if WithDefaultBool $spec.Autoscale true }}
-            - --nodes={{ $spec.MinSize }}:{{ $spec.MaxSize }}:{{ $name }}{{- if not (eq $.CloudProvider "gce") }}.{{ ClusterName }}{{ end -}}
+            {{ range $nodeGroup := GetClusterAutoscalerNodeGroups }}
+            - --nodes={{ $nodeGroup.MinSize }}:{{ $nodeGroup.MaxSize }}:{{ $nodeGroup.Other }}
             {{ end }}
-            {{ end }}
+            - --ignore-daemonsets-utilization={{ .IgnoreDaemonSetsUtilization }}
             - --scale-down-utilization-threshold={{ .ScaleDownUtilizationThreshold }}
+            - --skip-nodes-with-custom-controller-pods={{ .SkipNodesWithCustomControllerPods }}
             - --skip-nodes-with-local-storage={{ .SkipNodesWithLocalStorage }}
             - --skip-nodes-with-system-pods={{ .SkipNodesWithSystemPods }}
             - --scale-down-delay-after-add={{ .ScaleDownDelayAfterAdd }}
+            - --scale-down-unneeded-time={{ .ScaleDownUnneededTime }}
+            - --scale-down-unready-time={{ .ScaleDownUnreadyTime }}
             - --new-pod-scale-up-delay={{ .NewPodScaleUpDelay }}
             - --max-node-provision-time={{ .MaxNodeProvisionTime }}
+            - --cordon-node-before-terminating={{ WithDefaultBool .CordonNodeBeforeTerminating true }}
+            - --logtostderr=true
             - --stderrthreshold=info
-            - --v=2
+            - --v=4
+          {{ if (eq GetCloudProvider "aws") }}
           env:
             - name: AWS_REGION
-              value: {{ Region }}
-          ports:
-          - containerPort: 8085
-            protocol: TCP
-            name: http
+              value: "{{ Region }}"
+          {{ else if (eq GetCloudProvider "hetzner") }}
+          env:
+            - name: HCLOUD_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hcloud
+                  key: token
+            - name: HCLOUD_NETWORK
+              valueFrom:
+                secretKeyRef:
+                  name: hcloud
+                  key: network
+            - name: HCLOUD_SSH_KEY
+              value: "{{ HCLOUD_SSH_KEY }}"
+            - name: HCLOUD_PUBLIC_IPV4
+              value: "true"
+            - name: HCLOUD_PUBLIC_IPV6
+              value: "false"
+            - name: HCLOUD_CLUSTER_CONFIG_FILE
+              value: /etc/cluster-autoscaler/cluster-config.json
+          volumeMounts:
+            - name: hcloud-cluster-config
+              mountPath: /etc/cluster-autoscaler
+              readOnly: true
+          {{ end }}
           livenessProbe:
             failureThreshold: 3
             httpGet:
@@ -315,4 +424,40 @@ spec:
             periodSeconds: 10
             successThreshold: 1
             timeoutSeconds: 1
+          ports:
+            - containerPort: 8085
+              name: http
+              protocol: TCP
+          resources:
+            requests:
+              cpu: {{ or .CPURequest "100m"}}
+              memory: {{ or .MemoryRequest "300Mi"}}
+      serviceAccountName: cluster-autoscaler
+      {{ if not UseServiceAccountExternalPermissions }}
+      hostNetwork: true
+      tolerations:
+      - operator: "Exists"
+        key: node-role.kubernetes.io/control-plane
+      - operator: "Exists"
+        key: node-role.kubernetes.io/master
+      {{ end }}
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: "topology.kubernetes.io/zone"
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app: cluster-autoscaler
+      - maxSkew: 1
+        topologyKey: "kubernetes.io/hostname"
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector:
+          matchLabels:
+            app: cluster-autoscaler
+      {{ if (eq GetCloudProvider "hetzner") }}
+      volumes:
+      - name: hcloud-cluster-config
+        configMap:
+          name: cluster-autoscaler-hcloud-config
+      {{ end }}
 {{ end }}

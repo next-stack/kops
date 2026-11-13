@@ -1,5 +1,5 @@
 /*
-Copyright 2020 The Kubernetes Authors.
+Copyright 2024 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -18,37 +18,42 @@ package azure
 
 import (
 	"context"
+	"fmt"
 
-	"github.com/Azure/azure-sdk-for-go/services/network/mgmt/2020-06-01/network"
-	"github.com/Azure/go-autorest/autorest"
+	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
+	network "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork/v7"
 )
 
 // NetworkInterfacesClient is a client for managing Network Interfaces.
 type NetworkInterfacesClient interface {
-	ListScaleSetsNetworkInterfaces(ctx context.Context, resourceGroupName, vmssName string) ([]network.Interface, error)
+	ListScaleSetsNetworkInterfaces(ctx context.Context, resourceGroupName, vmssName string) ([]*network.Interface, error)
 }
 
 type networkInterfacesClientImpl struct {
 	c *network.InterfacesClient
 }
 
-var _ NetworkInterfacesClient = &networkInterfacesClientImpl{}
+var _ NetworkInterfacesClient = (*networkInterfacesClientImpl)(nil)
 
-func (c *networkInterfacesClientImpl) ListScaleSetsNetworkInterfaces(ctx context.Context, resourceGroupName, vmssName string) ([]network.Interface, error) {
-	var l []network.Interface
-	for iter, err := c.c.ListVirtualMachineScaleSetNetworkInterfacesComplete(ctx, resourceGroupName, vmssName); iter.NotDone(); err = iter.Next() {
+func (c *networkInterfacesClientImpl) ListScaleSetsNetworkInterfaces(ctx context.Context, resourceGroupName, vmssName string) ([]*network.Interface, error) {
+	var l []*network.Interface
+	pager := c.c.NewListVirtualMachineScaleSetNetworkInterfacesPager(resourceGroupName, vmssName, nil)
+	for pager.More() {
+		resp, err := pager.NextPage(ctx)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("listing network interfaces: %w", err)
 		}
-		l = append(l, iter.Value())
+		l = append(l, resp.Value...)
 	}
 	return l, nil
 }
 
-func newNetworkInterfacesClientImpl(subscriptionID string, authorizer autorest.Authorizer) *networkInterfacesClientImpl {
-	c := network.NewInterfacesClient(subscriptionID)
-	c.Authorizer = authorizer
-	return &networkInterfacesClientImpl{
-		c: &c,
+func newNetworkInterfacesClientImpl(subscriptionID string, cred *azidentity.DefaultAzureCredential) (*networkInterfacesClientImpl, error) {
+	c, err := network.NewInterfacesClient(subscriptionID, cred, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating network interfaces client: %w", err)
 	}
+	return &networkInterfacesClientImpl{
+		c: c,
+	}, nil
 }

@@ -17,34 +17,35 @@ limitations under the License.
 package gce
 
 import (
+	"crypto/rand"
 	"encoding/hex"
-	"math/rand"
 	"os"
 	"strings"
+	"time"
 
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/kubetest2/pkg/exec"
 )
 
-func GCSBucketName(projectID string) string {
+func GCSBucketName(projectID, prefix string) string {
 	var s string
-	if jobID := os.Getenv("PROW_JOB_ID"); len(jobID) >= 2 {
-		s = jobID[:2]
+	if jobID := os.Getenv("PROW_JOB_ID"); len(jobID) >= 4 {
+		s = jobID[:4]
 	} else {
 		b := make([]byte, 2)
 		rand.Read(b)
 		s = hex.EncodeToString(b)
 	}
-	bucket := strings.Join([]string{projectID, "state", s}, "-")
+	bucket := strings.Join([]string{projectID, prefix, s}, "-")
 	return bucket
 }
 
-func EnsureGCSBucket(bucketPath, projectID string) error {
+func EnsureGCSBucket(bucketPath, region, projectID string, public bool) error {
 	lsArgs := []string{
-		"gsutil", "ls", "-b",
+		"gcloud", "storage", "ls", "--buckets",
 	}
 	if projectID != "" {
-		lsArgs = append(lsArgs, "-p", projectID)
+		lsArgs = append(lsArgs, "--project", projectID)
 	}
 	lsArgs = append(lsArgs, bucketPath)
 
@@ -54,16 +55,26 @@ func EnsureGCSBucket(bucketPath, projectID string) error {
 	output, err := exec.CombinedOutputLines(cmd)
 	if err == nil {
 		return nil
-	} else if len(output) != 1 || !strings.Contains(output[0], "BucketNotFound") {
+	}
+	notFound := false
+	for _, line := range output {
+		if strings.Contains(line, "not found: 404") {
+			notFound = true
+		}
+	}
+	if !notFound {
 		klog.Info(output)
 		return err
 	}
 
 	mbArgs := []string{
-		"gsutil", "mb",
+		"gcloud", "storage", "buckets", "create",
 	}
 	if projectID != "" {
-		mbArgs = append(mbArgs, "-p", projectID)
+		mbArgs = append(mbArgs, "--project", projectID)
+	}
+	if region != "" {
+		mbArgs = append(mbArgs, "--location", region)
 	}
 	mbArgs = append(mbArgs, bucketPath)
 
@@ -75,15 +86,31 @@ func EnsureGCSBucket(bucketPath, projectID string) error {
 	if err != nil {
 		return err
 	}
+
+	if public {
+		iamArgs := []string{
+			"gcloud", "storage", "buckets", "add-iam-policy-binding",
+			"--member=allUsers", "--role=roles/storage.objectViewer",
+		}
+		iamArgs = append(iamArgs, bucketPath)
+		klog.Info(strings.Join(iamArgs, " "))
+		// GCS APIs are strongly consistent but this should help with flakes
+		time.Sleep(10 * time.Second)
+		cmd = exec.Command(iamArgs[0], iamArgs[1:]...)
+		exec.InheritOutput(cmd)
+		err = cmd.Run()
+		if err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
 func DeleteGCSBucket(bucketPath, projectID string) error {
 	rmArgs := []string{
-		"gsutil", "rm", "-r", bucketPath,
-	}
-	if projectID != "" {
-		rmArgs = append(rmArgs, "-p", projectID)
+		"gcloud", "storage", "rm", "--recursive",
+		"--billing-project", projectID,
+		bucketPath,
 	}
 
 	klog.Info(strings.Join(rmArgs, " "))

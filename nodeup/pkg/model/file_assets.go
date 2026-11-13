@@ -31,10 +31,10 @@ type FileAssetsBuilder struct {
 	*NodeupModelContext
 }
 
-var _ fi.ModelBuilder = &FileAssetsBuilder{}
+var _ fi.NodeupModelBuilder = &FileAssetsBuilder{}
 
 // Build is responsible for writing out the file assets from cluster and instanceGroup
-func (f *FileAssetsBuilder) Build(c *fi.ModelBuilderContext) error {
+func (f *FileAssetsBuilder) Build(c *fi.NodeupModelBuilderContext) error {
 	// used to keep track of previous file, so a instanceGroup can override a cluster wide one
 	tracker := make(map[string]bool)
 
@@ -49,7 +49,7 @@ func (f *FileAssetsBuilder) Build(c *fi.ModelBuilderContext) error {
 }
 
 // buildFileAssets is responsible for rendering the file assets to disk
-func (f *FileAssetsBuilder) buildFileAssets(c *fi.ModelBuilderContext, assets []kops.FileAssetSpec, tracker map[string]bool) error {
+func (f *FileAssetsBuilder) buildFileAssets(c *fi.NodeupModelBuilderContext, assets []kops.FileAssetSpec, tracker map[string]bool) error {
 	for _, asset := range assets {
 		// @check if e have a path and if not use the default path
 		assetPath := asset.Path
@@ -72,6 +72,11 @@ func (f *FileAssetsBuilder) buildFileAssets(c *fi.ModelBuilderContext, assets []
 			content = string(decoded)
 		}
 
+		// If not specified, the default Mode is 0440
+		if asset.Mode == "" {
+			asset.Mode = "0440"
+		}
+
 		// We use EnsureTask so that we don't have to check if the asset directories have already been done
 		c.EnsureTask(&nodetasks.File{
 			Path: filepath.Dir(assetPath),
@@ -81,7 +86,7 @@ func (f *FileAssetsBuilder) buildFileAssets(c *fi.ModelBuilderContext, assets []
 
 		c.AddTask(&nodetasks.File{
 			Contents: fi.NewStringResource(content),
-			Mode:     s("0440"),
+			Mode:     s(asset.Mode),
 			Path:     assetPath,
 			Type:     nodetasks.FileType_File,
 		})

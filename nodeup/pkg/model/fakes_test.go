@@ -17,6 +17,7 @@ limitations under the License.
 package model
 
 import (
+	"context"
 	"crypto/x509"
 	"fmt"
 	"testing"
@@ -35,8 +36,9 @@ type fakeKeystore struct {
 
 var _ fi.Keystore = &fakeKeystore{}
 
-func (k fakeKeystore) FindPrimaryKeypair(name string) (*pki.Certificate, *pki.PrivateKey, error) {
-	keyset, err := k.FindKeyset(name)
+// FindPrimaryKeypair implements pki.Keystore
+func (k fakeKeystore) FindPrimaryKeypair(ctx context.Context, name string) (*pki.Certificate, *pki.PrivateKey, error) {
+	keyset, err := k.FindKeyset(ctx, name)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -44,7 +46,8 @@ func (k fakeKeystore) FindPrimaryKeypair(name string) (*pki.Certificate, *pki.Pr
 	return keyset.Primary.Certificate, keyset.Primary.PrivateKey, nil
 }
 
-func (k fakeKeystore) FindKeyset(name string) (*fi.Keyset, error) {
+// FindKeyset implements KeystoreReader.
+func (k fakeKeystore) FindKeyset(ctx context.Context, name string) (*fi.Keyset, error) {
 	kopsKeyset := k.privateKeysets[name]
 	if kopsKeyset == nil {
 		return nil, nil
@@ -86,10 +89,10 @@ func (k fakeKeystore) CreateKeypair(signer string, name string, template *x509.C
 	panic("fakeKeystore does not implement CreateKeypair")
 }
 
-func (k fakeKeystore) StoreKeyset(name string, keyset *fi.Keyset) error {
+func (k fakeKeystore) StoreKeyset(ctx context.Context, name string, keyset *fi.Keyset) error {
 	panic("fakeKeystore does not implement StoreKeyset")
 }
 
-func (k fakeKeystore) MirrorTo(basedir vfs.Path) error {
+func (k fakeKeystore) MirrorTo(ctx context.Context, basedir vfs.Path) error {
 	panic("fakeKeystore does not implement MirrorTo")
 }

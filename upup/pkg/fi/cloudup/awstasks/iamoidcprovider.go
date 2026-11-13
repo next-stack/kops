@@ -17,17 +17,16 @@ limitations under the License.
 package awstasks
 
 import (
-	"errors"
+	"context"
 	"fmt"
 	"strings"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/iam"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
-	"k8s.io/kops/upup/pkg/fi/cloudup/cloudformation"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraform"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraformWriter"
 )
@@ -36,8 +35,8 @@ import (
 type IAMOIDCProvider struct {
 	Lifecycle fi.Lifecycle
 
-	ClientIDs   []*string
-	Thumbprints []*string
+	ClientIDs   []string
+	Thumbprints []string
 	URL         *string
 
 	Name *string
@@ -46,16 +45,17 @@ type IAMOIDCProvider struct {
 	arn *string
 }
 
-var _ fi.CompareWithID = &IAMOIDCProvider{}
+var _ fi.CompareWithID = (*IAMOIDCProvider)(nil)
 
 func (e *IAMOIDCProvider) CompareWithID() *string {
 	return e.Name
 }
 
-func (e *IAMOIDCProvider) Find(c *fi.Context) (*IAMOIDCProvider, error) {
-	cloud := c.Cloud.(awsup.AWSCloud)
+func (e *IAMOIDCProvider) Find(c *fi.CloudupContext) (*IAMOIDCProvider, error) {
+	ctx := c.Context()
+	cloud := awsup.GetCloud(c)
 
-	response, err := cloud.IAM().ListOpenIDConnectProviders(&iam.ListOpenIDConnectProvidersInput{})
+	response, err := cloud.IAM().ListOpenIDConnectProviders(ctx, &iam.ListOpenIDConnectProvidersInput{})
 	if err != nil {
 		return nil, fmt.Errorf("error listing oidc providers: %v", err)
 	}
@@ -63,19 +63,19 @@ func (e *IAMOIDCProvider) Find(c *fi.Context) (*IAMOIDCProvider, error) {
 	providers := response.OpenIDConnectProviderList
 	for _, provider := range providers {
 		arn := provider.Arn
-		descResp, err := cloud.IAM().GetOpenIDConnectProvider(&iam.GetOpenIDConnectProviderInput{
+		descResp, err := cloud.IAM().GetOpenIDConnectProvider(ctx, &iam.GetOpenIDConnectProviderInput{
 			OpenIDConnectProviderArn: arn,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("error describing oidc provider: %v", err)
 		}
 		// AWS does not return the https:// in the url
-		actualURL := aws.StringValue(descResp.Url)
+		actualURL := aws.ToString(descResp.Url)
 		if !strings.Contains(actualURL, "://") {
 			actualURL = "https://" + actualURL
 		}
 
-		if actualURL == fi.StringValue(e.URL) {
+		if actualURL == fi.ValueOf(e.URL) {
 
 			actual := &IAMOIDCProvider{
 				ClientIDs:   descResp.ClientIDList,
@@ -88,15 +88,15 @@ func (e *IAMOIDCProvider) Find(c *fi.Context) (*IAMOIDCProvider, error) {
 			actual.Lifecycle = e.Lifecycle
 			actual.Name = e.Name
 
-			klog.V(2).Infof("found matching IAMOIDCProvider %q", aws.StringValue(arn))
+			klog.V(2).Infof("found matching IAMOIDCProvider %q", aws.ToString(arn))
 			return actual, nil
 		}
 	}
 	return nil, nil
 }
 
-func (e *IAMOIDCProvider) Run(c *fi.Context) error {
-	return fi.DefaultDeltaRunMethod(e, c)
+func (e *IAMOIDCProvider) Run(c *fi.CloudupContext) error {
+	return fi.CloudupDefaultDeltaRunMethod(e, c)
 }
 
 func (s *IAMOIDCProvider) CheckChanges(a, e, changes *IAMOIDCProvider) error {
@@ -119,6 +119,7 @@ func (s *IAMOIDCProvider) CheckChanges(a, e, changes *IAMOIDCProvider) error {
 }
 
 func (p *IAMOIDCProvider) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *IAMOIDCProvider) error {
+	ctx := context.TODO()
 	thumbprints := e.Thumbprints
 
 	if a == nil {
@@ -131,7 +132,7 @@ func (p *IAMOIDCProvider) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *IAMOID
 			Tags:           mapToIAMTags(e.Tags),
 		}
 
-		response, err := t.Cloud.IAM().CreateOpenIDConnectProvider(request)
+		response, err := t.Cloud.IAM().CreateOpenIDConnectProvider(ctx, request)
 		if err != nil {
 			return fmt.Errorf("error creating IAMOIDCProvider: %v", err)
 		}
@@ -139,28 +140,28 @@ func (p *IAMOIDCProvider) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *IAMOID
 		e.arn = response.OpenIDConnectProviderArn
 	} else {
 		if changes.Thumbprints != nil {
-			klog.V(2).Infof("Updating IAMOIDCProvider Thumbprints %q", fi.StringValue(e.arn))
+			klog.V(2).Infof("Updating IAMOIDCProvider Thumbprints %q", fi.ValueOf(e.arn))
 
 			request := &iam.UpdateOpenIDConnectProviderThumbprintInput{}
 			request.OpenIDConnectProviderArn = a.arn
 			request.ThumbprintList = thumbprints
 
-			_, err := t.Cloud.IAM().UpdateOpenIDConnectProviderThumbprint(request)
+			_, err := t.Cloud.IAM().UpdateOpenIDConnectProviderThumbprint(ctx, request)
 			if err != nil {
 				return fmt.Errorf("error updating IAMOIDCProvider Thumbprints: %v", err)
 			}
 		}
 		if changes.Tags != nil {
 			if len(a.Tags) > 0 {
-				existingTagKeys := make([]*string, 0)
+				existingTagKeys := make([]string, 0)
 				for k := range a.Tags {
-					existingTagKeys = append(existingTagKeys, &k)
+					existingTagKeys = append(existingTagKeys, k)
 				}
 				untagRequest := &iam.UntagOpenIDConnectProviderInput{
 					OpenIDConnectProviderArn: a.arn,
 					TagKeys:                  existingTagKeys,
 				}
-				_, err := t.Cloud.IAM().UntagOpenIDConnectProvider(untagRequest)
+				_, err := t.Cloud.IAM().UntagOpenIDConnectProvider(ctx, untagRequest)
 				if err != nil {
 					return fmt.Errorf("error untagging IAMOIDCProvider: %v", err)
 				}
@@ -170,7 +171,7 @@ func (p *IAMOIDCProvider) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *IAMOID
 					OpenIDConnectProviderArn: a.arn,
 					Tags:                     mapToIAMTags(e.Tags),
 				}
-				_, err := t.Cloud.IAM().TagOpenIDConnectProvider(tagRequest)
+				_, err := t.Cloud.IAM().TagOpenIDConnectProvider(ctx, tagRequest)
 				if err != nil {
 					return fmt.Errorf("error tagging IAMOIDCProvider: %v", err)
 				}
@@ -179,11 +180,11 @@ func (p *IAMOIDCProvider) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *IAMOID
 		if changes.ClientIDs != nil {
 			actual := sets.NewString()
 			for _, aud := range a.ClientIDs {
-				actual.Insert(*aud)
+				actual.Insert(aud)
 			}
 			expected := sets.NewString()
 			for _, aud := range e.ClientIDs {
-				expected.Insert(*aud)
+				expected.Insert(aud)
 			}
 			toRemove := actual.Difference(expected)
 			for _, elem := range toRemove.List() {
@@ -191,7 +192,7 @@ func (p *IAMOIDCProvider) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *IAMOID
 					OpenIDConnectProviderArn: a.arn,
 					ClientID:                 &elem,
 				}
-				_, err := t.Cloud.IAM().RemoveClientIDFromOpenIDConnectProvider(request)
+				_, err := t.Cloud.IAM().RemoveClientIDFromOpenIDConnectProvider(ctx, request)
 				if err != nil {
 					return fmt.Errorf("error removing audience %s to IAMOIDCProvider: %v", elem, err)
 				}
@@ -202,7 +203,7 @@ func (p *IAMOIDCProvider) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *IAMOID
 					OpenIDConnectProviderArn: a.arn,
 					ClientID:                 &elem,
 				}
-				_, err := t.Cloud.IAM().AddClientIDToOpenIDConnectProvider(request)
+				_, err := t.Cloud.IAM().AddClientIDToOpenIDConnectProvider(ctx, request)
 				if err != nil {
 					return fmt.Errorf("error adding audience %s to IAMOIDCProvider: %v", elem, err)
 				}
@@ -213,12 +214,12 @@ func (p *IAMOIDCProvider) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *IAMOID
 }
 
 type terraformIAMOIDCProvider struct {
-	URL            *string   `json:"url" cty:"url"`
-	ClientIDList   []*string `json:"client_id_list" cty:"client_id_list"`
-	ThumbprintList []*string `json:"thumbprint_list" cty:"thumbprint_list"`
+	URL            *string  `cty:"url"`
+	ClientIDList   []string `cty:"client_id_list"`
+	ThumbprintList []string `cty:"thumbprint_list"`
 
-	AssumeRolePolicy *terraformWriter.Literal `json:"assume_role_policy" cty:"assume_role_policy"`
-	Tags             map[string]string        `json:"tags,omitempty" cty:"tags"`
+	AssumeRolePolicy *terraformWriter.Literal `cty:"assume_role_policy"`
+	Tags             map[string]string        `cty:"tags"`
 }
 
 func (p *IAMOIDCProvider) RenderTerraform(t *terraform.TerraformTarget, a, e, changes *IAMOIDCProvider) error {
@@ -227,7 +228,7 @@ func (p *IAMOIDCProvider) RenderTerraform(t *terraform.TerraformTarget, a, e, ch
 		return err
 	}
 
-	issuerSubs := strings.SplitAfter(aws.StringValue(e.URL), "://")
+	issuerSubs := strings.SplitAfter(aws.ToString(e.URL), "://")
 	issuer := issuerSubs[len(issuerSubs)-1]
 	err = t.AddOutputVariable("iam_openid_connect_provider_issuer", terraformWriter.LiteralFromStringValue(issuer))
 	if err != nil {
@@ -246,8 +247,4 @@ func (p *IAMOIDCProvider) RenderTerraform(t *terraform.TerraformTarget, a, e, ch
 
 func (e *IAMOIDCProvider) TerraformLink() *terraformWriter.Literal {
 	return terraformWriter.LiteralProperty("aws_iam_openid_connect_provider", *e.Name, "arn")
-}
-
-func (_ *IAMOIDCProvider) RenderCloudformation(t *cloudformation.CloudformationTarget, a, e, changes *IAMOIDCProvider) error {
-	return errors.New("cloudformation does not support IAM OIDC Provider")
 }

@@ -17,11 +17,12 @@ limitations under the License.
 package openstack
 
 import (
+	"context"
 	"fmt"
 	"sort"
 
-	"github.com/gophercloud/gophercloud/openstack/compute/v2/flavors"
-	"github.com/gophercloud/gophercloud/openstack/compute/v2/servers"
+	"github.com/gophercloud/gophercloud/v2/openstack/compute/v2/flavors"
+	"github.com/gophercloud/gophercloud/v2/openstack/compute/v2/servers"
 	"k8s.io/kops/pkg/apis/kops"
 )
 
@@ -58,7 +59,7 @@ func (c *openstackCloud) DefaultInstanceType(cluster *kops.Cluster, ig *kops.Ins
 func defaultInstanceType(c OpenstackCloud, cluster *kops.Cluster, ig *kops.InstanceGroup) (string, error) {
 	flavorPage, err := flavors.ListDetail(c.ComputeClient(), flavors.ListOpts{
 		MinRAM: 1024,
-	}).AllPages()
+	}).AllPages(context.TODO())
 	if err != nil {
 		return "", fmt.Errorf("Could not list flavors: %v", err)
 	}
@@ -70,8 +71,8 @@ func defaultInstanceType(c OpenstackCloud, cluster *kops.Cluster, ig *kops.Insta
 	sort.Sort(&fList)
 
 	var candidates flavorList
-	switch ig.Spec.Role {
-	case kops.InstanceGroupRoleMaster:
+	switch {
+	case ig.Spec.Role.HasControlPlane():
 		// Requirements based on awsCloudImplementation.DefaultInstanceType
 		for _, flavor := range fList {
 			if flavor.RAM >= 4096 && flavor.VCPUs >= 1 {
@@ -79,14 +80,14 @@ func defaultInstanceType(c OpenstackCloud, cluster *kops.Cluster, ig *kops.Insta
 			}
 		}
 
-	case kops.InstanceGroupRoleNode:
+	case ig.Spec.Role.HasNode():
 		for _, flavor := range fList {
 			if flavor.RAM >= 4096 && flavor.VCPUs >= 2 {
 				candidates = append(candidates, flavor)
 			}
 		}
 
-	case kops.InstanceGroupRoleBastion:
+	case ig.Spec.Role.HasBastion():
 		for _, flavor := range fList {
 			if flavor.RAM >= 1024 {
 				candidates = append(candidates, flavor)
@@ -104,7 +105,6 @@ func defaultInstanceType(c OpenstackCloud, cluster *kops.Cluster, ig *kops.Insta
 
 func GetServerFixedIP(server *servers.Server, interfaceName string) (poolAddress string, err error) {
 	if localAddr, ok := server.Addresses[interfaceName]; ok {
-
 		if localAddresses, ok := localAddr.([]interface{}); ok {
 			for _, addr := range localAddresses {
 				addrMap := addr.(map[string]interface{})

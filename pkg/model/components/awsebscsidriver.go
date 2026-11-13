@@ -18,7 +18,6 @@ package components
 
 import (
 	"k8s.io/kops/pkg/apis/kops"
-	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/loader"
 )
 
@@ -27,31 +26,24 @@ type AWSEBSCSIDriverOptionsBuilder struct {
 	*OptionsContext
 }
 
-var _ loader.OptionsBuilder = &AWSEBSCSIDriverOptionsBuilder{}
+var _ loader.ClusterOptionsBuilder = &AWSEBSCSIDriverOptionsBuilder{}
 
-func (b *AWSEBSCSIDriverOptionsBuilder) BuildOptions(o interface{}) error {
-	clusterSpec := o.(*kops.ClusterSpec)
-	if kops.CloudProviderID(clusterSpec.CloudProvider) != kops.CloudProviderAWS {
+func (b *AWSEBSCSIDriverOptionsBuilder) BuildOptions(o *kops.Cluster) error {
+	aws := o.Spec.CloudProvider.AWS
+	if aws == nil {
 		return nil
 	}
 
-	cc := clusterSpec.CloudConfig
-	if cc.AWSEBSCSIDriver == nil {
-		cc.AWSEBSCSIDriver = &kops.AWSEBSCSIDriver{
-			Enabled: fi.Bool(b.IsKubernetesGTE("1.22")),
+	if aws.EBSCSIDriver == nil {
+		aws.EBSCSIDriver = &kops.EBSCSIDriverSpec{
+			Enabled: new(true),
 		}
 	}
-	c := cc.AWSEBSCSIDriver
-
-	if !fi.BoolValue(c.Enabled) {
-		return nil
-	}
+	c := aws.EBSCSIDriver
 
 	if c.Version == nil {
-		version := "v1.4.0"
-		c.Version = fi.String(version)
+		c.Version = new("v1.67.2")
 	}
 
 	return nil
-
 }

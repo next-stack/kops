@@ -22,6 +22,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -44,7 +45,8 @@ import (
 var FileExtensions = []string{".json", ".yaml", ".yml"}
 var InputExtensions = append(FileExtensions, "stdin")
 
-const defaultHttpGetAttempts int = 3
+const defaultHttpGetAttempts = 3
+const pathNotExistError = "the path %q does not exist"
 
 // Builder provides convenience functions for taking arguments and parameters
 // from the command line and converting them to a list of resources to iterate
@@ -77,13 +79,16 @@ type Builder struct {
 	stdinInUse bool
 	dir        bool
 
+	visitorConcurrency int
+
 	labelSelector     *string
 	fieldSelector     *string
 	selectAll         bool
 	limitChunks       int64
 	requestTransforms []RequestTransform
 
-	resources []string
+	resources   []string
+	subresource string
 
 	namespace    string
 	allNamespace bool
@@ -123,6 +128,10 @@ Example resource specifications include:
    '--filename=rsrc.json'`)
 
 var StdinMultiUseError = errors.New("standard input cannot be used for multiple arguments")
+
+// ErrMultipleResourceTypes is returned when Builder.SingleResourceType() was called,
+// but multiple resource types were specified.
+var ErrMultipleResourceTypes = errors.New("you may only specify a single resource type")
 
 // TODO: expand this to include other errors.
 func IsUsageError(err error) bool {
@@ -212,7 +221,7 @@ func NewBuilder(restClientGetter RESTClientGetter) *Builder {
 
 	return newBuilder(
 		restClientGetter.ToRESTConfig,
-		(&cachingRESTMapperFunc{delegate: restClientGetter.ToRESTMapper}).ToRESTMapper,
+		restClientGetter.ToRESTMapper,
 		(&cachingCategoryExpanderFunc{delegate: categoryExpanderFn}).ToCategoryExpander,
 	)
 }
@@ -227,6 +236,13 @@ func (b *Builder) AddError(err error) *Builder {
 		return b
 	}
 	b.errs = append(b.errs, err)
+	return b
+}
+
+// VisitorConcurrency sets the number of concurrent visitors to use when
+// visiting lists.
+func (b *Builder) VisitorConcurrency(concurrency int) *Builder {
+	b.visitorConcurrency = concurrency
 	return b
 }
 
@@ -255,10 +271,15 @@ func (b *Builder) FilenameParam(enforceNamespace bool, filenameOptions *Filename
 			}
 			b.URL(defaultHttpGetAttempts, url)
 		default:
-			if !recursive {
+			matches, err := expandIfFilePattern(s)
+			if err != nil {
+				b.errs = append(b.errs, err)
+				continue
+			}
+			if !recursive && len(matches) == 1 {
 				b.singleItemImplied = true
 			}
-			b.Path(recursive, s)
+			b.Path(recursive, matches...)
 		}
 	}
 	if filenameOptions.Kustomize != "" {
@@ -409,7 +430,7 @@ func (b *Builder) Path(recursive bool, paths ...string) *Builder {
 	for _, p := range paths {
 		_, err := os.Stat(p)
 		if os.IsNotExist(err) {
-			b.errs = append(b.errs, fmt.Errorf("the path %q does not exist", p))
+			b.errs = append(b.errs, fmt.Errorf(pathNotExistError, p))
 			continue
 		}
 		if err != nil {
@@ -552,6 +573,13 @@ func (b *Builder) RequestChunksOf(chunkSize int64) *Builder {
 // an empty list to clear modifiers.
 func (b *Builder) TransformRequests(opts ...RequestTransform) *Builder {
 	b.requestTransforms = opts
+	return b
+}
+
+// Subresource instructs the builder to retrieve the object at the
+// subresource path instead of the main resource path.
+func (b *Builder) Subresource(subresource string) *Builder {
+	b.subresource = subresource
 	return b
 }
 
@@ -779,7 +807,16 @@ func (b *Builder) mappingFor(resourceOrKindArg string) (*meta.RESTMapping, error
 		// if the error is _not_ a *meta.NoKindMatchError, then we had trouble doing discovery,
 		// so we should return the original error since it may help a user diagnose what is actually wrong
 		if meta.IsNoMatchError(err) {
-			return nil, fmt.Errorf("the server doesn't have a resource type %q", groupResource.Resource)
+			switch {
+			case len(groupResource.Group) > 0 && len(gvk.Version) > 0:
+				return nil, fmt.Errorf("the server doesn't have a resource type %q in group %q and version %q", groupResource.Resource, groupResource.Group, gvk.Version)
+			case len(groupResource.Group) > 0:
+				return nil, fmt.Errorf("the server doesn't have a resource type %q in group %q", groupResource.Resource, groupResource.Group)
+			case len(gvk.Version) > 0:
+				return nil, fmt.Errorf("the server doesn't have a resource type %q in version %q", groupResource.Resource, gvk.Version)
+			default:
+				return nil, fmt.Errorf("the server doesn't have a resource type %q", groupResource.Resource)
+			}
 		}
 		return nil, err
 	}
@@ -789,7 +826,7 @@ func (b *Builder) mappingFor(resourceOrKindArg string) (*meta.RESTMapping, error
 
 func (b *Builder) resourceMappings() ([]*meta.RESTMapping, error) {
 	if len(b.resources) > 1 && b.singleResourceType {
-		return nil, fmt.Errorf("you may only specify a single resource type")
+		return nil, ErrMultipleResourceTypes
 	}
 	mappings := []*meta.RESTMapping{}
 	seen := map[schema.GroupVersionKind]bool{}
@@ -825,7 +862,7 @@ func (b *Builder) resourceTupleMappings() (map[string]*meta.RESTMapping, error) 
 		canonical[mapping.Resource] = struct{}{}
 	}
 	if len(canonical) > 1 && b.singleResourceType {
-		return nil, fmt.Errorf("you may only specify a single resource type")
+		return nil, ErrMultipleResourceTypes
 	}
 	return mappings, nil
 }
@@ -886,6 +923,10 @@ func (b *Builder) visitBySelector() *Result {
 	if len(b.resources) == 0 {
 		return result.withError(fmt.Errorf("at least one resource must be specified to use a selector"))
 	}
+	if len(b.subresource) != 0 {
+		return result.withError(fmt.Errorf("subresource cannot be used when bulk resources are specified"))
+	}
+
 	mappings, err := b.resourceMappings()
 	if err != nil {
 		result.err = err
@@ -1002,15 +1043,16 @@ func (b *Builder) visitByResource() *Result {
 				if b.allNamespace {
 					errMsg = "a resource cannot be retrieved by name across all namespaces"
 				}
-				return result.withError(fmt.Errorf(errMsg))
+				return result.withError(errors.New(errMsg))
 			}
 		}
 
 		info := &Info{
-			Client:    client,
-			Mapping:   mapping,
-			Namespace: selectorNamespace,
-			Name:      tuple.Name,
+			Client:      client,
+			Mapping:     mapping,
+			Namespace:   selectorNamespace,
+			Name:        tuple.Name,
+			Subresource: b.subresource,
 		}
 		items = append(items, info)
 	}
@@ -1064,17 +1106,18 @@ func (b *Builder) visitByName() *Result {
 			if b.allNamespace {
 				errMsg = "a resource cannot be retrieved by name across all namespaces"
 			}
-			return result.withError(fmt.Errorf(errMsg))
+			return result.withError(errors.New(errMsg))
 		}
 	}
 
 	visitors := []Visitor{}
 	for _, name := range b.names {
 		info := &Info{
-			Client:    client,
-			Mapping:   mapping,
-			Namespace: selectorNamespace,
-			Name:      name,
+			Client:      client,
+			Mapping:     mapping,
+			Namespace:   selectorNamespace,
+			Name:        name,
+			Subresource: b.subresource,
 		}
 		visitors = append(visitors, info)
 	}
@@ -1103,7 +1146,10 @@ func (b *Builder) visitByPaths() *Result {
 	if b.continueOnError {
 		visitors = EagerVisitorList(b.paths)
 	} else {
-		visitors = VisitorList(b.paths)
+		visitors = ConcurrentVisitorList{
+			visitors:    b.paths,
+			concurrency: b.visitorConcurrency,
+		}
 	}
 
 	if b.flatten {
@@ -1155,10 +1201,9 @@ func (b *Builder) Do() *Result {
 		helpers = append(helpers, RetrieveLazy)
 	}
 	if b.continueOnError {
-		r.visitor = NewDecoratedVisitor(ContinueOnErrorVisitor{r.visitor}, helpers...)
-	} else {
-		r.visitor = NewDecoratedVisitor(r.visitor, helpers...)
+		r.visitor = ContinueOnErrorVisitor{Visitor: r.visitor}
 	}
+	r.visitor = NewDecoratedVisitor(r.visitor, helpers...)
 	return r
 }
 
@@ -1166,7 +1211,7 @@ func (b *Builder) Do() *Result {
 // strings in the original order.
 func SplitResourceArgument(arg string) []string {
 	out := []string{}
-	set := sets.NewString()
+	set := sets.New[string]()
 	for _, s := range strings.Split(arg, ",") {
 		if set.Has(s) {
 			continue
@@ -1187,26 +1232,21 @@ func HasNames(args []string) (bool, error) {
 	return hasCombinedTypes || len(args) > 1, nil
 }
 
-type cachingRESTMapperFunc struct {
-	delegate RESTMapperFunc
-
-	lock   sync.Mutex
-	cached meta.RESTMapper
-}
-
-func (c *cachingRESTMapperFunc) ToRESTMapper() (meta.RESTMapper, error) {
-	c.lock.Lock()
-	defer c.lock.Unlock()
-	if c.cached != nil {
-		return c.cached, nil
+// expandIfFilePattern returns all the filenames that match the input pattern
+// or the filename if it is a specific filename and not a pattern.
+// If the input is a pattern and it yields no result it will result in an error.
+func expandIfFilePattern(pattern string) ([]string, error) {
+	if _, err := os.Stat(pattern); os.IsNotExist(err) {
+		matches, err := filepath.Glob(pattern)
+		if err == nil && len(matches) == 0 {
+			return nil, fmt.Errorf(pathNotExistError, pattern)
+		}
+		if err == filepath.ErrBadPattern {
+			return nil, fmt.Errorf("pattern %q is not valid: %v", pattern, err)
+		}
+		return matches, err
 	}
-
-	ret, err := c.delegate()
-	if err != nil {
-		return nil, err
-	}
-	c.cached = ret
-	return c.cached, nil
+	return []string{pattern}, nil
 }
 
 type cachingCategoryExpanderFunc struct {

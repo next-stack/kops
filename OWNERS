@@ -3,29 +3,25 @@
 # These OWNERS files should stay in sync:
 # https://github.com/kubernetes/test-infra/blob/master/config/jobs/kubernetes/kops/OWNERS
 # https://github.com/kubernetes/test-infra/blob/master/config/testgrids/kubernetes/kops/OWNERS
+# https://github.com/kubernetes/k8s.io/blob/master/registry.k8s.io/images/k8s-staging-kops/OWNERS
+# https://github.com/kubernetes/k8s.io/blob/master/artifacts/manifests/k8s-staging-kops/OWNERS
 
 emeritus_approvers:
   - chrislovecnm
   - chrisz100
   - gambol99
-  - granular-ryanbonham
-approvers:
   - geojaz
-  - hakman
+  - granular-ryanbonham
   - johngmyers
-  - justinsb
   - kashifsaadat
   - mikesplain
   - olemarkus
   - rdrgmnzs
-  - rifelpet
   - zetaab
+approvers:
+  - hakman
+  - justinsb
+  - rifelpet
 reviewers:
   - hakman
-  - johngmyers
-  - joshbranham
-  - kashifsaadat
-  - mikesplain
-  - olemarkus
-  - rdrgmnzs
-  - zetaab
+  - moshevayner

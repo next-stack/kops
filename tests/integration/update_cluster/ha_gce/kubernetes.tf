@@ -26,241 +26,281 @@ provider "aws" {
   region = "us-test-1"
 }
 
-resource "aws_s3_bucket_object" "cluster-completed-spec" {
+resource "aws_s3_object" "cluster-completed-spec" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_cluster-completed.spec_content")
+  content                = file("${path.module}/data/aws_s3_object_cluster-completed.spec_content")
   key                    = "tests/ha-gce.example.com/cluster-completed.spec"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "etcd-cluster-spec-events" {
+resource "aws_s3_object" "etcd-cluster-spec-events" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_etcd-cluster-spec-events_content")
+  content                = file("${path.module}/data/aws_s3_object_etcd-cluster-spec-events_content")
   key                    = "tests/ha-gce.example.com/backups/etcd/events/control/etcd-cluster-spec"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "etcd-cluster-spec-main" {
+resource "aws_s3_object" "etcd-cluster-spec-main" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_etcd-cluster-spec-main_content")
+  content                = file("${path.module}/data/aws_s3_object_etcd-cluster-spec-main_content")
   key                    = "tests/ha-gce.example.com/backups/etcd/main/control/etcd-cluster-spec"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "ha-gce-example-com-addons-bootstrap" {
+resource "aws_s3_object" "ha-gce-example-com-addons-bootstrap" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_ha-gce.example.com-addons-bootstrap_content")
+  content                = file("${path.module}/data/aws_s3_object_ha-gce.example.com-addons-bootstrap_content")
   key                    = "tests/ha-gce.example.com/addons/bootstrap-channel.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "ha-gce-example-com-addons-core-addons-k8s-io" {
+resource "aws_s3_object" "ha-gce-example-com-addons-cluster-autoscaler-addons-k8s-io-k8s-1-15" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_ha-gce.example.com-addons-core.addons.k8s.io_content")
-  key                    = "tests/ha-gce.example.com/addons/core.addons.k8s.io/v1.4.0.yaml"
+  content                = file("${path.module}/data/aws_s3_object_ha-gce.example.com-addons-cluster-autoscaler.addons.k8s.io-k8s-1.15_content")
+  key                    = "tests/ha-gce.example.com/addons/cluster-autoscaler.addons.k8s.io/k8s-1.15.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "ha-gce-example-com-addons-coredns-addons-k8s-io-k8s-1-12" {
+resource "aws_s3_object" "ha-gce-example-com-addons-coredns-addons-k8s-io-k8s-1-12" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_ha-gce.example.com-addons-coredns.addons.k8s.io-k8s-1.12_content")
+  content                = file("${path.module}/data/aws_s3_object_ha-gce.example.com-addons-coredns.addons.k8s.io-k8s-1.12_content")
   key                    = "tests/ha-gce.example.com/addons/coredns.addons.k8s.io/k8s-1.12.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "ha-gce-example-com-addons-dns-controller-addons-k8s-io-k8s-1-12" {
+resource "aws_s3_object" "ha-gce-example-com-addons-dns-controller-addons-k8s-io-k8s-1-12" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_ha-gce.example.com-addons-dns-controller.addons.k8s.io-k8s-1.12_content")
+  content                = file("${path.module}/data/aws_s3_object_ha-gce.example.com-addons-dns-controller.addons.k8s.io-k8s-1.12_content")
   key                    = "tests/ha-gce.example.com/addons/dns-controller.addons.k8s.io/k8s-1.12.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "ha-gce-example-com-addons-kops-controller-addons-k8s-io-k8s-1-16" {
+resource "aws_s3_object" "ha-gce-example-com-addons-gcp-cloud-controller-addons-k8s-io-k8s-1-23" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_ha-gce.example.com-addons-kops-controller.addons.k8s.io-k8s-1.16_content")
+  content                = file("${path.module}/data/aws_s3_object_ha-gce.example.com-addons-gcp-cloud-controller.addons.k8s.io-k8s-1.23_content")
+  key                    = "tests/ha-gce.example.com/addons/gcp-cloud-controller.addons.k8s.io/k8s-1.23.yaml"
+  provider               = aws.files
+  server_side_encryption = "AES256"
+}
+
+resource "aws_s3_object" "ha-gce-example-com-addons-gcp-pd-csi-driver-addons-k8s-io-k8s-1-23" {
+  bucket                 = "testingBucket"
+  content                = file("${path.module}/data/aws_s3_object_ha-gce.example.com-addons-gcp-pd-csi-driver.addons.k8s.io-k8s-1.23_content")
+  key                    = "tests/ha-gce.example.com/addons/gcp-pd-csi-driver.addons.k8s.io/k8s-1.23.yaml"
+  provider               = aws.files
+  server_side_encryption = "AES256"
+}
+
+resource "aws_s3_object" "ha-gce-example-com-addons-kops-controller-addons-k8s-io-k8s-1-16" {
+  bucket                 = "testingBucket"
+  content                = file("${path.module}/data/aws_s3_object_ha-gce.example.com-addons-kops-controller.addons.k8s.io-k8s-1.16_content")
   key                    = "tests/ha-gce.example.com/addons/kops-controller.addons.k8s.io/k8s-1.16.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "ha-gce-example-com-addons-kubelet-api-rbac-addons-k8s-io-k8s-1-9" {
+resource "aws_s3_object" "ha-gce-example-com-addons-kubelet-api-rbac-addons-k8s-io-k8s-1-9" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_ha-gce.example.com-addons-kubelet-api.rbac.addons.k8s.io-k8s-1.9_content")
+  content                = file("${path.module}/data/aws_s3_object_ha-gce.example.com-addons-kubelet-api.rbac.addons.k8s.io-k8s-1.9_content")
   key                    = "tests/ha-gce.example.com/addons/kubelet-api.rbac.addons.k8s.io/k8s-1.9.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "ha-gce-example-com-addons-limit-range-addons-k8s-io" {
+resource "aws_s3_object" "ha-gce-example-com-addons-limit-range-addons-k8s-io" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_ha-gce.example.com-addons-limit-range.addons.k8s.io_content")
+  content                = file("${path.module}/data/aws_s3_object_ha-gce.example.com-addons-limit-range.addons.k8s.io_content")
   key                    = "tests/ha-gce.example.com/addons/limit-range.addons.k8s.io/v1.5.0.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "ha-gce-example-com-addons-metadata-proxy-addons-k8s-io-v0-1-12" {
+resource "aws_s3_object" "ha-gce-example-com-addons-storage-gce-addons-k8s-io-v1-7-0" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_ha-gce.example.com-addons-metadata-proxy.addons.k8s.io-v0.1.12_content")
-  key                    = "tests/ha-gce.example.com/addons/metadata-proxy.addons.k8s.io/v0.1.12.yaml"
-  provider               = aws.files
-  server_side_encryption = "AES256"
-}
-
-resource "aws_s3_bucket_object" "ha-gce-example-com-addons-rbac-addons-k8s-io-k8s-1-8" {
-  bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_ha-gce.example.com-addons-rbac.addons.k8s.io-k8s-1.8_content")
-  key                    = "tests/ha-gce.example.com/addons/rbac.addons.k8s.io/k8s-1.8.yaml"
-  provider               = aws.files
-  server_side_encryption = "AES256"
-}
-
-resource "aws_s3_bucket_object" "ha-gce-example-com-addons-storage-gce-addons-k8s-io-v1-7-0" {
-  bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_ha-gce.example.com-addons-storage-gce.addons.k8s.io-v1.7.0_content")
+  content                = file("${path.module}/data/aws_s3_object_ha-gce.example.com-addons-storage-gce.addons.k8s.io-v1.7.0_content")
   key                    = "tests/ha-gce.example.com/addons/storage-gce.addons.k8s.io/v1.7.0.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "kops-version-txt" {
+resource "aws_s3_object" "kops-version-txt" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_kops-version.txt_content")
+  content                = file("${path.module}/data/aws_s3_object_kops-version.txt_content")
   key                    = "tests/ha-gce.example.com/kops-version.txt"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "manifests-etcdmanager-events" {
+resource "aws_s3_object" "manifests-channels-kops-channels" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_manifests-etcdmanager-events_content")
-  key                    = "tests/ha-gce.example.com/manifests/etcd/events.yaml"
+  content                = file("${path.module}/data/aws_s3_object_manifests-channels-kops-channels_content")
+  key                    = "tests/ha-gce.example.com/manifests/channels/kops-channels.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "manifests-etcdmanager-main" {
+resource "aws_s3_object" "manifests-etcdmanager-events-master-us-test1-a" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_manifests-etcdmanager-main_content")
-  key                    = "tests/ha-gce.example.com/manifests/etcd/main.yaml"
+  content                = file("${path.module}/data/aws_s3_object_manifests-etcdmanager-events-master-us-test1-a_content")
+  key                    = "tests/ha-gce.example.com/manifests/etcd/events-master-us-test1-a.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "manifests-static-kube-apiserver-healthcheck" {
+resource "aws_s3_object" "manifests-etcdmanager-events-master-us-test1-b" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_manifests-static-kube-apiserver-healthcheck_content")
+  content                = file("${path.module}/data/aws_s3_object_manifests-etcdmanager-events-master-us-test1-b_content")
+  key                    = "tests/ha-gce.example.com/manifests/etcd/events-master-us-test1-b.yaml"
+  provider               = aws.files
+  server_side_encryption = "AES256"
+}
+
+resource "aws_s3_object" "manifests-etcdmanager-events-master-us-test1-c" {
+  bucket                 = "testingBucket"
+  content                = file("${path.module}/data/aws_s3_object_manifests-etcdmanager-events-master-us-test1-c_content")
+  key                    = "tests/ha-gce.example.com/manifests/etcd/events-master-us-test1-c.yaml"
+  provider               = aws.files
+  server_side_encryption = "AES256"
+}
+
+resource "aws_s3_object" "manifests-etcdmanager-main-master-us-test1-a" {
+  bucket                 = "testingBucket"
+  content                = file("${path.module}/data/aws_s3_object_manifests-etcdmanager-main-master-us-test1-a_content")
+  key                    = "tests/ha-gce.example.com/manifests/etcd/main-master-us-test1-a.yaml"
+  provider               = aws.files
+  server_side_encryption = "AES256"
+}
+
+resource "aws_s3_object" "manifests-etcdmanager-main-master-us-test1-b" {
+  bucket                 = "testingBucket"
+  content                = file("${path.module}/data/aws_s3_object_manifests-etcdmanager-main-master-us-test1-b_content")
+  key                    = "tests/ha-gce.example.com/manifests/etcd/main-master-us-test1-b.yaml"
+  provider               = aws.files
+  server_side_encryption = "AES256"
+}
+
+resource "aws_s3_object" "manifests-etcdmanager-main-master-us-test1-c" {
+  bucket                 = "testingBucket"
+  content                = file("${path.module}/data/aws_s3_object_manifests-etcdmanager-main-master-us-test1-c_content")
+  key                    = "tests/ha-gce.example.com/manifests/etcd/main-master-us-test1-c.yaml"
+  provider               = aws.files
+  server_side_encryption = "AES256"
+}
+
+resource "aws_s3_object" "manifests-static-kube-apiserver-healthcheck" {
+  bucket                 = "testingBucket"
+  content                = file("${path.module}/data/aws_s3_object_manifests-static-kube-apiserver-healthcheck_content")
   key                    = "tests/ha-gce.example.com/manifests/static/kube-apiserver-healthcheck.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "nodeupconfig-master-us-test1-a" {
+resource "aws_s3_object" "nodeupconfig-master-us-test1-a" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_nodeupconfig-master-us-test1-a_content")
-  key                    = "tests/ha-gce.example.com/igconfig/master/master-us-test1-a/nodeupconfig.yaml"
+  content                = file("${path.module}/data/aws_s3_object_nodeupconfig-master-us-test1-a_content")
+  key                    = "tests/ha-gce.example.com/igconfig/control-plane/master-us-test1-a/nodeupconfig.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "nodeupconfig-master-us-test1-b" {
+resource "aws_s3_object" "nodeupconfig-master-us-test1-b" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_nodeupconfig-master-us-test1-b_content")
-  key                    = "tests/ha-gce.example.com/igconfig/master/master-us-test1-b/nodeupconfig.yaml"
+  content                = file("${path.module}/data/aws_s3_object_nodeupconfig-master-us-test1-b_content")
+  key                    = "tests/ha-gce.example.com/igconfig/control-plane/master-us-test1-b/nodeupconfig.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "nodeupconfig-master-us-test1-c" {
+resource "aws_s3_object" "nodeupconfig-master-us-test1-c" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_nodeupconfig-master-us-test1-c_content")
-  key                    = "tests/ha-gce.example.com/igconfig/master/master-us-test1-c/nodeupconfig.yaml"
+  content                = file("${path.module}/data/aws_s3_object_nodeupconfig-master-us-test1-c_content")
+  key                    = "tests/ha-gce.example.com/igconfig/control-plane/master-us-test1-c/nodeupconfig.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "nodeupconfig-nodes" {
+resource "aws_s3_object" "nodeupconfig-nodes" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_nodeupconfig-nodes_content")
+  content                = file("${path.module}/data/aws_s3_object_nodeupconfig-nodes_content")
   key                    = "tests/ha-gce.example.com/igconfig/node/nodes/nodeupconfig.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "google_compute_disk" "d1-etcd-events-ha-gce-example-com" {
+resource "google_compute_disk" "a-etcd-events-ha-gce-example-com" {
   labels = {
     "k8s-io-cluster-name" = "ha-gce-example-com"
-    "k8s-io-etcd-events"  = "1-2f1-2c2-2c3"
+    "k8s-io-etcd-events"  = "a-2fa"
     "k8s-io-role-master"  = "master"
   }
-  name = "d1-etcd-events-ha-gce-example-com"
+  name = "a-etcd-events-ha-gce-example-com"
   size = 20
   type = "pd-ssd"
   zone = "us-test1-a"
 }
 
-resource "google_compute_disk" "d1-etcd-main-ha-gce-example-com" {
+resource "google_compute_disk" "a-etcd-main-ha-gce-example-com" {
   labels = {
     "k8s-io-cluster-name" = "ha-gce-example-com"
-    "k8s-io-etcd-main"    = "1-2f1-2c2-2c3"
+    "k8s-io-etcd-main"    = "a-2fa"
     "k8s-io-role-master"  = "master"
   }
-  name = "d1-etcd-main-ha-gce-example-com"
+  name = "a-etcd-main-ha-gce-example-com"
   size = 20
   type = "pd-ssd"
   zone = "us-test1-a"
 }
 
-resource "google_compute_disk" "d2-etcd-events-ha-gce-example-com" {
+resource "google_compute_disk" "b-etcd-events-ha-gce-example-com" {
   labels = {
     "k8s-io-cluster-name" = "ha-gce-example-com"
-    "k8s-io-etcd-events"  = "2-2f1-2c2-2c3"
+    "k8s-io-etcd-events"  = "b-2fb"
     "k8s-io-role-master"  = "master"
   }
-  name = "d2-etcd-events-ha-gce-example-com"
+  name = "b-etcd-events-ha-gce-example-com"
   size = 20
   type = "pd-ssd"
   zone = "us-test1-b"
 }
 
-resource "google_compute_disk" "d2-etcd-main-ha-gce-example-com" {
+resource "google_compute_disk" "b-etcd-main-ha-gce-example-com" {
   labels = {
     "k8s-io-cluster-name" = "ha-gce-example-com"
-    "k8s-io-etcd-main"    = "2-2f1-2c2-2c3"
+    "k8s-io-etcd-main"    = "b-2fb"
     "k8s-io-role-master"  = "master"
   }
-  name = "d2-etcd-main-ha-gce-example-com"
+  name = "b-etcd-main-ha-gce-example-com"
   size = 20
   type = "pd-ssd"
   zone = "us-test1-b"
 }
 
-resource "google_compute_disk" "d3-etcd-events-ha-gce-example-com" {
+resource "google_compute_disk" "c-etcd-events-ha-gce-example-com" {
   labels = {
     "k8s-io-cluster-name" = "ha-gce-example-com"
-    "k8s-io-etcd-events"  = "3-2f1-2c2-2c3"
+    "k8s-io-etcd-events"  = "c-2fc"
     "k8s-io-role-master"  = "master"
   }
-  name = "d3-etcd-events-ha-gce-example-com"
+  name = "c-etcd-events-ha-gce-example-com"
   size = 20
   type = "pd-ssd"
   zone = "us-test1-c"
 }
 
-resource "google_compute_disk" "d3-etcd-main-ha-gce-example-com" {
+resource "google_compute_disk" "c-etcd-main-ha-gce-example-com" {
   labels = {
     "k8s-io-cluster-name" = "ha-gce-example-com"
-    "k8s-io-etcd-main"    = "3-2f1-2c2-2c3"
+    "k8s-io-etcd-main"    = "c-2fc"
     "k8s-io-role-master"  = "master"
   }
-  name = "d3-etcd-main-ha-gce-example-com"
+  name = "c-etcd-main-ha-gce-example-com"
   size = 20
   type = "pd-ssd"
   zone = "us-test1-c"
@@ -273,9 +313,9 @@ resource "google_compute_firewall" "kubernetes-master-https-ha-gce-example-com" 
   }
   disabled      = false
   name          = "kubernetes-master-https-ha-gce-example-com"
-  network       = google_compute_network.default.name
+  network       = google_compute_network.ha-gce-example-com.name
   source_ranges = ["0.0.0.0/0"]
-  target_tags   = ["ha-gce-example-com-k8s-io-role-master"]
+  target_tags   = ["ha-gce-example-com-k8s-io-role-control-plane", "ha-gce-example-com-k8s-io-role-master"]
 }
 
 resource "google_compute_firewall" "kubernetes-master-https-ipv6-ha-gce-example-com" {
@@ -285,101 +325,129 @@ resource "google_compute_firewall" "kubernetes-master-https-ipv6-ha-gce-example-
   }
   disabled      = false
   name          = "kubernetes-master-https-ipv6-ha-gce-example-com"
-  network       = google_compute_network.default.name
+  network       = google_compute_network.ha-gce-example-com.name
   source_ranges = ["::/0"]
-  target_tags   = ["ha-gce-example-com-k8s-io-role-master"]
+  target_tags   = ["ha-gce-example-com-k8s-io-role-control-plane", "ha-gce-example-com-k8s-io-role-master"]
 }
 
 resource "google_compute_firewall" "master-to-master-ha-gce-example-com" {
   allow {
-    protocol = "tcp"
-  }
-  allow {
-    protocol = "udp"
-  }
-  allow {
-    protocol = "icmp"
+    protocol = "ah"
   }
   allow {
     protocol = "esp"
   }
   allow {
-    protocol = "ah"
+    protocol = "icmp"
   }
   allow {
     protocol = "sctp"
   }
+  allow {
+    protocol = "tcp"
+  }
+  allow {
+    protocol = "udp"
+  }
   disabled    = false
   name        = "master-to-master-ha-gce-example-com"
-  network     = google_compute_network.default.name
-  source_tags = ["ha-gce-example-com-k8s-io-role-master"]
-  target_tags = ["ha-gce-example-com-k8s-io-role-master"]
+  network     = google_compute_network.ha-gce-example-com.name
+  source_tags = ["ha-gce-example-com-k8s-io-role-control-plane", "ha-gce-example-com-k8s-io-role-etcd", "ha-gce-example-com-k8s-io-role-kubecontrollermanager", "ha-gce-example-com-k8s-io-role-master", "ha-gce-example-com-k8s-io-role-scheduler"]
+  target_tags = ["ha-gce-example-com-k8s-io-role-control-plane", "ha-gce-example-com-k8s-io-role-etcd", "ha-gce-example-com-k8s-io-role-kubecontrollermanager", "ha-gce-example-com-k8s-io-role-master", "ha-gce-example-com-k8s-io-role-scheduler"]
 }
 
 resource "google_compute_firewall" "master-to-node-ha-gce-example-com" {
   allow {
-    protocol = "tcp"
-  }
-  allow {
-    protocol = "udp"
-  }
-  allow {
-    protocol = "icmp"
+    protocol = "ah"
   }
   allow {
     protocol = "esp"
   }
   allow {
-    protocol = "ah"
+    protocol = "icmp"
   }
   allow {
     protocol = "sctp"
   }
+  allow {
+    protocol = "tcp"
+  }
+  allow {
+    protocol = "udp"
+  }
   disabled    = false
   name        = "master-to-node-ha-gce-example-com"
-  network     = google_compute_network.default.name
-  source_tags = ["ha-gce-example-com-k8s-io-role-master"]
+  network     = google_compute_network.ha-gce-example-com.name
+  source_tags = ["ha-gce-example-com-k8s-io-role-control-plane", "ha-gce-example-com-k8s-io-role-master"]
   target_tags = ["ha-gce-example-com-k8s-io-role-node"]
 }
 
 resource "google_compute_firewall" "node-to-master-ha-gce-example-com" {
   allow {
+    ports    = ["10249"]
+    protocol = "tcp"
+  }
+  allow {
+    ports    = ["10250"]
+    protocol = "tcp"
+  }
+  allow {
+    ports    = ["10257"]
+    protocol = "tcp"
+  }
+  allow {
+    ports    = ["10259"]
+    protocol = "tcp"
+  }
+  allow {
+    ports    = ["2382"]
+    protocol = "tcp"
+  }
+  allow {
+    ports    = ["2384"]
+    protocol = "tcp"
+  }
+  allow {
+    ports    = ["3988"]
+    protocol = "tcp"
+  }
+  allow {
     ports    = ["443"]
     protocol = "tcp"
   }
   allow {
-    ports    = ["4194"]
+    ports    = ["9100"]
     protocol = "tcp"
   }
   disabled    = false
   name        = "node-to-master-ha-gce-example-com"
-  network     = google_compute_network.default.name
+  network     = google_compute_network.ha-gce-example-com.name
   source_tags = ["ha-gce-example-com-k8s-io-role-node"]
-  target_tags = ["ha-gce-example-com-k8s-io-role-master"]
+  target_tags = ["ha-gce-example-com-k8s-io-role-control-plane", "ha-gce-example-com-k8s-io-role-master"]
 }
 
 resource "google_compute_firewall" "node-to-node-ha-gce-example-com" {
+  allow {
+    protocol = "ah"
+  }
+  allow {
+    protocol = "esp"
+  }
+  allow {
+    protocol = "icmp"
+  }
+  allow {
+    protocol = "sctp"
+  }
   allow {
     protocol = "tcp"
   }
   allow {
     protocol = "udp"
   }
-  allow {
-    protocol = "icmp"
-  }
-  allow {
-    protocol = "esp"
-  }
-  allow {
-    protocol = "ah"
-  }
-  allow {
-    protocol = "sctp"
-  }
   disabled    = false
   name        = "node-to-node-ha-gce-example-com"
-  network     = google_compute_network.default.name
+  network     = google_compute_network.ha-gce-example-com.name
   source_tags = ["ha-gce-example-com-k8s-io-role-node"]
   target_tags = ["ha-gce-example-com-k8s-io-role-node"]
 }
@@ -395,7 +463,7 @@ resource "google_compute_firewall" "nodeport-external-to-node-ha-gce-example-com
   }
   disabled      = true
   name          = "nodeport-external-to-node-ha-gce-example-com"
-  network       = google_compute_network.default.name
+  network       = google_compute_network.ha-gce-example-com.name
   source_ranges = ["0.0.0.0/0"]
   target_tags   = ["ha-gce-example-com-k8s-io-role-node"]
 }
@@ -411,7 +479,7 @@ resource "google_compute_firewall" "nodeport-external-to-node-ipv6-ha-gce-exampl
   }
   disabled      = true
   name          = "nodeport-external-to-node-ipv6-ha-gce-example-com"
-  network       = google_compute_network.default.name
+  network       = google_compute_network.ha-gce-example-com.name
   source_ranges = ["::/0"]
   target_tags   = ["ha-gce-example-com-k8s-io-role-node"]
 }
@@ -423,9 +491,9 @@ resource "google_compute_firewall" "ssh-external-to-master-ha-gce-example-com" {
   }
   disabled      = false
   name          = "ssh-external-to-master-ha-gce-example-com"
-  network       = google_compute_network.default.name
+  network       = google_compute_network.ha-gce-example-com.name
   source_ranges = ["0.0.0.0/0"]
-  target_tags   = ["ha-gce-example-com-k8s-io-role-master"]
+  target_tags   = ["ha-gce-example-com-k8s-io-role-control-plane", "ha-gce-example-com-k8s-io-role-etcd", "ha-gce-example-com-k8s-io-role-kubecontrollermanager", "ha-gce-example-com-k8s-io-role-master", "ha-gce-example-com-k8s-io-role-scheduler"]
 }
 
 resource "google_compute_firewall" "ssh-external-to-master-ipv6-ha-gce-example-com" {
@@ -435,9 +503,9 @@ resource "google_compute_firewall" "ssh-external-to-master-ipv6-ha-gce-example-c
   }
   disabled      = false
   name          = "ssh-external-to-master-ipv6-ha-gce-example-com"
-  network       = google_compute_network.default.name
+  network       = google_compute_network.ha-gce-example-com.name
   source_ranges = ["::/0"]
-  target_tags   = ["ha-gce-example-com-k8s-io-role-master"]
+  target_tags   = ["ha-gce-example-com-k8s-io-role-control-plane", "ha-gce-example-com-k8s-io-role-etcd", "ha-gce-example-com-k8s-io-role-kubecontrollermanager", "ha-gce-example-com-k8s-io-role-master", "ha-gce-example-com-k8s-io-role-scheduler"]
 }
 
 resource "google_compute_firewall" "ssh-external-to-node-ha-gce-example-com" {
@@ -447,7 +515,7 @@ resource "google_compute_firewall" "ssh-external-to-node-ha-gce-example-com" {
   }
   disabled      = false
   name          = "ssh-external-to-node-ha-gce-example-com"
-  network       = google_compute_network.default.name
+  network       = google_compute_network.ha-gce-example-com.name
   source_ranges = ["0.0.0.0/0"]
   target_tags   = ["ha-gce-example-com-k8s-io-role-node"]
 }
@@ -459,15 +527,23 @@ resource "google_compute_firewall" "ssh-external-to-node-ipv6-ha-gce-example-com
   }
   disabled      = false
   name          = "ssh-external-to-node-ipv6-ha-gce-example-com"
-  network       = google_compute_network.default.name
+  network       = google_compute_network.ha-gce-example-com.name
   source_ranges = ["::/0"]
   target_tags   = ["ha-gce-example-com-k8s-io-role-node"]
 }
 
 resource "google_compute_instance_group_manager" "a-master-us-test1-a-ha-gce-example-com" {
   base_instance_name = "master-us-test1-a"
-  name               = "a-master-us-test1-a-ha-gce-example-com"
-  target_size        = 1
+  lifecycle {
+    ignore_changes = [target_size]
+  }
+  list_managed_instances_results = "PAGINATED"
+  name                           = "a-master-us-test1-a-ha-gce-example-com"
+  target_size                    = 1
+  update_policy {
+    minimal_action = "REPLACE"
+    type           = "OPPORTUNISTIC"
+  }
   version {
     instance_template = google_compute_instance_template.master-us-test1-a-ha-gce-example-com.self_link
   }
@@ -476,8 +552,16 @@ resource "google_compute_instance_group_manager" "a-master-us-test1-a-ha-gce-exa
 
 resource "google_compute_instance_group_manager" "a-nodes-ha-gce-example-com" {
   base_instance_name = "nodes"
-  name               = "a-nodes-ha-gce-example-com"
-  target_size        = 1
+  lifecycle {
+    ignore_changes = [target_size]
+  }
+  list_managed_instances_results = "PAGINATED"
+  name                           = "a-nodes-ha-gce-example-com"
+  target_size                    = 1
+  update_policy {
+    minimal_action = "REPLACE"
+    type           = "OPPORTUNISTIC"
+  }
   version {
     instance_template = google_compute_instance_template.nodes-ha-gce-example-com.self_link
   }
@@ -486,8 +570,16 @@ resource "google_compute_instance_group_manager" "a-nodes-ha-gce-example-com" {
 
 resource "google_compute_instance_group_manager" "b-master-us-test1-b-ha-gce-example-com" {
   base_instance_name = "master-us-test1-b"
-  name               = "b-master-us-test1-b-ha-gce-example-com"
-  target_size        = 1
+  lifecycle {
+    ignore_changes = [target_size]
+  }
+  list_managed_instances_results = "PAGINATED"
+  name                           = "b-master-us-test1-b-ha-gce-example-com"
+  target_size                    = 1
+  update_policy {
+    minimal_action = "REPLACE"
+    type           = "OPPORTUNISTIC"
+  }
   version {
     instance_template = google_compute_instance_template.master-us-test1-b-ha-gce-example-com.self_link
   }
@@ -496,8 +588,16 @@ resource "google_compute_instance_group_manager" "b-master-us-test1-b-ha-gce-exa
 
 resource "google_compute_instance_group_manager" "b-nodes-ha-gce-example-com" {
   base_instance_name = "nodes"
-  name               = "b-nodes-ha-gce-example-com"
-  target_size        = 1
+  lifecycle {
+    ignore_changes = [target_size]
+  }
+  list_managed_instances_results = "PAGINATED"
+  name                           = "b-nodes-ha-gce-example-com"
+  target_size                    = 1
+  update_policy {
+    minimal_action = "REPLACE"
+    type           = "OPPORTUNISTIC"
+  }
   version {
     instance_template = google_compute_instance_template.nodes-ha-gce-example-com.self_link
   }
@@ -506,8 +606,16 @@ resource "google_compute_instance_group_manager" "b-nodes-ha-gce-example-com" {
 
 resource "google_compute_instance_group_manager" "c-master-us-test1-c-ha-gce-example-com" {
   base_instance_name = "master-us-test1-c"
-  name               = "c-master-us-test1-c-ha-gce-example-com"
-  target_size        = 1
+  lifecycle {
+    ignore_changes = [target_size]
+  }
+  list_managed_instances_results = "PAGINATED"
+  name                           = "c-master-us-test1-c-ha-gce-example-com"
+  target_size                    = 1
+  update_policy {
+    minimal_action = "REPLACE"
+    type           = "OPPORTUNISTIC"
+  }
   version {
     instance_template = google_compute_instance_template.master-us-test1-c-ha-gce-example-com.self_link
   }
@@ -516,8 +624,16 @@ resource "google_compute_instance_group_manager" "c-master-us-test1-c-ha-gce-exa
 
 resource "google_compute_instance_group_manager" "c-nodes-ha-gce-example-com" {
   base_instance_name = "nodes"
-  name               = "c-nodes-ha-gce-example-com"
-  target_size        = 0
+  lifecycle {
+    ignore_changes = [target_size]
+  }
+  list_managed_instances_results = "PAGINATED"
+  name                           = "c-nodes-ha-gce-example-com"
+  target_size                    = 0
+  update_policy {
+    minimal_action = "REPLACE"
+    type           = "OPPORTUNISTIC"
+  }
   version {
     instance_template = google_compute_instance_template.nodes-ha-gce-example-com.self_link
   }
@@ -527,174 +643,244 @@ resource "google_compute_instance_group_manager" "c-nodes-ha-gce-example-com" {
 resource "google_compute_instance_template" "master-us-test1-a-ha-gce-example-com" {
   can_ip_forward = true
   disk {
-    auto_delete  = true
-    boot         = true
-    device_name  = "persistent-disks-0"
-    disk_name    = ""
-    disk_size_gb = 64
-    disk_type    = "pd-standard"
-    interface    = ""
-    mode         = "READ_WRITE"
-    source       = ""
-    source_image = "https://www.googleapis.com/compute/v1/projects/cos-cloud/global/images/cos-stable-57-9202-64-0"
-    type         = "PERSISTENT"
+    auto_delete            = true
+    boot                   = true
+    device_name            = "persistent-disks-0"
+    disk_name              = ""
+    disk_size_gb           = 64
+    disk_type              = "pd-standard"
+    interface              = ""
+    mode                   = "READ_WRITE"
+    provisioned_iops       = 0
+    provisioned_throughput = 0
+    source                 = ""
+    source_image           = "https://www.googleapis.com/compute/v1/projects/ubuntu-os-cloud/global/images/ubuntu-2604-resolute-amd64-v20221018"
+    type                   = "PERSISTENT"
   }
-  machine_type = "n1-standard-1"
+  labels = {
+    "k8s-io-cluster-name"       = "ha-gce-example-com"
+    "k8s-io-instance-group"     = "master-us-test1-a"
+    "k8s-io-role-control-plane" = "control-plane"
+    "k8s-io-role-master"        = "master"
+  }
+  lifecycle {
+    create_before_destroy = true
+  }
+  machine_type = "e2-medium"
   metadata = {
     "cluster-name"                    = "ha-gce.example.com"
     "kops-k8s-io-instance-group-name" = "master-us-test1-a"
-    "ssh-keys"                        = file("${path.module}/data/google_compute_instance_template_master-us-test1-a-ha-gce-example-com_metadata_ssh-keys")
-    "startup-script"                  = file("${path.module}/data/google_compute_instance_template_master-us-test1-a-ha-gce-example-com_metadata_startup-script")
+    "ssh-keys"                        = "ubuntu: ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAAgQCtWu40XQo8dczLsCq0OWV+hxm9uV3WxeH9Kgh4sMzQxNtoU1pvW0XdjpkBesRKGoolfWeCLXWxpyQb1IaiMkKoz7MdhQ/6UKjMjP66aFWWp3pwD0uj0HuJ7tq4gKHKRYGTaZIRWpzUiANBrjugVgA+Sd7E/mYwc/DMXkIyRZbvhQ=="
+    "user-data"                       = file("${path.module}/data/google_compute_instance_template_master-us-test1-a-ha-gce-example-com_metadata_user-data")
   }
   name_prefix = "master-us-test1-a-ha-gce--ke5ah6-"
   network_interface {
     access_config {
     }
-    network = google_compute_network.default.name
+    network    = google_compute_network.ha-gce-example-com.name
+    stack_type = "IPV4_ONLY"
+    subnetwork = google_compute_subnetwork.us-test1-ha-gce-example-com.name
   }
   scheduling {
     automatic_restart   = true
     on_host_maintenance = "MIGRATE"
     preemptible         = false
+    provisioning_model  = "STANDARD"
   }
   service_account {
     email  = "default"
-    scopes = ["https://www.googleapis.com/auth/compute", "https://www.googleapis.com/auth/monitoring", "https://www.googleapis.com/auth/logging.write", "https://www.googleapis.com/auth/devstorage.read_write", "https://www.googleapis.com/auth/ndev.clouddns.readwrite"]
+    scopes = ["https://www.googleapis.com/auth/compute", "https://www.googleapis.com/auth/monitoring", "https://www.googleapis.com/auth/logging.write", "https://www.googleapis.com/auth/cloud-platform", "https://www.googleapis.com/auth/devstorage.read_write", "https://www.googleapis.com/auth/ndev.clouddns.readwrite"]
   }
-  tags = ["ha-gce-example-com-k8s-io-role-master"]
+  tags = ["ha-gce-example-com-k8s-io-role-control-plane", "ha-gce-example-com-k8s-io-role-master"]
 }
 
 resource "google_compute_instance_template" "master-us-test1-b-ha-gce-example-com" {
   can_ip_forward = true
   disk {
-    auto_delete  = true
-    boot         = true
-    device_name  = "persistent-disks-0"
-    disk_name    = ""
-    disk_size_gb = 64
-    disk_type    = "pd-standard"
-    interface    = ""
-    mode         = "READ_WRITE"
-    source       = ""
-    source_image = "https://www.googleapis.com/compute/v1/projects/cos-cloud/global/images/cos-stable-57-9202-64-0"
-    type         = "PERSISTENT"
+    auto_delete            = true
+    boot                   = true
+    device_name            = "persistent-disks-0"
+    disk_name              = ""
+    disk_size_gb           = 64
+    disk_type              = "pd-standard"
+    interface              = ""
+    mode                   = "READ_WRITE"
+    provisioned_iops       = 0
+    provisioned_throughput = 0
+    source                 = ""
+    source_image           = "https://www.googleapis.com/compute/v1/projects/ubuntu-os-cloud/global/images/ubuntu-2604-resolute-amd64-v20221018"
+    type                   = "PERSISTENT"
   }
-  machine_type = "n1-standard-1"
+  labels = {
+    "k8s-io-cluster-name"       = "ha-gce-example-com"
+    "k8s-io-instance-group"     = "master-us-test1-b"
+    "k8s-io-role-control-plane" = "control-plane"
+    "k8s-io-role-master"        = "master"
+  }
+  lifecycle {
+    create_before_destroy = true
+  }
+  machine_type = "e2-medium"
   metadata = {
     "cluster-name"                    = "ha-gce.example.com"
     "kops-k8s-io-instance-group-name" = "master-us-test1-b"
-    "ssh-keys"                        = file("${path.module}/data/google_compute_instance_template_master-us-test1-b-ha-gce-example-com_metadata_ssh-keys")
-    "startup-script"                  = file("${path.module}/data/google_compute_instance_template_master-us-test1-b-ha-gce-example-com_metadata_startup-script")
+    "ssh-keys"                        = "ubuntu: ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAAgQCtWu40XQo8dczLsCq0OWV+hxm9uV3WxeH9Kgh4sMzQxNtoU1pvW0XdjpkBesRKGoolfWeCLXWxpyQb1IaiMkKoz7MdhQ/6UKjMjP66aFWWp3pwD0uj0HuJ7tq4gKHKRYGTaZIRWpzUiANBrjugVgA+Sd7E/mYwc/DMXkIyRZbvhQ=="
+    "user-data"                       = file("${path.module}/data/google_compute_instance_template_master-us-test1-b-ha-gce-example-com_metadata_user-data")
   }
   name_prefix = "master-us-test1-b-ha-gce--c8u7qq-"
   network_interface {
     access_config {
     }
-    network = google_compute_network.default.name
+    network    = google_compute_network.ha-gce-example-com.name
+    stack_type = "IPV4_ONLY"
+    subnetwork = google_compute_subnetwork.us-test1-ha-gce-example-com.name
   }
   scheduling {
     automatic_restart   = true
     on_host_maintenance = "MIGRATE"
     preemptible         = false
+    provisioning_model  = "STANDARD"
   }
   service_account {
     email  = "default"
-    scopes = ["https://www.googleapis.com/auth/compute", "https://www.googleapis.com/auth/monitoring", "https://www.googleapis.com/auth/logging.write", "https://www.googleapis.com/auth/devstorage.read_write", "https://www.googleapis.com/auth/ndev.clouddns.readwrite"]
+    scopes = ["https://www.googleapis.com/auth/compute", "https://www.googleapis.com/auth/monitoring", "https://www.googleapis.com/auth/logging.write", "https://www.googleapis.com/auth/cloud-platform", "https://www.googleapis.com/auth/devstorage.read_write", "https://www.googleapis.com/auth/ndev.clouddns.readwrite"]
   }
-  tags = ["ha-gce-example-com-k8s-io-role-master"]
+  tags = ["ha-gce-example-com-k8s-io-role-control-plane", "ha-gce-example-com-k8s-io-role-master"]
 }
 
 resource "google_compute_instance_template" "master-us-test1-c-ha-gce-example-com" {
   can_ip_forward = true
   disk {
-    auto_delete  = true
-    boot         = true
-    device_name  = "persistent-disks-0"
-    disk_name    = ""
-    disk_size_gb = 64
-    disk_type    = "pd-standard"
-    interface    = ""
-    mode         = "READ_WRITE"
-    source       = ""
-    source_image = "https://www.googleapis.com/compute/v1/projects/cos-cloud/global/images/cos-stable-57-9202-64-0"
-    type         = "PERSISTENT"
+    auto_delete            = true
+    boot                   = true
+    device_name            = "persistent-disks-0"
+    disk_name              = ""
+    disk_size_gb           = 64
+    disk_type              = "pd-standard"
+    interface              = ""
+    mode                   = "READ_WRITE"
+    provisioned_iops       = 0
+    provisioned_throughput = 0
+    source                 = ""
+    source_image           = "https://www.googleapis.com/compute/v1/projects/ubuntu-os-cloud/global/images/ubuntu-2604-resolute-amd64-v20221018"
+    type                   = "PERSISTENT"
   }
-  machine_type = "n1-standard-1"
+  labels = {
+    "k8s-io-cluster-name"       = "ha-gce-example-com"
+    "k8s-io-instance-group"     = "master-us-test1-c"
+    "k8s-io-role-control-plane" = "control-plane"
+    "k8s-io-role-master"        = "master"
+  }
+  lifecycle {
+    create_before_destroy = true
+  }
+  machine_type = "e2-medium"
   metadata = {
     "cluster-name"                    = "ha-gce.example.com"
     "kops-k8s-io-instance-group-name" = "master-us-test1-c"
-    "ssh-keys"                        = file("${path.module}/data/google_compute_instance_template_master-us-test1-c-ha-gce-example-com_metadata_ssh-keys")
-    "startup-script"                  = file("${path.module}/data/google_compute_instance_template_master-us-test1-c-ha-gce-example-com_metadata_startup-script")
+    "ssh-keys"                        = "ubuntu: ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAAgQCtWu40XQo8dczLsCq0OWV+hxm9uV3WxeH9Kgh4sMzQxNtoU1pvW0XdjpkBesRKGoolfWeCLXWxpyQb1IaiMkKoz7MdhQ/6UKjMjP66aFWWp3pwD0uj0HuJ7tq4gKHKRYGTaZIRWpzUiANBrjugVgA+Sd7E/mYwc/DMXkIyRZbvhQ=="
+    "user-data"                       = file("${path.module}/data/google_compute_instance_template_master-us-test1-c-ha-gce-example-com_metadata_user-data")
   }
   name_prefix = "master-us-test1-c-ha-gce--3unp7l-"
   network_interface {
     access_config {
     }
-    network = google_compute_network.default.name
+    network    = google_compute_network.ha-gce-example-com.name
+    stack_type = "IPV4_ONLY"
+    subnetwork = google_compute_subnetwork.us-test1-ha-gce-example-com.name
   }
   scheduling {
     automatic_restart   = true
     on_host_maintenance = "MIGRATE"
     preemptible         = false
+    provisioning_model  = "STANDARD"
   }
   service_account {
     email  = "default"
-    scopes = ["https://www.googleapis.com/auth/compute", "https://www.googleapis.com/auth/monitoring", "https://www.googleapis.com/auth/logging.write", "https://www.googleapis.com/auth/devstorage.read_write", "https://www.googleapis.com/auth/ndev.clouddns.readwrite"]
+    scopes = ["https://www.googleapis.com/auth/compute", "https://www.googleapis.com/auth/monitoring", "https://www.googleapis.com/auth/logging.write", "https://www.googleapis.com/auth/cloud-platform", "https://www.googleapis.com/auth/devstorage.read_write", "https://www.googleapis.com/auth/ndev.clouddns.readwrite"]
   }
-  tags = ["ha-gce-example-com-k8s-io-role-master"]
+  tags = ["ha-gce-example-com-k8s-io-role-control-plane", "ha-gce-example-com-k8s-io-role-master"]
 }
 
 resource "google_compute_instance_template" "nodes-ha-gce-example-com" {
   can_ip_forward = true
   disk {
-    auto_delete  = true
-    boot         = true
-    device_name  = "persistent-disks-0"
-    disk_name    = ""
-    disk_size_gb = 128
-    disk_type    = "pd-standard"
-    interface    = ""
-    mode         = "READ_WRITE"
-    source       = ""
-    source_image = "https://www.googleapis.com/compute/v1/projects/cos-cloud/global/images/cos-stable-57-9202-64-0"
-    type         = "PERSISTENT"
+    auto_delete            = true
+    boot                   = true
+    device_name            = "persistent-disks-0"
+    disk_name              = ""
+    disk_size_gb           = 128
+    disk_type              = "pd-standard"
+    interface              = ""
+    mode                   = "READ_WRITE"
+    provisioned_iops       = 0
+    provisioned_throughput = 0
+    source                 = ""
+    source_image           = "https://www.googleapis.com/compute/v1/projects/ubuntu-os-cloud/global/images/ubuntu-2604-resolute-amd64-v20221018"
+    type                   = "PERSISTENT"
   }
-  machine_type = "n1-standard-2"
+  labels = {
+    "k8s-io-cluster-name"                             = "ha-gce-example-com"
+    "k8s-io-instance-group"                           = "nodes"
+    "k8s-io-role-node"                                = "node"
+    "k8s.io/cluster-autoscaler/node-template/taint/a" = "b:c"
+  }
+  lifecycle {
+    create_before_destroy = true
+  }
+  machine_type = "e2-medium"
   metadata = {
     "cluster-name"                    = "ha-gce.example.com"
     "kops-k8s-io-instance-group-name" = "nodes"
-    "ssh-keys"                        = file("${path.module}/data/google_compute_instance_template_nodes-ha-gce-example-com_metadata_ssh-keys")
-    "startup-script"                  = file("${path.module}/data/google_compute_instance_template_nodes-ha-gce-example-com_metadata_startup-script")
+    "kube-env"                        = "AUTOSCALER_ENV_VARS: os_distribution=ubuntu;arch=amd64;os=linux;node_labels=kops.k8s.io/instancegroup=nodes;node_taints=a=b:c"
+    "ssh-keys"                        = "ubuntu: ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAAgQCtWu40XQo8dczLsCq0OWV+hxm9uV3WxeH9Kgh4sMzQxNtoU1pvW0XdjpkBesRKGoolfWeCLXWxpyQb1IaiMkKoz7MdhQ/6UKjMjP66aFWWp3pwD0uj0HuJ7tq4gKHKRYGTaZIRWpzUiANBrjugVgA+Sd7E/mYwc/DMXkIyRZbvhQ=="
+    "user-data"                       = file("${path.module}/data/google_compute_instance_template_nodes-ha-gce-example-com_metadata_user-data")
   }
   name_prefix = "nodes-ha-gce-example-com-"
   network_interface {
     access_config {
     }
-    network = google_compute_network.default.name
+    network    = google_compute_network.ha-gce-example-com.name
+    stack_type = "IPV4_ONLY"
+    subnetwork = google_compute_subnetwork.us-test1-ha-gce-example-com.name
   }
   scheduling {
     automatic_restart   = true
     on_host_maintenance = "MIGRATE"
     preemptible         = false
+    provisioning_model  = "STANDARD"
   }
   service_account {
     email  = "default"
-    scopes = ["https://www.googleapis.com/auth/compute", "https://www.googleapis.com/auth/monitoring", "https://www.googleapis.com/auth/logging.write", "https://www.googleapis.com/auth/devstorage.read_only"]
+    scopes = ["https://www.googleapis.com/auth/compute", "https://www.googleapis.com/auth/monitoring", "https://www.googleapis.com/auth/logging.write", "https://www.googleapis.com/auth/cloud-platform", "https://www.googleapis.com/auth/devstorage.read_only"]
   }
   tags = ["ha-gce-example-com-k8s-io-role-node"]
 }
 
-resource "google_compute_network" "default" {
-  auto_create_subnetworks = true
-  name                    = "default"
+resource "google_compute_network" "ha-gce-example-com" {
+  auto_create_subnetworks = false
+  name                    = "ha-gce-example-com"
+}
+
+resource "google_compute_subnetwork" "us-test1-ha-gce-example-com" {
+  ip_cidr_range = "10.0.16.0/20"
+  name          = "us-test1-ha-gce-example-com"
+  network       = google_compute_network.ha-gce-example-com.name
+  region        = "us-test1"
+  stack_type    = "IPV4_ONLY"
 }
 
 terraform {
   required_version = ">= 0.15.0"
   required_providers {
+    aws = {
+      "configuration_aliases" = [aws.files]
+      "source"                = "hashicorp/aws"
+      "version"               = ">= 6.57.1"
+    }
     google = {
       "source"  = "hashicorp/google"
-      "version" = ">= 2.19.0"
+      "version" = ">= 6.8.0"
     }
   }
 }

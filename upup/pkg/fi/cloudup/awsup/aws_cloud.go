@@ -17,40 +17,41 @@ limitations under the License.
 package awsup
 
 import (
+	"context"
 	"fmt"
+	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/aws/aws-sdk-go/service/eventbridge"
-	"github.com/aws/aws-sdk-go/service/eventbridge/eventbridgeiface"
-	"github.com/aws/aws-sdk-go/service/sqs"
-	"github.com/aws/aws-sdk-go/service/sqs/sqsiface"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/eventbridge"
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
+	"github.com/aws/aws-sdk-go-v2/service/ssm"
+	"golang.org/x/sync/errgroup"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/arn"
-	"github.com/aws/aws-sdk-go/aws/awserr"
-	"github.com/aws/aws-sdk-go/aws/request"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/autoscaling"
-	"github.com/aws/aws-sdk-go/service/autoscaling/autoscalingiface"
-	"github.com/aws/aws-sdk-go/service/cloudformation"
-	"github.com/aws/aws-sdk-go/service/ec2"
-	"github.com/aws/aws-sdk-go/service/ec2/ec2iface"
-	"github.com/aws/aws-sdk-go/service/elb"
-	"github.com/aws/aws-sdk-go/service/elb/elbiface"
-	"github.com/aws/aws-sdk-go/service/elbv2"
-	"github.com/aws/aws-sdk-go/service/elbv2/elbv2iface"
-	"github.com/aws/aws-sdk-go/service/iam"
-	"github.com/aws/aws-sdk-go/service/iam/iamiface"
-	"github.com/aws/aws-sdk-go/service/route53"
-	"github.com/aws/aws-sdk-go/service/route53/route53iface"
-	"github.com/aws/aws-sdk-go/service/sts"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/arn"
+	"github.com/aws/aws-sdk-go-v2/aws/retry"
+	stscredsv2 "github.com/aws/aws-sdk-go-v2/credentials/stscreds"
+	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
+	autoscalingtypes "github.com/aws/aws-sdk-go-v2/service/autoscaling/types"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	elb "github.com/aws/aws-sdk-go-v2/service/elasticloadbalancing"
+	elbtypes "github.com/aws/aws-sdk-go-v2/service/elasticloadbalancing/types"
+	elbv2 "github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2"
+	elbv2types "github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2/types"
+	"github.com/aws/aws-sdk-go-v2/service/iam"
+	"github.com/aws/aws-sdk-go-v2/service/route53"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"k8s.io/klog/v2"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
+
 	"k8s.io/kops/dnsprovider/pkg/dnsprovider"
 	dnsproviderroute53 "k8s.io/kops/dnsprovider/pkg/dnsprovider/providers/aws/route53"
 	"k8s.io/kops/pkg/apis/kops"
@@ -60,31 +61,40 @@ import (
 	identity_aws "k8s.io/kops/pkg/nodeidentity/aws"
 	"k8s.io/kops/pkg/resources/spotinst"
 	"k8s.io/kops/upup/pkg/fi"
-	k8s_aws "k8s.io/legacy-cloud-providers/aws"
+	"k8s.io/kops/util/pkg/awsinterfaces"
 )
 
-// By default, aws-sdk-go only retries 3 times, which doesn't give
+// By default, aws-sdk-go-v2 only retries 3 times, which doesn't give
 // much time for exponential backoff to work for serious issues. At 13
 // retries, we'll try a given request for up to ~6m with exponential
 // backoff along the way.
 const ClientMaxRetries = 13
 
-const DescribeTagsMaxAttempts = 120
-const DescribeTagsRetryInterval = 2 * time.Second
-const DescribeTagsLogInterval = 10 // this is in "retry intervals"
+const (
+	DescribeTagsMaxAttempts   = 120
+	DescribeTagsRetryInterval = 2 * time.Second
+	DescribeTagsLogInterval   = 10 // this is in "retry intervals"
+)
 
-const CreateTagsMaxAttempts = 120
-const CreateTagsRetryInterval = 2 * time.Second
-const CreateTagsLogInterval = 10 // this is in "retry intervals"
+const (
+	CreateTagsMaxAttempts   = 120
+	CreateTagsRetryInterval = 2 * time.Second
+	CreateTagsLogInterval   = 10 // this is in "retry intervals"
+)
 
-const DeleteTagsMaxAttempts = 120
-const DeleteTagsRetryInterval = 2 * time.Second
-const DeleteTagsLogInterval = 10 // this is in "retry intervals"
+const (
+	DeleteTagsMaxAttempts   = 120
+	DeleteTagsRetryInterval = 2 * time.Second
+	DeleteTagsLogInterval   = 10 // this is in "retry intervals"
+)
 
-const TagClusterName = "KubernetesCluster"
-const TagNameRolePrefix = "k8s.io/role/"
-const TagNameEtcdClusterPrefix = "k8s.io/etcd/"
+const (
+	TagClusterName           = "KubernetesCluster"
+	TagNameRolePrefix        = "k8s.io/role/"
+	TagNameEtcdClusterPrefix = "k8s.io/etcd/"
+)
 
+const TagRoleControlPlane = "control-plane"
 const TagRoleMaster = "master"
 
 // TagNameKopsRole is the AWS tag used to identify the role an object plays for a cluster
@@ -93,38 +103,45 @@ const TagNameKopsRole = "kubernetes.io/kops/role"
 // TagNameClusterOwnershipPrefix is the AWS tag used for ownership
 const TagNameClusterOwnershipPrefix = "kubernetes.io/cluster/"
 
+// TagNameSubnetInternalELB is the well-known subnet tag that designates a subnet for internal load balancers.
+const TagNameSubnetInternalELB = "kubernetes.io/role/internal-elb"
+
+// TagNameSubnetPublicELB is the well-known subnet tag that designates a subnet for public load balancers.
+const TagNameSubnetPublicELB = "kubernetes.io/role/elb"
+
 const tagNameDetachedInstance = "kops.k8s.io/detached-from-asg"
 
 const (
-	WellKnownAccountAmazonLinux2 = "137112412989"
-	WellKnownAccountCentOS       = "125523088429"
-	WellKnownAccountCoreOS       = "595879546273"
-	WellKnownAccountDebian       = "136693071363"
-	WellKnownAccountDebian9      = "379101102735"
-	WellKnownAccountFlatcar      = "075585003325"
-	WellKnownAccountKopeio       = "383156758163"
-	WellKnownAccountRedhat       = "309956199498"
-	WellKnownAccountUbuntu       = "099720109477"
+	WellKnownAccountAmazonLinux2023 = "137112412989"
+	WellKnownAccountDebian          = "136693071363"
+	WellKnownAccountFlatcar         = "075585003325"
+	WellKnownAccountRedhat          = "309956199498"
+	WellKnownAccountUbuntu          = "099720109477"
+	WellKnownAccountRockyLinux      = "792107900819"
 )
+
+const instanceInServiceState = "InService"
+
+// AWSErrCodeInvalidAction is returned in AWS partitions that don't support certain actions
+const AWSErrCodeInvalidAction = "InvalidAction"
 
 type AWSCloud interface {
 	fi.Cloud
-
-	CloudFormation() *cloudformation.CloudFormation
-	EC2() ec2iface.EC2API
-	IAM() iamiface.IAMAPI
-	ELB() elbiface.ELBAPI
-	ELBV2() elbv2iface.ELBV2API
-	Autoscaling() autoscalingiface.AutoScalingAPI
-	Route53() route53iface.Route53API
+	Config() aws.Config
+	EC2() awsinterfaces.EC2API
+	IAM() awsinterfaces.IAMAPI
+	ELB() awsinterfaces.ELBAPI
+	ELBV2() awsinterfaces.ELBV2API
+	Autoscaling() awsinterfaces.AutoScalingAPI
+	Route53() awsinterfaces.Route53API
 	Spotinst() spotinst.Cloud
-
-	SQS() sqsiface.SQSAPI
-	EventBridge() eventbridgeiface.EventBridgeAPI
+	SQS() awsinterfaces.SQSAPI
+	EventBridge() awsinterfaces.EventBridgeAPI
+	SSM() awsinterfaces.SSMAPI
 
 	// TODO: Document and rationalize these tags/filters methods
 	AddTags(name *string, tags map[string]string)
-	BuildFilters(name *string) []*ec2.Filter
+	BuildFilters(name *string) []ec2types.Filter
 	BuildTags(name *string) map[string]string
 	Tags() map[string]string
 
@@ -136,37 +153,28 @@ type AWSCloud interface {
 	DeleteTags(resourceId string, tags map[string]string) error
 	// UpdateTags will update tags of the specified resource to match tags, using getTags(), createTags() and deleteTags()
 	UpdateTags(resourceId string, tags map[string]string) error
-
 	AddAWSTags(id string, expected map[string]string) error
-	GetELBTags(loadBalancerName string) (map[string]string, error)
 	GetELBV2Tags(ResourceArn string) (map[string]string, error)
 
-	// CreateELBTags will add tags to the specified loadBalancer, retrying up to MaxCreateTagsAttempts times if it hits an eventual-consistency type error
-	CreateELBTags(loadBalancerName string, tags map[string]string) error
 	CreateELBV2Tags(ResourceArn string, tags map[string]string) error
-	// RemoveELBTags will remove tags from the specified loadBalancer, retrying up to MaxCreateTagsAttempts times if it hits an eventual-consistency type error
-	RemoveELBTags(loadBalancerName string, tags map[string]string) error
 	RemoveELBV2Tags(ResourceArn string, tags map[string]string) error
-
-	FindELBByNameTag(findNameTag string) (*elb.LoadBalancerDescription, error)
-	DescribeELBTags(loadBalancerNames []string) (map[string][]*elb.Tag, error)
-	FindELBV2ByNameTag(findNameTag string) (*elbv2.LoadBalancer, error)
-	DescribeELBV2Tags(loadBalancerNames []string) (map[string][]*elbv2.Tag, error)
+	// TODO: Remove, replace with awsup.ListELBV2LoadBalancers
+	DescribeELBV2Tags(loadBalancerNames []string) (map[string][]elbv2types.Tag, error)
+	FindELBV2NetworkInterfacesByName(vpcID string, loadBalancerName string) ([]ec2types.NetworkInterface, error)
 
 	// DescribeInstance is a helper that queries for the specified instance by id
-	DescribeInstance(instanceID string) (*ec2.Instance, error)
+	DescribeInstance(instanceID string) (*ec2types.Instance, error)
 
 	// DescribeVPC is a helper that queries for the specified vpc by id
-	DescribeVPC(vpcID string) (*ec2.Vpc, error)
-
-	DescribeAvailabilityZones() ([]*ec2.AvailabilityZone, error)
+	DescribeVPC(vpcID string) (*ec2types.Vpc, error)
+	DescribeAvailabilityZones() ([]ec2types.AvailabilityZone, error)
 
 	// ResolveImage finds an AMI image based on the given name.
 	// The name can be one of:
 	// `ami-...` in which case it is presumed to be an id
 	// owner/name in which case we find the image with the specified name, owned by owner
 	// name in which case we find the image with the specified name, with the current owner
-	ResolveImage(name string) (*ec2.Image, error)
+	ResolveImage(name string) (*ec2types.Image, error)
 
 	// WithTags created a copy of AWSCloud with the specified default-tags bound
 	WithTags(tags map[string]string) AWSCloud
@@ -175,45 +183,51 @@ type AWSCloud interface {
 	DefaultInstanceType(cluster *kops.Cluster, ig *kops.InstanceGroup) (string, error)
 
 	// DescribeInstanceType calls ec2.DescribeInstanceType to get information for a particular instance type
-	DescribeInstanceType(instanceType string) (*ec2.InstanceTypeInfo, error)
+	DescribeInstanceType(instanceType string) (*ec2types.InstanceTypeInfo, error)
 
 	// AccountInfo returns the AWS account ID and AWS partition that we are deploying into
-	AccountInfo() (string, string, error)
+	AccountInfo(ctx context.Context) (string, string, error)
+}
+
+// GetCloud returns the AWSCloud in the CloudupContext.
+// It panics if the CloudupContext has not been initialized with an AWSCloud.
+func GetCloud(c *fi.CloudupContext) AWSCloud {
+	awsCloud, ok := c.T.Cloud.(AWSCloud)
+	if ok {
+		return awsCloud
+	}
+	klog.Fatalf("cannot find instance of AWSCloud in context")
+	return nil
 }
 
 type awsCloudImplementation struct {
-	cf          *cloudformation.CloudFormation
-	ec2         *ec2.EC2
-	iam         *iam.IAM
-	elb         *elb.ELB
-	elbv2       *elbv2.ELBV2
-	autoscaling *autoscaling.AutoScaling
-	route53     *route53.Route53
+	ec2         *ec2.Client
+	iam         *iam.Client
+	elb         *elb.Client
+	elbv2       *elbv2.Client
+	autoscaling *autoscaling.Client
+	route53     *route53.Client
 	spotinst    spotinst.Cloud
-	sts         *sts.STS
-	sqs         *sqs.SQS
-	eventbridge *eventbridge.EventBridge
+	sts         *sts.Client
+	sqs         *sqs.Client
+	eventbridge *eventbridge.Client
+	ssm         *ssm.Client
 
 	region string
 
 	tags map[string]string
 
-	regionDelayers *RegionDelayers
-
 	instanceTypes *instanceTypes
-}
 
-type RegionDelayers struct {
-	mutex      sync.Mutex
-	delayerMap map[string]*k8s_aws.CrossRequestRetryDelay
+	config aws.Config
 }
 
 type instanceTypes struct {
 	mutex   sync.Mutex
-	typeMap map[string]*ec2.InstanceTypeInfo
+	typeMap map[string]*ec2types.InstanceTypeInfo
 }
 
-var _ fi.Cloud = &awsCloudImplementation{}
+var _ fi.Cloud = (*awsCloudImplementation)(nil)
 
 func (c *awsCloudImplementation) ProviderID() kops.CloudProviderID {
 	return kops.CloudProviderAWS
@@ -223,125 +237,99 @@ func (c *awsCloudImplementation) Region() string {
 	return c.region
 }
 
-var awsCloudInstances map[string]AWSCloud = make(map[string]AWSCloud)
+type awsCloudInstancesRegionMap struct {
+	mutex     sync.Mutex
+	regionMap map[string]AWSCloud
+}
+
+func newAwsCloudInstancesRegionMap() *awsCloudInstancesRegionMap {
+	return &awsCloudInstancesRegionMap{
+		regionMap: make(map[string]AWSCloud),
+	}
+}
+
+var awsCloudInstances *awsCloudInstancesRegionMap = newAwsCloudInstancesRegionMap()
+
+func ResetAWSCloudInstances() {
+	awsCloudInstances.mutex.Lock()
+	awsCloudInstances.regionMap = make(map[string]AWSCloud)
+	awsCloudInstances.mutex.Unlock()
+}
+
+func updateAwsCloudInstances(region string, cloud AWSCloud) {
+	awsCloudInstances.mutex.Lock()
+	awsCloudInstances.regionMap[region] = cloud
+	awsCloudInstances.mutex.Unlock()
+}
+
+func getCloudInstancesFromRegion(region string) AWSCloud {
+	awsCloudInstances.mutex.Lock()
+	defer awsCloudInstances.mutex.Unlock()
+
+	cloud, ok := awsCloudInstances.regionMap[region]
+	if !ok {
+		return nil
+	}
+
+	return cloud
+}
+
+func loadAWSConfig(ctx context.Context, region string) (aws.Config, error) {
+	loadOptions := []func(*awsconfig.LoadOptions) error{
+		awsconfig.WithRegion(region),
+		awsconfig.WithClientLogMode(aws.LogRetries),
+		awsconfig.WithLogger(awsLogger{}),
+		awsconfig.WithRetryer(func() aws.Retryer {
+			return retry.NewAdaptiveMode(func(ao *retry.AdaptiveModeOptions) {
+				ao.StandardOptions = append(ao.StandardOptions, func(so *retry.StandardOptions) {
+					so.MaxAttempts = ClientMaxRetries
+				})
+			})
+		}),
+	}
+
+	// assumes the role before executing commands
+	roleARN := os.Getenv("KOPS_AWS_ROLE_ARN")
+	if roleARN != "" {
+		cfg, err := awsconfig.LoadDefaultConfig(ctx, loadOptions...)
+		if err != nil {
+			return aws.Config{}, fmt.Errorf("failed to load default aws config: %w", err)
+		}
+		stsClient := sts.NewFromConfig(cfg)
+		assumeRoleProvider := stscredsv2.NewAssumeRoleProvider(stsClient, roleARN)
+
+		loadOptions = append(loadOptions, awsconfig.WithCredentialsProvider(assumeRoleProvider))
+	}
+
+	return awsconfig.LoadDefaultConfig(ctx, loadOptions...)
+}
 
 func NewAWSCloud(region string, tags map[string]string) (AWSCloud, error) {
-	raw := awsCloudInstances[region]
+	ctx := context.TODO()
+	raw := getCloudInstancesFromRegion(region)
+
 	if raw == nil {
 		c := &awsCloudImplementation{
 			region: region,
-			regionDelayers: &RegionDelayers{
-				delayerMap: make(map[string]*k8s_aws.CrossRequestRetryDelay),
-			},
 			instanceTypes: &instanceTypes{
-				typeMap: make(map[string]*ec2.InstanceTypeInfo),
+				typeMap: make(map[string]*ec2types.InstanceTypeInfo),
 			},
 		}
 
-		config := aws.NewConfig().WithRegion(region)
-
-		// This avoids a confusing error message when we fail to get credentials
-		// e.g. https://github.com/kubernetes/kops/issues/605
-		config = config.WithCredentialsChainVerboseErrors(true)
-		config = request.WithRetryer(config, newLoggingRetryer(ClientMaxRetries))
-
-		// We have the updated aws sdk from 1.9, but don't have https://github.com/kubernetes/kubernetes/pull/55307
-		// Set the SleepDelay function to work around this
-		// TODO: Remove once we update to k8s >= 1.9 (or a version of the retry delayer than includes this)
-		config.SleepDelay = func(d time.Duration) {
-			klog.V(6).Infof("aws request sleeping for %v", d)
-			time.Sleep(d)
-		}
-
-		requestLogger := newRequestLogger(2)
-
-		sess, err := session.NewSessionWithOptions(session.Options{
-			Config:            *config,
-			SharedConfigState: session.SharedConfigEnable,
-		})
+		cfg, err := loadAWSConfig(ctx, region)
 		if err != nil {
-			return c, err
+			return c, fmt.Errorf("failed to load default aws config: %w", err)
 		}
-		c.cf = cloudformation.New(sess, config)
-		c.cf.Handlers.Send.PushFront(requestLogger)
-		c.addHandlers(region, &c.cf.Handlers)
 
-		sess, err = session.NewSessionWithOptions(session.Options{
-			Config:            *config,
-			SharedConfigState: session.SharedConfigEnable,
-		})
-		if err != nil {
-			return c, err
-		}
-		c.ec2 = ec2.New(sess, config)
-		c.ec2.Handlers.Send.PushFront(requestLogger)
-		c.addHandlers(region, &c.ec2.Handlers)
+		c.config = cfg
 
-		sess, err = session.NewSessionWithOptions(session.Options{
-			Config:            *config,
-			SharedConfigState: session.SharedConfigEnable,
-		})
-		if err != nil {
-			return c, err
-		}
-		c.iam = iam.New(sess, config)
-		c.iam.Handlers.Send.PushFront(requestLogger)
-		c.addHandlers(region, &c.iam.Handlers)
-
-		sess, err = session.NewSessionWithOptions(session.Options{
-			Config:            *config,
-			SharedConfigState: session.SharedConfigEnable,
-		})
-		if err != nil {
-			return c, err
-		}
-		c.elb = elb.New(sess, config)
-		c.elb.Handlers.Send.PushFront(requestLogger)
-		c.addHandlers(region, &c.elb.Handlers)
-
-		sess, err = session.NewSessionWithOptions(session.Options{
-			Config:            *config,
-			SharedConfigState: session.SharedConfigEnable,
-		})
-		if err != nil {
-			return c, err
-		}
-		c.elbv2 = elbv2.New(sess, config)
-		c.elbv2.Handlers.Send.PushFront(requestLogger)
-		c.addHandlers(region, &c.elbv2.Handlers)
-
-		sess, err = session.NewSessionWithOptions(session.Options{
-			Config:            *config,
-			SharedConfigState: session.SharedConfigEnable,
-		})
-		if err != nil {
-			return c, err
-		}
-		c.sts = sts.New(sess, config)
-		c.sts.Handlers.Send.PushFront(requestLogger)
-		c.addHandlers(region, &c.sts.Handlers)
-
-		sess, err = session.NewSessionWithOptions(session.Options{
-			Config:            *config,
-			SharedConfigState: session.SharedConfigEnable,
-		})
-		if err != nil {
-			return c, err
-		}
-		c.autoscaling = autoscaling.New(sess, config)
-		c.autoscaling.Handlers.Send.PushFront(requestLogger)
-		c.addHandlers(region, &c.autoscaling.Handlers)
-
-		sess, err = session.NewSessionWithOptions(session.Options{
-			Config:            *config,
-			SharedConfigState: session.SharedConfigEnable,
-		})
-		if err != nil {
-			return c, err
-		}
-		c.route53 = route53.New(sess, config)
-		c.route53.Handlers.Send.PushFront(requestLogger)
-		c.addHandlers(region, &c.route53.Handlers)
+		c.ec2 = ec2.NewFromConfig(cfg)
+		c.iam = iam.NewFromConfig(cfg)
+		c.elb = elb.NewFromConfig(cfg)
+		c.elbv2 = elbv2.NewFromConfig(cfg)
+		c.sts = sts.NewFromConfig(cfg)
+		c.autoscaling = autoscaling.NewFromConfig(cfg)
+		c.route53 = route53.NewFromConfig(cfg)
 
 		if featureflag.Spotinst.Enabled() {
 			c.spotinst, err = spotinst.NewCloud(kops.CloudProviderAWS)
@@ -350,29 +338,12 @@ func NewAWSCloud(region string, tags map[string]string) (AWSCloud, error) {
 			}
 		}
 
-		sess, err = session.NewSessionWithOptions(session.Options{
-			Config:            *config,
-			SharedConfigState: session.SharedConfigEnable,
-		})
-		if err != nil {
-			return c, err
-		}
-		c.sqs = sqs.New(sess, config)
-		c.sqs.Handlers.Send.PushFront(requestLogger)
-		c.addHandlers(region, &c.sqs.Handlers)
+		c.sqs = sqs.NewFromConfig(cfg)
+		c.eventbridge = eventbridge.NewFromConfig(cfg)
+		c.ssm = ssm.NewFromConfig(cfg)
 
-		sess, err = session.NewSessionWithOptions(session.Options{
-			Config:            *config,
-			SharedConfigState: session.SharedConfigEnable,
-		})
-		if err != nil {
-			return c, err
-		}
-		c.eventbridge = eventbridge.New(sess, config)
-		c.eventbridge.Handlers.Send.PushFront(requestLogger)
-		c.addHandlers(region, &c.eventbridge.Handlers)
+		updateAwsCloudInstances(region, c)
 
-		awsCloudInstances[region] = c
 		raw = c
 	}
 
@@ -381,83 +352,52 @@ func NewAWSCloud(region string, tags map[string]string) (AWSCloud, error) {
 	return i, nil
 }
 
-func (c *awsCloudImplementation) addHandlers(regionName string, h *request.Handlers) {
-
-	delayer := c.getCrossRequestRetryDelay(regionName)
-	if delayer != nil {
-		h.Sign.PushFrontNamed(request.NamedHandler{
-			Name: "kops/delay-presign",
-			Fn:   delayer.BeforeSign,
-		})
-
-		h.AfterRetry.PushFrontNamed(request.NamedHandler{
-			Name: "kops/delay-afterretry",
-			Fn:   delayer.AfterRetry,
-		})
-	}
+func (c *awsCloudImplementation) Config() aws.Config {
+	return c.config
 }
 
-// Get a CrossRequestRetryDelay, scoped to the region, not to the request.
-// This means that when we hit a limit on a call, we will delay _all_ calls to the API.
-// We do this to protect the AWS account from becoming overloaded and effectively locked.
-// We also log when we hit request limits.
-// Note that this delays the current goroutine; this is bad behaviour and will
-// likely cause kops to become slow or unresponsive for cloud operations.
-// However, this throttle is intended only as a last resort.  When we observe
-// this throttling, we need to address the root cause (e.g. add a delay to a
-// controller retry loop)
-func (c *awsCloudImplementation) getCrossRequestRetryDelay(regionName string) *k8s_aws.CrossRequestRetryDelay {
-	c.regionDelayers.mutex.Lock()
-	defer c.regionDelayers.mutex.Unlock()
-
-	delayer, found := c.regionDelayers.delayerMap[regionName]
-	if !found {
-		delayer = k8s_aws.NewCrossRequestRetryDelay()
-		c.regionDelayers.delayerMap[regionName] = delayer
-	}
-	return delayer
-}
-
-func NewEC2Filter(name string, values ...string) *ec2.Filter {
-	awsValues := []*string{}
-	for _, value := range values {
-		awsValues = append(awsValues, aws.String(value))
-	}
-	filter := &ec2.Filter{
+func NewEC2Filter(name string, values ...string) ec2types.Filter {
+	filter := ec2types.Filter{
 		Name:   aws.String(name),
-		Values: awsValues,
+		Values: values,
 	}
 	return filter
 }
 
 // DeleteGroup deletes an aws autoscaling group
 func (c *awsCloudImplementation) DeleteGroup(g *cloudinstances.CloudInstanceGroup) error {
+	ctx := context.TODO()
+
+	if g.InstanceGroup != nil && g.InstanceGroup.Spec.Manager == kops.InstanceManagerKarpenter {
+		return nil
+	}
+
 	if c.spotinst != nil {
 		if featureflag.SpotinstHybrid.Enabled() {
-			if _, ok := g.Raw.(*autoscaling.Group); ok {
-				return deleteGroup(c, g)
+			if _, ok := g.Raw.(*autoscalingtypes.AutoScalingGroup); ok {
+				return deleteGroup(ctx, c, g)
 			}
 		}
 
 		return spotinst.DeleteInstanceGroup(c.spotinst, g)
 	}
 
-	return deleteGroup(c, g)
+	return deleteGroup(ctx, c, g)
 }
 
-func deleteGroup(c AWSCloud, g *cloudinstances.CloudInstanceGroup) error {
-	asg := g.Raw.(*autoscaling.Group)
+func deleteGroup(ctx context.Context, c AWSCloud, g *cloudinstances.CloudInstanceGroup) error {
+	asg := g.Raw.(*autoscalingtypes.AutoScalingGroup)
 
-	name := aws.StringValue(asg.AutoScalingGroupName)
-	template := aws.StringValue(asg.LaunchConfigurationName)
+	name := aws.ToString(asg.AutoScalingGroupName)
+	template := aws.ToString(asg.LaunchConfigurationName)
 	launchTemplate := ""
 	if asg.LaunchTemplate != nil {
-		launchTemplate = aws.StringValue(asg.LaunchTemplate.LaunchTemplateName)
+		launchTemplate = aws.ToString(asg.LaunchTemplate.LaunchTemplateName)
 	}
 
 	// Delete detached instances
 	{
-		detached, err := findDetachedInstances(c, asg)
+		detached, err := findDetachedInstances(ctx, c, asg)
 		if err != nil {
 			return fmt.Errorf("error searching for detached instances for autoscaling group %q: %v", name, err)
 		}
@@ -466,7 +406,7 @@ func deleteGroup(c AWSCloud, g *cloudinstances.CloudInstanceGroup) error {
 			req := &ec2.TerminateInstancesInput{
 				InstanceIds: detached,
 			}
-			if _, err := c.EC2().TerminateInstances(req); err != nil {
+			if _, err := c.EC2().TerminateInstances(ctx, req); err != nil {
 				return fmt.Errorf("error deleting detached instances for autoscaling group %q: %v", name, err)
 			}
 		}
@@ -479,7 +419,7 @@ func deleteGroup(c AWSCloud, g *cloudinstances.CloudInstanceGroup) error {
 			AutoScalingGroupName: aws.String(name),
 			ForceDelete:          aws.Bool(true),
 		}
-		_, err := c.Autoscaling().DeleteAutoScalingGroup(request)
+		_, err := c.Autoscaling().DeleteAutoScalingGroup(ctx, request)
 		if err != nil {
 			return fmt.Errorf("error deleting autoscaling group %q: %v", name, err)
 		}
@@ -493,7 +433,7 @@ func deleteGroup(c AWSCloud, g *cloudinstances.CloudInstanceGroup) error {
 			req := &ec2.DeleteLaunchTemplateInput{
 				LaunchTemplateName: aws.String(launchTemplate),
 			}
-			_, err := c.EC2().DeleteLaunchTemplate(req)
+			_, err := c.EC2().DeleteLaunchTemplate(ctx, req)
 			if err != nil {
 				return fmt.Errorf("error deleting autoscaling launch template %q: %v", launchTemplate, err)
 			}
@@ -505,7 +445,7 @@ func deleteGroup(c AWSCloud, g *cloudinstances.CloudInstanceGroup) error {
 			request := &autoscaling.DeleteLaunchConfigurationInput{
 				LaunchConfigurationName: aws.String(template),
 			}
-			_, err := c.Autoscaling().DeleteLaunchConfiguration(request)
+			_, err := c.Autoscaling().DeleteLaunchConfiguration(ctx, request)
 			if err != nil {
 				return fmt.Errorf("error deleting autoscaling launch configuration %q: %v", template, err)
 			}
@@ -519,30 +459,47 @@ func deleteGroup(c AWSCloud, g *cloudinstances.CloudInstanceGroup) error {
 
 // DeleteInstance deletes an aws instance
 func (c *awsCloudImplementation) DeleteInstance(i *cloudinstances.CloudInstance) error {
+	ctx := context.TODO()
 	if c.spotinst != nil {
 		if featureflag.SpotinstHybrid.Enabled() {
-			if _, ok := i.CloudInstanceGroup.Raw.(*autoscaling.Group); ok {
-				return deleteInstance(c, i)
+			if _, ok := i.CloudInstanceGroup.Raw.(*autoscalingtypes.AutoScalingGroup); ok {
+				return deleteInstance(ctx, c, i)
 			}
 		}
 
 		return spotinst.DeleteInstance(c.spotinst, i)
 	}
 
-	return deleteInstance(c, i)
+	return deleteInstance(ctx, c, i)
 }
 
-func deleteInstance(c AWSCloud, i *cloudinstances.CloudInstance) error {
+// DeregisterInstance drains a cloud instance and load balancers.
+func (c *awsCloudImplementation) DeregisterInstance(i *cloudinstances.CloudInstance) error {
+	ctx := context.TODO()
+
+	if c.spotinst != nil || i.CloudInstanceGroup.InstanceGroup.Spec.Manager == kops.InstanceManagerKarpenter {
+		return nil
+	}
+
+	err := deregisterInstance(ctx, c, i)
+	if err != nil {
+		return fmt.Errorf("failed to deregister instance from loadBalancer before terminating: %v", err)
+	}
+
+	return nil
+}
+
+func deleteInstance(ctx context.Context, c AWSCloud, i *cloudinstances.CloudInstance) error {
 	id := i.ID
 	if id == "" {
 		return fmt.Errorf("id was not set on CloudInstance: %v", i)
 	}
 
 	request := &ec2.TerminateInstancesInput{
-		InstanceIds: []*string{aws.String(id)},
+		InstanceIds: []string{id},
 	}
 
-	if _, err := c.EC2().TerminateInstances(request); err != nil {
+	if _, err := c.EC2().TerminateInstances(ctx, request); err != nil {
 		if AWSErrorCode(err) == "InvalidInstanceID.NotFound" {
 			klog.V(2).Infof("Got InvalidInstanceID.NotFound error deleting instance %q; will treat as already-deleted", id)
 		} else {
@@ -555,8 +512,158 @@ func deleteInstance(c AWSCloud, i *cloudinstances.CloudInstance) error {
 	return nil
 }
 
+// deregisterInstance ensures that the instance is fully drained/removed from all associated loadBalancers and targetGroups before termination.
+func deregisterInstance(ctx context.Context, c AWSCloud, i *cloudinstances.CloudInstance) error {
+	asg := i.CloudInstanceGroup.Raw.(*autoscalingtypes.AutoScalingGroup)
+
+	asgDetails, err := c.Autoscaling().DescribeAutoScalingGroups(ctx, &autoscaling.DescribeAutoScalingGroupsInput{
+		AutoScalingGroupNames: []string{aws.ToString(asg.AutoScalingGroupName)},
+	})
+	if err != nil {
+		return fmt.Errorf("error describing autoScalingGroups: %v", err)
+	}
+
+	if len(asgDetails.AutoScalingGroups) == 0 {
+		return nil
+	}
+
+	// there will always be only one ASG in the DescribeAutoScalingGroups response.
+	loadBalancerNames := asgDetails.AutoScalingGroups[0].LoadBalancerNames
+	targetGroupArns := asgDetails.AutoScalingGroups[0].TargetGroupARNs
+
+	eg, _ := errgroup.WithContext(context.Background())
+
+	if len(loadBalancerNames) != 0 {
+		eg.Go(func() error {
+			return deregisterInstanceFromClassicLoadBalancer(ctx, c, loadBalancerNames, i.ID)
+		})
+	}
+
+	if len(targetGroupArns) != 0 {
+		eg.Go(func() error {
+			return deregisterInstanceFromTargetGroups(ctx, c, targetGroupArns, i.ID)
+		})
+	}
+
+	if err := eg.Wait(); err != nil {
+		return fmt.Errorf("failed to deregister instance from load balancers: %v", err)
+	}
+
+	return nil
+}
+
+// deregisterInstanceFromClassicLoadBalancer ensures that connectionDraining completes for the associated classic loadBalancer to ensure no dropped connections.
+func deregisterInstanceFromClassicLoadBalancer(ctx context.Context, c AWSCloud, loadBalancerNames []string, instanceId string) error {
+	klog.Infof("Deregistering instance from classic loadBalancers: %v", loadBalancerNames)
+
+	for {
+		instanceDraining := false
+		for _, loadBalancerName := range loadBalancerNames {
+			response, err := c.ELB().DescribeInstanceHealth(ctx, &elb.DescribeInstanceHealthInput{
+				LoadBalancerName: aws.String(loadBalancerName),
+				Instances: []elbtypes.Instance{{
+					InstanceId: aws.String(instanceId),
+				}},
+			})
+			if err != nil {
+				return fmt.Errorf("error describing instance health: %v", err)
+			}
+
+			// describeInstanceHealth can return an empty list if the instance was already terminated.
+			if len(response.InstanceStates) == 0 {
+				continue
+			}
+
+			// there will be only one instance in the DescribeInstanceHealth response.
+			if aws.ToString(response.InstanceStates[0].State) == instanceInServiceState {
+				c.ELB().DeregisterInstancesFromLoadBalancer(ctx, &elb.DeregisterInstancesFromLoadBalancerInput{
+					LoadBalancerName: aws.String(loadBalancerName),
+					Instances: []elbtypes.Instance{{
+						InstanceId: aws.String(instanceId),
+					}},
+				})
+				instanceDraining = true
+			}
+		}
+
+		if !instanceDraining {
+			break
+		}
+
+		time.Sleep(5 * time.Second)
+	}
+	return nil
+}
+
+// deregisterInstanceFromTargetGroups ensures that instances are fully unused in the corresponding targetGroups before instance termination.
+// this ensures that connections are fully drained from the instance before terminating.
+func deregisterInstanceFromTargetGroups(ctx context.Context, c AWSCloud, targetGroupArns []string, instanceId string) error {
+	eg, _ := errgroup.WithContext(context.Background())
+
+	for _, targetGroupArn := range targetGroupArns {
+		arn := targetGroupArn
+		eg.Go(func() error {
+			return deregisterInstanceFromTargetGroup(ctx, c, arn, instanceId)
+		})
+	}
+
+	if err := eg.Wait(); err != nil {
+		return fmt.Errorf("failed to register instance from targetGroups: %w", err)
+	}
+
+	return nil
+}
+
+func deregisterInstanceFromTargetGroup(ctx context.Context, c AWSCloud, targetGroupArn string, instanceId string) error {
+	klog.Infof("Deregistering instance from targetGroup: %s", targetGroupArn)
+
+	for {
+		instanceDraining := false
+
+		response, err := c.ELBV2().DescribeTargetHealth(ctx, &elbv2.DescribeTargetHealthInput{
+			TargetGroupArn: aws.String(targetGroupArn),
+			Targets: []elbv2types.TargetDescription{{
+				Id: aws.String(instanceId),
+			}},
+		})
+		if err != nil {
+			return fmt.Errorf("error describing target health: %w", err)
+		}
+
+		// there will be only one target in the DescribeTargetHealth response.
+		// DescribeTargetHealth response will contain a target even if the targetId doesn't exist.
+		// all other states besides TargetHealthStateUnused means that the instance may still be serving traffic.
+		if response.TargetHealthDescriptions[0].TargetHealth.State != elbv2types.TargetHealthStateEnumUnused {
+			_, err = c.ELBV2().DeregisterTargets(ctx, &elbv2.DeregisterTargetsInput{
+				TargetGroupArn: aws.String(targetGroupArn),
+				Targets: []elbv2types.TargetDescription{{
+					Id: aws.String(instanceId),
+				}},
+			})
+
+			if err != nil {
+				return fmt.Errorf("error deregistering target: %w", err)
+			}
+
+			instanceDraining = true
+		}
+
+		if !instanceDraining {
+			break
+		}
+
+		time.Sleep(5 * time.Second)
+	}
+
+	klog.Infof("Successfully drained instance from targetGroup: %s", targetGroupArn)
+
+	return nil
+}
+
 // DetachInstance causes an aws instance to no longer be counted against the ASG's size limits.
 func (c *awsCloudImplementation) DetachInstance(i *cloudinstances.CloudInstance) error {
+	ctx := context.TODO()
+
 	if i.Status == cloudinstances.CloudInstanceStatusDetached {
 		return nil
 	}
@@ -564,16 +671,16 @@ func (c *awsCloudImplementation) DetachInstance(i *cloudinstances.CloudInstance)
 		return spotinst.DetachInstance(c.spotinst, i)
 	}
 
-	return detachInstance(c, i)
+	return detachInstance(ctx, c, i)
 }
 
-func detachInstance(c AWSCloud, i *cloudinstances.CloudInstance) error {
+func detachInstance(ctx context.Context, c AWSCloud, i *cloudinstances.CloudInstance) error {
 	id := i.ID
 	if id == "" {
 		return fmt.Errorf("id was not set on CloudInstance: %v", i)
 	}
 
-	asg := i.CloudInstanceGroup.Raw.(*autoscaling.Group)
+	asg := i.CloudInstanceGroup.Raw.(*autoscalingtypes.AutoScalingGroup)
 	if err := c.CreateTags(id, map[string]string{tagNameDetachedInstance: *asg.AutoScalingGroupName}); err != nil {
 		return fmt.Errorf("error tagging instance %q: %v", id, err)
 	}
@@ -582,11 +689,11 @@ func detachInstance(c AWSCloud, i *cloudinstances.CloudInstance) error {
 
 	input := &autoscaling.DetachInstancesInput{
 		AutoScalingGroupName:           aws.String(i.CloudInstanceGroup.HumanName),
-		InstanceIds:                    []*string{aws.String(id)},
+		InstanceIds:                    []string{id},
 		ShouldDecrementDesiredCapacity: aws.Bool(false),
 	}
 
-	if _, err := c.Autoscaling().DetachInstances(input); err != nil {
+	if _, err := c.Autoscaling().DetachInstances(ctx, input); err != nil {
 		return fmt.Errorf("error detaching instance %q: %v", id, err)
 	}
 
@@ -597,6 +704,8 @@ func detachInstance(c AWSCloud, i *cloudinstances.CloudInstance) error {
 
 // GetCloudGroups returns a groups of instances that back a kops instance groups
 func (c *awsCloudImplementation) GetCloudGroups(cluster *kops.Cluster, instancegroups []*kops.InstanceGroup, warnUnmatched bool, nodes []v1.Node) (map[string]*cloudinstances.CloudInstanceGroup, error) {
+	ctx := context.TODO()
+
 	if c.spotinst != nil {
 		sgroups, err := spotinst.GetCloudGroups(c.spotinst, cluster, instancegroups, warnUnmatched, nodes)
 		if err != nil {
@@ -604,7 +713,7 @@ func (c *awsCloudImplementation) GetCloudGroups(cluster *kops.Cluster, instanceg
 		}
 
 		if featureflag.SpotinstHybrid.Enabled() {
-			agroups, err := getCloudGroups(c, cluster, instancegroups, warnUnmatched, nodes)
+			agroups, err := getCloudGroups(ctx, c, cluster, instancegroups, warnUnmatched, nodes)
 			if err != nil {
 				return nil, err
 			}
@@ -617,10 +726,71 @@ func (c *awsCloudImplementation) GetCloudGroups(cluster *kops.Cluster, instanceg
 		return sgroups, nil
 	}
 
-	return getCloudGroups(c, cluster, instancegroups, warnUnmatched, nodes)
+	cloudGroups, err := getCloudGroups(ctx, c, cluster, instancegroups, warnUnmatched, nodes)
+	if err != nil {
+		return nil, err
+	}
+	karpenterGroups, err := getKarpenterGroups(c, cluster, instancegroups, nodes)
+	if err != nil {
+		return nil, err
+	}
+
+	for name, group := range karpenterGroups {
+		cloudGroups[name] = group
+	}
+	return cloudGroups, nil
 }
 
-func getCloudGroups(c AWSCloud, cluster *kops.Cluster, instancegroups []*kops.InstanceGroup, warnUnmatched bool, nodes []v1.Node) (map[string]*cloudinstances.CloudInstanceGroup, error) {
+func getKarpenterGroups(c AWSCloud, cluster *kops.Cluster, instancegroups []*kops.InstanceGroup, nodes []v1.Node) (map[string]*cloudinstances.CloudInstanceGroup, error) {
+	cloudGroups := make(map[string]*cloudinstances.CloudInstanceGroup)
+	for _, ig := range instancegroups {
+		if ig.Spec.Manager == kops.InstanceManagerKarpenter {
+			group, err := buildKarpenterGroup(c, cluster, ig, nodes)
+			if err != nil {
+				return nil, err
+			}
+			cloudGroups[ig.ObjectMeta.Name] = group
+		}
+	}
+	return cloudGroups, nil
+}
+
+func buildKarpenterGroup(c AWSCloud, cluster *kops.Cluster, ig *kops.InstanceGroup, nodes []v1.Node) (*cloudinstances.CloudInstanceGroup, error) {
+	ctx := context.TODO()
+	nodeMap := cloudinstances.GetNodeMap(nodes, cluster)
+	clusterName := c.Tags()[TagClusterName]
+
+	karpenterGroup := &cloudinstances.CloudInstanceGroup{
+		InstanceGroup: ig,
+		HumanName:     ig.ObjectMeta.Name,
+	}
+	{
+		req := &ec2.DescribeInstancesInput{
+			Filters: []ec2types.Filter{
+				NewEC2Filter("tag:"+identity_aws.CloudTagInstanceGroupName, ig.ObjectMeta.Name),
+				NewEC2Filter("tag:"+TagClusterName, clusterName),
+				NewEC2Filter("instance-state-name", "pending", "running", "stopping", "stopped"),
+			},
+		}
+
+		result, err := c.EC2().DescribeInstances(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, r := range result.Reservations {
+			for _, i := range r.Instances {
+				id := aws.ToString(i.InstanceId)
+				cloudInstance, _ := karpenterGroup.NewCloudInstance(aws.ToString(i.InstanceId), cloudinstances.CloudInstanceStatusUpToDate, nodeMap[id])
+				addCloudInstanceData(cloudInstance, &i)
+			}
+		}
+	}
+
+	return karpenterGroup, nil
+}
+
+func getCloudGroups(ctx context.Context, c AWSCloud, cluster *kops.Cluster, instancegroups []*kops.InstanceGroup, warnUnmatched bool, nodes []v1.Node) (map[string]*cloudinstances.CloudInstanceGroup, error) {
 	nodeMap := cloudinstances.GetNodeMap(nodes, cluster)
 
 	groups := make(map[string]*cloudinstances.CloudInstanceGroup)
@@ -630,7 +800,7 @@ func getCloudGroups(c AWSCloud, cluster *kops.Cluster, instancegroups []*kops.In
 	}
 
 	for _, asg := range asgs {
-		name := aws.StringValue(asg.AutoScalingGroupName)
+		name := aws.ToString(asg.AutoScalingGroupName)
 
 		instancegroup, err := matchInstanceGroup(name, cluster.ObjectMeta.Name, instancegroups)
 		if err != nil {
@@ -643,50 +813,51 @@ func getCloudGroups(c AWSCloud, cluster *kops.Cluster, instancegroups []*kops.In
 			continue
 		}
 
-		groups[instancegroup.ObjectMeta.Name], err = awsBuildCloudInstanceGroup(c, cluster, instancegroup, asg, nodeMap)
+		groups[instancegroup.ObjectMeta.Name], err = awsBuildCloudInstanceGroup(ctx, c, cluster, instancegroup, asg, nodeMap)
 		if err != nil {
 			return nil, fmt.Errorf("error getting cloud instance group %q: %v", instancegroup.ObjectMeta.Name, err)
 		}
 	}
 
 	return groups, nil
-
 }
 
 // FindAutoscalingGroups finds autoscaling groups matching the specified tags
 // This isn't entirely trivial because autoscaling doesn't let us filter with as much precision as we would like
-func FindAutoscalingGroups(c AWSCloud, tags map[string]string) ([]*autoscaling.Group, error) {
-	var asgs []*autoscaling.Group
+func FindAutoscalingGroups(c AWSCloud, tags map[string]string) ([]*autoscalingtypes.AutoScalingGroup, error) {
+	ctx := context.TODO()
+
+	var asgs []*autoscalingtypes.AutoScalingGroup
 
 	klog.V(2).Infof("Listing all Autoscaling groups matching cluster tags")
-	var asgNames []*string
+	var asgNames []string
 	{
-		var asFilters []*autoscaling.Filter
+		var asFilters []autoscalingtypes.Filter
 		for _, v := range tags {
 			// Not an exact match, but likely the best we can do
-			asFilters = append(asFilters, &autoscaling.Filter{
+			asFilters = append(asFilters, autoscalingtypes.Filter{
 				Name:   aws.String("value"),
-				Values: []*string{aws.String(v)},
+				Values: []string{v},
 			})
 		}
 		request := &autoscaling.DescribeTagsInput{
 			Filters: asFilters,
 		}
 
-		err := c.Autoscaling().DescribeTagsPages(request, func(p *autoscaling.DescribeTagsOutput, lastPage bool) bool {
-			for _, t := range p.Tags {
+		paginator := autoscaling.NewDescribeTagsPaginator(c.Autoscaling(), request)
+		for paginator.HasMorePages() {
+			page, err := paginator.NextPage(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("error listing autoscaling cluster tags: %v", err)
+			}
+			for _, t := range page.Tags {
 				switch *t.ResourceType {
 				case "auto-scaling-group":
-					asgNames = append(asgNames, t.ResourceId)
+					asgNames = append(asgNames, aws.ToString(t.ResourceId))
 				default:
 					klog.Warningf("Unknown resource type: %v", *t.ResourceType)
-
 				}
 			}
-			return true
-		})
-		if err != nil {
-			return nil, fmt.Errorf("error listing autoscaling cluster tags: %v", err)
 		}
 	}
 
@@ -696,8 +867,13 @@ func FindAutoscalingGroups(c AWSCloud, tags map[string]string) ([]*autoscaling.G
 			request := &autoscaling.DescribeAutoScalingGroupsInput{
 				AutoScalingGroupNames: batch,
 			}
-			err := c.Autoscaling().DescribeAutoScalingGroupsPages(request, func(p *autoscaling.DescribeAutoScalingGroupsOutput, lastPage bool) bool {
-				for _, asg := range p.AutoScalingGroups {
+			paginator := autoscaling.NewDescribeAutoScalingGroupsPaginator(c.Autoscaling(), request)
+			for paginator.HasMorePages() {
+				page, err := paginator.NextPage(ctx)
+				if err != nil {
+					return nil, fmt.Errorf("error listing autoscaling groups: %v", err)
+				}
+				for _, asg := range page.AutoScalingGroups {
 					if !matchesAsgTags(tags, asg.Tags) {
 						// We used an inexact filter above
 						continue
@@ -707,15 +883,10 @@ func FindAutoscalingGroups(c AWSCloud, tags map[string]string) ([]*autoscaling.G
 						klog.Warningf("Skipping ASG %v (which matches tags): %v", *asg.AutoScalingGroupARN, *asg.Status)
 						continue
 					}
-					asgs = append(asgs, asg)
+					asgs = append(asgs, &asg)
 				}
-				return true
-			})
-			if err != nil {
-				return nil, fmt.Errorf("error listing autoscaling groups: %v", err)
 			}
 		}
-
 	}
 
 	return asgs, nil
@@ -730,12 +901,12 @@ func minInt(a int, b int) int {
 }
 
 // matchesAsgTags is used to filter an asg by tags
-func matchesAsgTags(tags map[string]string, actual []*autoscaling.TagDescription) bool {
+func matchesAsgTags(tags map[string]string, actual []autoscalingtypes.TagDescription) bool {
 	for k, v := range tags {
 		found := false
 		for _, a := range actual {
-			if aws.StringValue(a.Key) == k {
-				if aws.StringValue(a.Value) == v {
+			if aws.ToString(a.Key) == k {
+				if aws.ToString(a.Value) == v {
 					found = true
 					break
 				}
@@ -749,35 +920,35 @@ func matchesAsgTags(tags map[string]string, actual []*autoscaling.TagDescription
 }
 
 // findAutoscalingGroupLaunchConfiguration is responsible for finding the launch - which could be a launchconfiguration, a template or a mixed instance policy template
-func findAutoscalingGroupLaunchConfiguration(c AWSCloud, g *autoscaling.Group) (string, error) {
-	name := aws.StringValue(g.LaunchConfigurationName)
+func findAutoscalingGroupLaunchConfiguration(ctx context.Context, c AWSCloud, g *autoscalingtypes.AutoScalingGroup) (string, error) {
+	name := aws.ToString(g.LaunchConfigurationName)
 	if name != "" {
 		return name, nil
 	}
 
 	// @check the launch template then
-	var launchTemplate *autoscaling.LaunchTemplateSpecification
+	var launchTemplate *autoscalingtypes.LaunchTemplateSpecification
 	if g.LaunchTemplate != nil {
 		launchTemplate = g.LaunchTemplate
 	} else if g.MixedInstancesPolicy != nil && g.MixedInstancesPolicy.LaunchTemplate != nil && g.MixedInstancesPolicy.LaunchTemplate.LaunchTemplateSpecification != nil {
 		launchTemplate = g.MixedInstancesPolicy.LaunchTemplate.LaunchTemplateSpecification
 	} else {
-		return "", fmt.Errorf("error finding launch template or configuration for autoscaling group: %s", aws.StringValue(g.AutoScalingGroupName))
+		return "", fmt.Errorf("error finding launch template or configuration for autoscaling group: %s", aws.ToString(g.AutoScalingGroupName))
 	}
 
-	id := aws.StringValue(launchTemplate.LaunchTemplateId)
+	id := aws.ToString(launchTemplate.LaunchTemplateId)
 	if id == "" {
-		return "", fmt.Errorf("error finding launch template ID for autoscaling group: %s", aws.StringValue(g.AutoScalingGroupName))
+		return "", fmt.Errorf("error finding launch template ID for autoscaling group: %s", aws.ToString(g.AutoScalingGroupName))
 	}
 
-	version := aws.StringValue(launchTemplate.Version)
-	//Correctly Handle Default and Latest Versions
+	version := aws.ToString(launchTemplate.Version)
+	// Correctly Handle Default and Latest Versions
 	klog.V(4).Infof("Launch Template Version Specified By ASG: %v", version)
 	if version == "" || version == "$Default" || version == "$Latest" {
 		input := &ec2.DescribeLaunchTemplatesInput{
-			LaunchTemplateIds: []*string{&id},
+			LaunchTemplateIds: []string{id},
 		}
-		output, err := c.EC2().DescribeLaunchTemplates(input)
+		output, err := c.EC2().DescribeLaunchTemplates(ctx, input)
 		if err != nil {
 			return "", fmt.Errorf("error describing launch templates: %q", err)
 		}
@@ -797,16 +968,16 @@ func findAutoscalingGroupLaunchConfiguration(c AWSCloud, g *autoscaling.Group) (
 }
 
 // findInstanceLaunchConfiguration is responsible for discoverying the launch configuration for an instance
-func findInstanceLaunchConfiguration(i *autoscaling.Instance) string {
-	name := aws.StringValue(i.LaunchConfigurationName)
+func findInstanceLaunchConfiguration(i autoscalingtypes.Instance) string {
+	name := aws.ToString(i.LaunchConfigurationName)
 	if name != "" {
 		return name
 	}
 
 	// else we need to check the launch template
 	if i.LaunchTemplate != nil {
-		id := aws.StringValue(i.LaunchTemplate.LaunchTemplateId)
-		version := aws.StringValue(i.LaunchTemplate.Version)
+		id := aws.ToString(i.LaunchTemplate.LaunchTemplateId)
+		version := aws.ToString(i.LaunchTemplate.Version)
 		if id != "" {
 			launchTemplate := id + ":" + version
 			return launchTemplate
@@ -816,24 +987,24 @@ func findInstanceLaunchConfiguration(i *autoscaling.Instance) string {
 	return ""
 }
 
-func awsBuildCloudInstanceGroup(c AWSCloud, cluster *kops.Cluster, ig *kops.InstanceGroup, g *autoscaling.Group, nodeMap map[string]*v1.Node) (*cloudinstances.CloudInstanceGroup, error) {
-	newConfigName, err := findAutoscalingGroupLaunchConfiguration(c, g)
+func awsBuildCloudInstanceGroup(ctx context.Context, c AWSCloud, cluster *kops.Cluster, ig *kops.InstanceGroup, g *autoscalingtypes.AutoScalingGroup, nodeMap map[string]*v1.Node) (*cloudinstances.CloudInstanceGroup, error) {
+	newConfigName, err := findAutoscalingGroupLaunchConfiguration(ctx, c, g)
 	if err != nil {
 		return nil, err
 	}
 
 	instanceSeen := map[string]bool{}
-	instances, err := findInstances(c, ig)
+	instances, err := findInstances(ctx, c, ig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch instances: %v", err)
 	}
 
 	cg := &cloudinstances.CloudInstanceGroup{
-		HumanName:     aws.StringValue(g.AutoScalingGroupName),
+		HumanName:     aws.ToString(g.AutoScalingGroupName),
 		InstanceGroup: ig,
-		MinSize:       int(aws.Int64Value(g.MinSize)),
-		TargetSize:    int(aws.Int64Value(g.DesiredCapacity)),
-		MaxSize:       int(aws.Int64Value(g.MaxSize)),
+		MinSize:       int(aws.ToInt32(g.MinSize)),
+		TargetSize:    int(aws.ToInt32(g.DesiredCapacity)),
+		MaxSize:       int(aws.ToInt32(g.MaxSize)),
 		Raw:           g,
 	}
 
@@ -844,7 +1015,7 @@ func awsBuildCloudInstanceGroup(c AWSCloud, cluster *kops.Cluster, ig *kops.Inst
 		}
 	}
 
-	result, err := c.Autoscaling().DescribeWarmPool(&autoscaling.DescribeWarmPoolInput{
+	result, err := c.Autoscaling().DescribeWarmPool(ctx, &autoscaling.DescribeWarmPoolInput{
 		AutoScalingGroupName: g.AutoScalingGroupName,
 	})
 	if err != nil {
@@ -859,7 +1030,7 @@ func awsBuildCloudInstanceGroup(c AWSCloud, cluster *kops.Cluster, ig *kops.Inst
 	var detached []*string
 	for id, instance := range instances {
 		for _, tag := range instance.Tags {
-			if aws.StringValue(tag.Key) == tagNameDetachedInstance {
+			if aws.ToString(tag.Key) == tagNameDetachedInstance {
 				detached = append(detached, aws.String(id))
 			}
 		}
@@ -874,22 +1045,22 @@ func awsBuildCloudInstanceGroup(c AWSCloud, cluster *kops.Cluster, ig *kops.Inst
 				return nil, fmt.Errorf("error creating cloud instance group member: %v", err)
 			}
 			instanceSeen[*id] = true
-			addCloudInstanceData(cm, instances[aws.StringValue(id)])
+			addCloudInstanceData(cm, instances[aws.ToString(id)])
 		}
 	}
 
 	return cg, nil
 }
 
-func buildCloudInstance(i *autoscaling.Instance, instances map[string]*ec2.Instance, instanceSeen map[string]bool, nodeMap map[string]*v1.Node, cg *cloudinstances.CloudInstanceGroup, newConfigName string) error {
-	id := aws.StringValue(i.InstanceId)
+func buildCloudInstance(i autoscalingtypes.Instance, instances map[string]*ec2types.Instance, instanceSeen map[string]bool, nodeMap map[string]*v1.Node, cg *cloudinstances.CloudInstanceGroup, newConfigName string) error {
+	id := aws.ToString(i.InstanceId)
 	if id == "" {
 		klog.Warningf("ignoring instance with no instance id: %s in autoscaling group: %s", id, cg.HumanName)
 		return nil
 	}
 	instanceSeen[id] = true
 	// @step: check if the instance is terminating
-	if aws.StringValue(i.LifecycleState) == autoscaling.LifecycleStateTerminating {
+	if i.LifecycleState == autoscalingtypes.LifecycleStateTerminating {
 		klog.Warningf("ignoring instance as it is terminating: %s in autoscaling group: %s", id, cg.HumanName)
 		return nil
 	}
@@ -905,7 +1076,7 @@ func buildCloudInstance(i *autoscaling.Instance, instances map[string]*ec2.Insta
 	if err != nil {
 		return fmt.Errorf("error creating cloud instance group member: %v", err)
 	}
-	if strings.HasPrefix(*i.LifecycleState, "Warmed") {
+	if strings.HasPrefix(string(i.LifecycleState), "Warmed") {
 		cm.State = cloudinstances.WarmPool
 	}
 
@@ -913,62 +1084,203 @@ func buildCloudInstance(i *autoscaling.Instance, instances map[string]*ec2.Insta
 	return nil
 }
 
-func addCloudInstanceData(cm *cloudinstances.CloudInstance, instance *ec2.Instance) {
-	cm.MachineType = aws.StringValue(instance.InstanceType)
+// asgInstanceIDRegex extracts the first EC2 instance ID (i-xxxxxxxx) found in a
+// scaling activity's StatusMessage or Description. The capture is best-effort:
+// if no ID is found, GroupFailure.Instance is left blank.
+//
+// Instance IDs are exactly 8 or 17 hex digits, and the word boundaries matter:
+// an unanchored `i-[0-9a-f]{8,17}` matches inside "eni-0abcdef1234567890",
+// which scaling activity messages routinely mention, and would report a
+// network interface as the failing instance.
+var asgInstanceIDRegex = regexp.MustCompile(`\bi-(?:[0-9a-f]{17}|[0-9a-f]{8})\b`)
+
+// isFinishedScalingActivity reports whether a scaling activity has reached a
+// terminal state. Every other status code means the activity is still in
+// flight, and AWS lists those ahead of the finished ones.
+func isFinishedScalingActivity(code autoscalingtypes.ScalingActivityStatusCode) bool {
+	switch code {
+	case autoscalingtypes.ScalingActivityStatusCodeSuccessful,
+		autoscalingtypes.ScalingActivityStatusCodeFailed,
+		autoscalingtypes.ScalingActivityStatusCodeCancelled:
+		return true
+	default:
+		return false
+	}
+}
+
+// maxScalingActivityPages bounds how far back getGroupFailures reads. The
+// activities are most-recent-first and identical failures are aggregated, so
+// later pages almost never contribute a distinct entry.
+const maxScalingActivityPages = 5
+
+var _ cloudinstances.GroupFailureReporter = (*awsCloudImplementation)(nil)
+
+// GetGroupFailures returns recent provisioning failures observed by the AWS
+// Auto Scaling group backing this CloudInstanceGroup. See getGroupFailures
+// for the filtering and aggregation logic.
+func (c *awsCloudImplementation) GetGroupFailures(ctx context.Context, group *cloudinstances.CloudInstanceGroup) ([]cloudinstances.GroupFailure, error) {
+	return getGroupFailures(ctx, c, group)
+}
+
+// getGroupFailures returns recent failed scaling activities for the ASG
+// backing the given group.
+//
+// Results are filtered to errors timestamped after the most recent successful
+// instance creation in the group (the LaunchTime of an existing instance). If
+// the group has no instances at all, no filter is applied so the full retention
+// window is surfaced — that is precisely the failure mode this exists to
+// diagnose. Pagination short-circuits once activities pre-date the watermark,
+// since DescribeScalingActivities returns most-recent-first.
+func getGroupFailures(ctx context.Context, c AWSCloud, group *cloudinstances.CloudInstanceGroup) ([]cloudinstances.GroupFailure, error) {
+	asg, ok := group.Raw.(*autoscalingtypes.AutoScalingGroup)
+	if !ok || asg == nil {
+		return nil, nil
+	}
+	asgName := aws.ToString(asg.AutoScalingGroupName)
+	if asgName == "" {
+		return nil, nil
+	}
+
+	watermark := cloudinstances.Watermark(group)
+
+	type key struct{ code, message string }
+	agg := map[key]*cloudinstances.GroupFailure{}
+
+	paginator := autoscaling.NewDescribeScalingActivitiesPaginator(c.Autoscaling(), &autoscaling.DescribeScalingActivitiesInput{
+		AutoScalingGroupName: aws.String(asgName),
+	})
+paginate:
+	// A group with no instances has no watermark, so the short-circuit below
+	// never fires and pagination would otherwise walk the ASG's full six-week
+	// activity retention on every validation poll.
+	for pages := 0; paginator.HasMorePages() && pages < maxScalingActivityPages; pages++ {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("describing scaling activities for ASG %q: %w", asgName, err)
+		}
+		for _, a := range page.Activities {
+			var ts time.Time
+			if a.StartTime != nil {
+				ts = *a.StartTime
+			}
+			// Activities are returned most-recent-first, so the first finished
+			// one older than the watermark means every remaining one is older
+			// too. This is checked before the status filter below: a run of old
+			// successful activities would otherwise be skipped without ever
+			// ending the scan, so a group merely short of its target would read
+			// every page on every poll.
+			//
+			// Only finished activities may end it. An in-progress activity is
+			// listed ahead of the finished ones and carries the StartTime of
+			// when it began, which can already predate the watermark.
+			if isFinishedScalingActivity(a.StatusCode) && !watermark.IsZero() && !ts.IsZero() && ts.Before(watermark) {
+				break paginate
+			}
+			if a.StatusCode != autoscalingtypes.ScalingActivityStatusCodeFailed && a.StatusCode != autoscalingtypes.ScalingActivityStatusCodeCancelled {
+				continue
+			}
+			message := aws.ToString(a.StatusMessage)
+			if message == "" {
+				message = aws.ToString(a.Cause)
+			}
+			k := key{string(a.StatusCode), message}
+			e, ok := agg[k]
+			if !ok {
+				instance := asgInstanceIDRegex.FindString(message)
+				if instance == "" {
+					instance = asgInstanceIDRegex.FindString(aws.ToString(a.Description))
+				}
+				e = &cloudinstances.GroupFailure{
+					Code:      string(a.StatusCode),
+					Message:   message,
+					Instance:  instance,
+					FirstSeen: ts,
+					LastSeen:  ts,
+				}
+				agg[k] = e
+			}
+			e.Count++
+			if !ts.IsZero() {
+				if e.FirstSeen.IsZero() || ts.Before(e.FirstSeen) {
+					e.FirstSeen = ts
+				}
+				if ts.After(e.LastSeen) {
+					e.LastSeen = ts
+				}
+			}
+		}
+	}
+
+	out := make([]cloudinstances.GroupFailure, 0, len(agg))
+	for _, e := range agg {
+		out = append(out, *e)
+	}
+	cloudinstances.SortFailures(out)
+	return out, nil
+}
+
+func addCloudInstanceData(cm *cloudinstances.CloudInstance, instance *ec2types.Instance) {
+	cm.MachineType = string(instance.InstanceType)
+	if instance.LaunchTime != nil {
+		cm.CreationTimestamp = *instance.LaunchTime
+	}
 	for _, tag := range instance.Tags {
-		key := aws.StringValue(tag.Key)
+		key := aws.ToString(tag.Key)
 		if !strings.HasPrefix(key, TagNameRolePrefix) {
 			continue
 		}
 		role := strings.TrimPrefix(key, TagNameRolePrefix)
-		cm.Roles = append(cm.Roles, role)
-		cm.PrivateIP = aws.StringValue(instance.PrivateIpAddress)
+		cm.PrivateIP = aws.ToString(instance.PrivateIpAddress)
+		if role == "master" || role == "control-plane" {
+			cm.Roles = append(cm.Roles, "control-plane")
+		} else {
+			cm.Roles = append(cm.Roles, role)
+		}
 	}
 }
 
-func findInstances(c AWSCloud, ig *kops.InstanceGroup) (map[string]*ec2.Instance, error) {
+func findInstances(ctx context.Context, c AWSCloud, ig *kops.InstanceGroup) (map[string]*ec2types.Instance, error) {
 	clusterName := c.Tags()[TagClusterName]
 	req := &ec2.DescribeInstancesInput{
-		Filters: []*ec2.Filter{
+		Filters: []ec2types.Filter{
 			NewEC2Filter("tag:"+identity_aws.CloudTagInstanceGroupName, ig.ObjectMeta.Name),
 			NewEC2Filter("tag:"+TagClusterName, clusterName),
 			NewEC2Filter("instance-state-name", "pending", "running", "stopping", "stopped"),
 		},
 	}
 
-	result, err := c.EC2().DescribeInstances(req)
+	result, err := c.EC2().DescribeInstances(ctx, req)
 	if err != nil {
 		return nil, err
 	}
 
-	instances := make(map[string]*ec2.Instance)
+	instances := make(map[string]*ec2types.Instance)
 	for _, r := range result.Reservations {
 		for _, i := range r.Instances {
-			id := aws.StringValue(i.InstanceId)
-			instances[id] = i
+			id := aws.ToString(i.InstanceId)
+			instances[id] = &i
 		}
 	}
 	return instances, nil
-
 }
 
-func findDetachedInstances(c AWSCloud, g *autoscaling.Group) ([]*string, error) {
+func findDetachedInstances(ctx context.Context, c AWSCloud, g *autoscalingtypes.AutoScalingGroup) ([]string, error) {
 	clusterName := c.Tags()[TagClusterName]
 	req := &ec2.DescribeInstancesInput{
-		Filters: []*ec2.Filter{
-			NewEC2Filter("tag:"+tagNameDetachedInstance, aws.StringValue(g.AutoScalingGroupName)),
+		Filters: []ec2types.Filter{
+			NewEC2Filter("tag:"+tagNameDetachedInstance, aws.ToString(g.AutoScalingGroupName)),
 			NewEC2Filter("tag:"+TagClusterName, clusterName),
 			NewEC2Filter("instance-state-name", "pending", "running", "stopping", "stopped"),
 		},
 	}
-	result, err := c.EC2().DescribeInstances(req)
+	result, err := c.EC2().DescribeInstances(ctx, req)
 	if err != nil {
 		return nil, err
 	}
-	var detached []*string
+	var detached []string
 	for _, r := range result.Reservations {
 		for _, i := range r.Instances {
-			detached = append(detached, i.InstanceId)
+			detached = append(detached, aws.ToString(i.InstanceId))
 		}
 	}
 	return detached, nil
@@ -1003,13 +1315,13 @@ var tagsEventualConsistencyErrors = map[string]bool{
 // isTagsEventualConsistencyError checks if the error is one of the errors encountered
 // when we try to create/get tags before the resource has fully 'propagated' in EC2
 func isTagsEventualConsistencyError(err error) bool {
-	if awsErr, ok := err.(awserr.Error); ok {
-		isEventualConsistency, found := tagsEventualConsistencyErrors[awsErr.Code()]
-		if found {
-			return isEventualConsistency
-		}
-
-		klog.Warningf("Uncategorized error in isTagsEventualConsistencyError: %v", awsErr.Code())
+	errCode := AWSErrorCode(err)
+	isEventualConsistency, found := tagsEventualConsistencyErrors[errCode]
+	if found {
+		return isEventualConsistency
+	}
+	if errCode != "" {
+		klog.Warningf("Uncategorized error in isTagsEventualConsistencyError: %v", errCode)
 	}
 	return false
 }
@@ -1024,11 +1336,12 @@ func getTags(c AWSCloud, resourceID string) (map[string]string, error) {
 	if resourceID == "" {
 		return nil, fmt.Errorf("resourceID not provided to getTags")
 	}
+	ctx := context.TODO()
 
 	tags := map[string]string{}
 
 	request := &ec2.DescribeTagsInput{
-		Filters: []*ec2.Filter{
+		Filters: []ec2types.Filter{
 			NewEC2Filter("resource-id", resourceID),
 		},
 	}
@@ -1037,7 +1350,9 @@ func getTags(c AWSCloud, resourceID string) (map[string]string, error) {
 	for {
 		attempt++
 
-		response, err := c.EC2().DescribeTags(request)
+		response, err := c.EC2().DescribeTags(ctx, request, func(o *ec2.Options) {
+			o.RetryMaxAttempts = DescribeTagsMaxAttempts
+		})
 		if err != nil {
 			if isTagsEventualConsistencyError(err) {
 				if attempt > DescribeTagsMaxAttempts {
@@ -1057,11 +1372,7 @@ func getTags(c AWSCloud, resourceID string) (map[string]string, error) {
 		}
 
 		for _, tag := range response.Tags {
-			if tag == nil {
-				klog.Warning("unexpected nil tag")
-				continue
-			}
-			tags[aws.StringValue(tag.Key)] = aws.StringValue(tag.Value)
+			tags[aws.ToString(tag.Key)] = aws.ToString(tag.Value)
 		}
 
 		return tags, nil
@@ -1077,10 +1388,11 @@ func createTags(c AWSCloud, resourceID string, tags map[string]string) error {
 	if len(tags) == 0 {
 		return nil
 	}
+	ctx := context.TODO()
 
-	ec2Tags := []*ec2.Tag{}
+	ec2Tags := []ec2types.Tag{}
 	for k, v := range tags {
-		ec2Tags = append(ec2Tags, &ec2.Tag{Key: aws.String(k), Value: aws.String(v)})
+		ec2Tags = append(ec2Tags, ec2types.Tag{Key: aws.String(k), Value: aws.String(v)})
 	}
 
 	attempt := 0
@@ -1089,10 +1401,10 @@ func createTags(c AWSCloud, resourceID string, tags map[string]string) error {
 
 		request := &ec2.CreateTagsInput{
 			Tags:      ec2Tags,
-			Resources: []*string{&resourceID},
+			Resources: []string{resourceID},
 		}
 
-		_, err := c.EC2().CreateTags(request)
+		_, err := c.EC2().CreateTags(ctx, request)
 		if err != nil {
 			if isTagsEventualConsistencyError(err) {
 				if attempt > CreateTagsMaxAttempts {
@@ -1125,10 +1437,11 @@ func deleteTags(c AWSCloud, resourceID string, tags map[string]string) error {
 	if len(tags) == 0 {
 		return nil
 	}
+	ctx := context.TODO()
 
-	ec2Tags := []*ec2.Tag{}
+	ec2Tags := []ec2types.Tag{}
 	for k, v := range tags {
-		ec2Tags = append(ec2Tags, &ec2.Tag{Key: aws.String(k), Value: aws.String(v)})
+		ec2Tags = append(ec2Tags, ec2types.Tag{Key: aws.String(k), Value: aws.String(v)})
 	}
 
 	attempt := 0
@@ -1137,10 +1450,10 @@ func deleteTags(c AWSCloud, resourceID string, tags map[string]string) error {
 
 		request := &ec2.DeleteTagsInput{
 			Tags:      ec2Tags,
-			Resources: []*string{&resourceID},
+			Resources: []string{resourceID},
 		}
 
-		_, err := c.EC2().DeleteTags(request)
+		_, err := c.EC2().DeleteTags(ctx, request)
 		if err != nil {
 			if isTagsEventualConsistencyError(err) {
 				if attempt > DeleteTagsMaxAttempts {
@@ -1237,105 +1550,27 @@ func addAWSTags(c AWSCloud, id string, expected map[string]string) error {
 	return nil
 }
 
-func (c *awsCloudImplementation) GetELBTags(loadBalancerName string) (map[string]string, error) {
-	return getELBTags(c, loadBalancerName)
-}
-
-func getELBTags(c AWSCloud, loadBalancerName string) (map[string]string, error) {
-	tags := map[string]string{}
-
-	request := &elb.DescribeTagsInput{
-		LoadBalancerNames: []*string{&loadBalancerName},
-	}
-	response, err := c.ELB().DescribeTags(request)
-	if err != nil {
-		return nil, fmt.Errorf("error listing tags on %v: %v", loadBalancerName, err)
-	}
-
-	for _, tagset := range response.TagDescriptions {
-		for _, tag := range tagset.Tags {
-			tags[aws.StringValue(tag.Key)] = aws.StringValue(tag.Value)
-		}
-	}
-	return tags, nil
-}
-
-// CreateELBTags will add tags to the specified loadBalancer,
-// retrying up to MaxCreateTagsAttempts times if it hits an eventual-consistency type error
-func (c *awsCloudImplementation) CreateELBTags(loadBalancerName string, tags map[string]string) error {
-	return createELBTags(c, loadBalancerName, tags)
-}
-
-func createELBTags(c AWSCloud, loadBalancerName string, tags map[string]string) error {
-	if len(tags) == 0 {
-		return nil
-	}
-
-	elbTags := []*elb.Tag{}
-	for k, v := range tags {
-		elbTags = append(elbTags, &elb.Tag{Key: aws.String(k), Value: aws.String(v)})
-	}
-
-	request := &elb.AddTagsInput{
-		Tags:              elbTags,
-		LoadBalancerNames: []*string{&loadBalancerName},
-	}
-
-	_, err := c.ELB().AddTags(request)
-	if err != nil {
-		return fmt.Errorf("error creating tags on %v: %v", loadBalancerName, err)
-	}
-
-	return nil
-}
-
-// RemoveELBTags will remove tags to the specified loadBalancer, retrying up to MaxCreateTagsAttempts times if it hits an eventual-consistency type error
-func (c *awsCloudImplementation) RemoveELBTags(loadBalancerName string, tags map[string]string) error {
-	return removeELBTags(c, loadBalancerName, tags)
-}
-
-func removeELBTags(c AWSCloud, loadBalancerName string, tags map[string]string) error {
-	if len(tags) == 0 {
-		return nil
-	}
-
-	elbTagKeysOnly := []*elb.TagKeyOnly{}
-	for k := range tags {
-		elbTagKeysOnly = append(elbTagKeysOnly, &elb.TagKeyOnly{Key: aws.String(k)})
-	}
-
-	request := &elb.RemoveTagsInput{
-		Tags:              elbTagKeysOnly,
-		LoadBalancerNames: []*string{&loadBalancerName},
-	}
-
-	_, err := c.ELB().RemoveTags(request)
-	if err != nil {
-		return fmt.Errorf("error creating tags on %v: %v", loadBalancerName, err)
-	}
-
-	return nil
-}
 func (c *awsCloudImplementation) RemoveELBV2Tags(ResourceArn string, tags map[string]string) error {
 	return removeELBV2Tags(c, ResourceArn, tags)
 }
 
 func removeELBV2Tags(c AWSCloud, ResourceArn string, tags map[string]string) error {
+	ctx := context.TODO()
 	if len(tags) == 0 {
 		return nil
 	}
 
-	elbTagKeysOnly := []*string{}
+	elbTagKeysOnly := []string{}
 	for k := range tags {
-		elbTagKeysOnly = append(elbTagKeysOnly, aws.String(k))
+		elbTagKeysOnly = append(elbTagKeysOnly, k)
 	}
 
 	request := &elbv2.RemoveTagsInput{
 		TagKeys:      elbTagKeysOnly,
-		ResourceArns: []*string{&ResourceArn},
+		ResourceArns: []string{ResourceArn},
 	}
 
-	_, err := c.ELBV2().RemoveTags(request)
+	_, err := c.ELBV2().RemoveTags(ctx, request)
 	if err != nil {
 		return fmt.Errorf("error creating tags on %v: %v", ResourceArn, err)
 	}
@@ -1348,19 +1583,20 @@ func (c *awsCloudImplementation) GetELBV2Tags(ResourceArn string) (map[string]st
 }
 
 func getELBV2Tags(c AWSCloud, ResourceArn string) (map[string]string, error) {
+	ctx := context.TODO()
 	tags := map[string]string{}
 
 	request := &elbv2.DescribeTagsInput{
-		ResourceArns: []*string{&ResourceArn},
+		ResourceArns: []string{ResourceArn},
 	}
-	response, err := c.ELBV2().DescribeTags(request)
+	response, err := c.ELBV2().DescribeTags(ctx, request)
 	if err != nil {
 		return nil, fmt.Errorf("error listing tags on %v: %v", ResourceArn, err)
 	}
 
 	for _, tagset := range response.TagDescriptions {
 		for _, tag := range tagset.Tags {
-			tags[aws.StringValue(tag.Key)] = aws.StringValue(tag.Value)
+			tags[aws.ToString(tag.Key)] = aws.ToString(tag.Value)
 		}
 	}
 
@@ -1372,20 +1608,21 @@ func (c *awsCloudImplementation) CreateELBV2Tags(ResourceArn string, tags map[st
 }
 
 func createELBV2Tags(c AWSCloud, ResourceArn string, tags map[string]string) error {
+	ctx := context.TODO()
 	if len(tags) == 0 {
 		return nil
 	}
 
-	elbv2Tags := []*elbv2.Tag{}
+	elbv2Tags := []elbv2types.Tag{}
 	for k, v := range tags {
-		elbv2Tags = append(elbv2Tags, &elbv2.Tag{Key: aws.String(k), Value: aws.String(v)})
+		elbv2Tags = append(elbv2Tags, elbv2types.Tag{Key: aws.String(k), Value: aws.String(v)})
 	}
 	request := &elbv2.AddTagsInput{
 		Tags:         elbv2Tags,
-		ResourceArns: []*string{&ResourceArn},
+		ResourceArns: []string{ResourceArn},
 	}
 
-	_, err := c.ELBV2().AddTags(request)
+	_, err := c.ELBV2().AddTags(ctx, request)
 	if err != nil {
 		return fmt.Errorf("error creating tags on %v: %v", ResourceArn, err)
 	}
@@ -1419,189 +1656,96 @@ func (c *awsCloudImplementation) AddTags(name *string, tags map[string]string) {
 	}
 }
 
-func (c *awsCloudImplementation) FindELBByNameTag(findNameTag string) (*elb.LoadBalancerDescription, error) {
-	return findELBByNameTag(c, findNameTag)
-}
-
-func findELBByNameTag(c AWSCloud, findNameTag string) (*elb.LoadBalancerDescription, error) {
-	// TODO: Any way around this?
-	klog.V(2).Infof("Listing all ELBs for findLoadBalancerByNameTag")
-
-	request := &elb.DescribeLoadBalancersInput{}
-	// ELB DescribeTags has a limit of 20 names, so we set the page size here to 20 also
-	request.PageSize = aws.Int64(20)
-
-	var found []*elb.LoadBalancerDescription
-
-	var innerError error
-	err := c.ELB().DescribeLoadBalancersPages(request, func(p *elb.DescribeLoadBalancersOutput, lastPage bool) bool {
-		if len(p.LoadBalancerDescriptions) == 0 {
-			return true
+func FindLatestELBV2ByNameTag(loadBalancers []*LoadBalancerInfo, findNameTag string) *LoadBalancerInfo {
+	var latest *LoadBalancerInfo
+	var latestRevision int
+	for _, lb := range loadBalancers {
+		if lb.NameTag() != findNameTag {
+			continue
 		}
+		revisionTag, _ := lb.GetTag(KopsResourceRevisionTag)
 
-		// TODO: Filter by cluster?
-
-		var names []string
-		nameToELB := make(map[string]*elb.LoadBalancerDescription)
-		for _, elb := range p.LoadBalancerDescriptions {
-			name := aws.StringValue(elb.LoadBalancerName)
-			nameToELB[name] = elb
-			names = append(names, name)
-		}
-
-		tagMap, err := c.DescribeELBTags(names)
-		if err != nil {
-			innerError = err
-			return false
-		}
-
-		for loadBalancerName, tags := range tagMap {
-			name, foundNameTag := FindELBTag(tags, "Name")
-			if !foundNameTag || name != findNameTag {
+		revision := -1
+		if revisionTag == "" {
+			revision = 0
+		} else {
+			n, err := strconv.Atoi(revisionTag)
+			if err != nil {
+				klog.Warningf("ignoring load balancer %q with revision %d", aws.ToString(lb.LoadBalancer.LoadBalancerArn), revision)
 				continue
 			}
-
-			elb := nameToELB[loadBalancerName]
-			found = append(found, elb)
+			revision = n
 		}
-		return true
-	})
+
+		if latest == nil || revision > latestRevision {
+			latestRevision = revision
+			latest = lb
+		}
+	}
+
+	return latest
+}
+
+func (c *awsCloudImplementation) FindELBV2NetworkInterfacesByName(vpcID string, loadBalancerName string) ([]ec2types.NetworkInterface, error) {
+	return findELBV2NetworkInterfaces(c, vpcID, loadBalancerName)
+}
+
+func findELBV2NetworkInterfaces(c AWSCloud, vpcID, lbName string) ([]ec2types.NetworkInterface, error) {
+	klog.V(2).Infof("Listing all NLB network interfaces")
+	ctx := context.TODO()
+
+	request := &ec2.DescribeNetworkInterfacesInput{
+		Filters: []ec2types.Filter{
+			NewEC2Filter("vpc-id", vpcID),
+			NewEC2Filter("interface-type", "network_load_balancer"),
+		},
+	}
+
+	response, err := c.EC2().DescribeNetworkInterfaces(ctx, request)
 	if err != nil {
-		return nil, fmt.Errorf("error describing LoadBalancers: %v", err)
-	}
-	if innerError != nil {
-		return nil, fmt.Errorf("error describing LoadBalancers: %v", innerError)
+		return nil, fmt.Errorf("error describing network interfaces: %w", err)
 	}
 
-	if len(found) == 0 {
-		return nil, nil
-	}
-
-	if len(found) != 1 {
-		return nil, fmt.Errorf("Found multiple ELBs with Name %q", findNameTag)
-	}
-
-	return found[0], nil
-}
-
-func (c *awsCloudImplementation) DescribeELBTags(loadBalancerNames []string) (map[string][]*elb.Tag, error) {
-	return describeELBTags(c, loadBalancerNames)
-}
-
-func describeELBTags(c AWSCloud, loadBalancerNames []string) (map[string][]*elb.Tag, error) {
-	// TODO: Filter by cluster?
-
-	request := &elb.DescribeTagsInput{}
-	request.LoadBalancerNames = aws.StringSlice(loadBalancerNames)
-
-	// TODO: Cache?
-	klog.V(2).Infof("Querying ELB tags for %s", loadBalancerNames)
-	response, err := c.ELB().DescribeTags(request)
-	if err != nil {
-		return nil, err
-	}
-
-	tagMap := make(map[string][]*elb.Tag)
-	for _, tagset := range response.TagDescriptions {
-		tagMap[aws.StringValue(tagset.LoadBalancerName)] = tagset.Tags
-	}
-	return tagMap, nil
-}
-
-func (c *awsCloudImplementation) FindELBV2ByNameTag(findNameTag string) (*elbv2.LoadBalancer, error) {
-	return findELBV2ByNameTag(c, findNameTag)
-}
-
-func findELBV2ByNameTag(c AWSCloud, findNameTag string) (*elbv2.LoadBalancer, error) {
-	// TODO: Any way around this?
-	klog.V(2).Infof("Listing all NLBs for findNetworkLoadBalancerByNameTag")
-
-	request := &elbv2.DescribeLoadBalancersInput{}
-	// ELB DescribeTags has a limit of 20 names, so we set the page size here to 20 also
-	request.PageSize = aws.Int64(20)
-
-	var found []*elbv2.LoadBalancer
-
-	var innerError error
-	err := c.ELBV2().DescribeLoadBalancersPages(request, func(p *elbv2.DescribeLoadBalancersOutput, lastPage bool) bool {
-		if len(p.LoadBalancers) == 0 {
-			return true
+	var found []ec2types.NetworkInterface
+	for _, ni := range response.NetworkInterfaces {
+		if strings.HasPrefix(aws.ToString(ni.Description), "ELB net/"+lbName+"/") {
+			found = append(found, ni)
 		}
-
-		// TODO: Filter by cluster?
-
-		var arns []string
-		arnToELB := make(map[string]*elbv2.LoadBalancer)
-		for _, elb := range p.LoadBalancers {
-			arn := aws.StringValue(elb.LoadBalancerArn)
-			arnToELB[arn] = elb
-			arns = append(arns, arn)
-		}
-
-		tagMap, err := c.DescribeELBV2Tags(arns)
-		if err != nil {
-			innerError = err
-			return false
-		}
-
-		for loadBalancerArn, tags := range tagMap {
-			name, foundNameTag := FindELBV2Tag(tags, "Name")
-			if !foundNameTag || name != findNameTag {
-				continue
-			}
-			elb := arnToELB[loadBalancerArn]
-			found = append(found, elb)
-		}
-		return true
-	})
-	if err != nil {
-		return nil, fmt.Errorf("error describing LoadBalancers: %v", err)
-	}
-	if innerError != nil {
-		return nil, fmt.Errorf("error describing LoadBalancers: %v", innerError)
 	}
 
-	if len(found) == 0 {
-		return nil, nil
-	}
-
-	if len(found) != 1 {
-		return nil, fmt.Errorf("Found multiple NLBs with Name %q", findNameTag)
-	}
-
-	return found[0], nil
+	return found, nil
 }
 
-func (c *awsCloudImplementation) DescribeELBV2Tags(loadBalancerArns []string) (map[string][]*elbv2.Tag, error) {
+func (c *awsCloudImplementation) DescribeELBV2Tags(loadBalancerArns []string) (map[string][]elbv2types.Tag, error) {
 	return describeELBV2Tags(c, loadBalancerArns)
 }
 
-func describeELBV2Tags(c AWSCloud, loadBalancerArns []string) (map[string][]*elbv2.Tag, error) {
+func describeELBV2Tags(c AWSCloud, loadBalancerArns []string) (map[string][]elbv2types.Tag, error) {
 	// TODO: Filter by cluster?
-
+	ctx := context.TODO()
 	request := &elbv2.DescribeTagsInput{}
-	request.ResourceArns = aws.StringSlice(loadBalancerArns)
+	request.ResourceArns = loadBalancerArns
 
 	// TODO: Cache?
 	klog.V(2).Infof("Querying ELBV2 api for tags for %s", loadBalancerArns)
-	response, err := c.ELBV2().DescribeTags(request)
+	response, err := c.ELBV2().DescribeTags(ctx, request)
 	if err != nil {
 		return nil, err
 	}
 
-	tagMap := make(map[string][]*elbv2.Tag)
+	tagMap := make(map[string][]elbv2types.Tag)
 	for _, tagset := range response.TagDescriptions {
-		tagMap[aws.StringValue(tagset.ResourceArn)] = tagset.Tags
+		tagMap[aws.ToString(tagset.ResourceArn)] = tagset.Tags
 	}
 	return tagMap, nil
 }
 
-func (c *awsCloudImplementation) BuildFilters(name *string) []*ec2.Filter {
+func (c *awsCloudImplementation) BuildFilters(name *string) []ec2types.Filter {
 	return buildFilters(c.tags, name)
 }
 
-func buildFilters(commonTags map[string]string, name *string) []*ec2.Filter {
-	filters := []*ec2.Filter{}
+func buildFilters(commonTags map[string]string, name *string) []ec2types.Filter {
+	filters := []ec2types.Filter{}
 
 	merged := make(map[string]string)
 	if name != nil {
@@ -1621,13 +1765,14 @@ func buildFilters(commonTags map[string]string, name *string) []*ec2.Filter {
 }
 
 // DescribeInstance is a helper that queries for the specified instance by id
-func (c *awsCloudImplementation) DescribeInstance(instanceID string) (*ec2.Instance, error) {
+func (c *awsCloudImplementation) DescribeInstance(instanceID string) (*ec2types.Instance, error) {
 	klog.V(2).Infof("Calling DescribeInstances for instance %q", instanceID)
+	ctx := context.TODO()
 	request := &ec2.DescribeInstancesInput{
-		InstanceIds: []*string{&instanceID},
+		InstanceIds: []string{instanceID},
 	}
 
-	response, err := c.EC2().DescribeInstances(request)
+	response, err := c.EC2().DescribeInstances(ctx, request)
 	if err != nil {
 		return nil, fmt.Errorf("error listing Instances: %v", err)
 	}
@@ -1648,21 +1793,22 @@ func (c *awsCloudImplementation) DescribeInstance(instanceID string) (*ec2.Insta
 	}
 
 	instance := reservation.Instances[0]
-	return instance, nil
+	return &instance, nil
 }
 
 // DescribeVPC is a helper that queries for the specified vpc by id
-func (c *awsCloudImplementation) DescribeVPC(vpcID string) (*ec2.Vpc, error) {
+func (c *awsCloudImplementation) DescribeVPC(vpcID string) (*ec2types.Vpc, error) {
 	return describeVPC(c, vpcID)
 }
 
-func describeVPC(c AWSCloud, vpcID string) (*ec2.Vpc, error) {
+func describeVPC(c AWSCloud, vpcID string) (*ec2types.Vpc, error) {
 	klog.V(2).Infof("Calling DescribeVPC for VPC %q", vpcID)
+	ctx := context.TODO()
 	request := &ec2.DescribeVpcsInput{
-		VpcIds: []*string{&vpcID},
+		VpcIds: []string{vpcID},
 	}
 
-	response, err := c.EC2().DescribeVpcs(request)
+	response, err := c.EC2().DescribeVpcs(ctx, request)
 	if err != nil {
 		return nil, fmt.Errorf("error listing VPCs: %v", err)
 	}
@@ -1674,7 +1820,7 @@ func describeVPC(c AWSCloud, vpcID string) (*ec2.Vpc, error) {
 	}
 
 	vpc := response.Vpcs[0]
-	return vpc, nil
+	return &vpc, nil
 }
 
 // ResolveImage finds an AMI image based on the given name.
@@ -1682,85 +1828,112 @@ func describeVPC(c AWSCloud, vpcID string) (*ec2.Vpc, error) {
 // `ami-...` in which case it is presumed to be an id
 // owner/name in which case we find the image with the specified name, owned by owner
 // name in which case we find the image with the specified name, with the current owner
-func (c *awsCloudImplementation) ResolveImage(name string) (*ec2.Image, error) {
-	return resolveImage(c.ec2, name)
+func (c *awsCloudImplementation) ResolveImage(name string) (*ec2types.Image, error) {
+	return resolveImage(context.TODO(), c.ssm, c.ec2, name)
 }
 
-func resolveImage(ec2Client ec2iface.EC2API, name string) (*ec2.Image, error) {
+func resolveSSMParameter(ctx context.Context, ssmClient awsinterfaces.SSMAPI, name string) (string, error) {
+	klog.V(2).Infof("Resolving SSM parameter %q", name)
+	request := &ssm.GetParameterInput{
+		Name: aws.String(name),
+	}
+
+	response, err := ssmClient.GetParameter(ctx, request)
+	if err != nil {
+		return "", fmt.Errorf("failed to get value for SSM parameter: %w", err)
+	}
+
+	return aws.ToString(response.Parameter.Value), nil
+}
+
+func resolveImage(ctx context.Context, ssmClient awsinterfaces.SSMAPI, ec2Client awsinterfaces.EC2API, name string) (*ec2types.Image, error) {
 	// TODO: Cache this result during a single execution (we get called multiple times)
 	klog.V(2).Infof("Calling DescribeImages to resolve name %q", name)
 	request := &ec2.DescribeImagesInput{}
 
 	if strings.HasPrefix(name, "ami-") {
 		// ami-xxxxxxxx
-		request.ImageIds = []*string{&name}
+		request.ImageIds = []string{name}
+	} else if strings.HasPrefix(name, "ssm:") {
+		parameter := strings.TrimPrefix(name, "ssm:")
+
+		image, err := resolveSSMParameter(ctx, ssmClient, parameter)
+		if err != nil {
+			return nil, err
+		}
+
+		request.ImageIds = []string{image}
 	} else {
 		// Either <imagename> or <owner>/<imagename>
 		tokens := strings.SplitN(name, "/", 2)
 		if len(tokens) == 1 {
 			// self is a well-known value in the DescribeImages call
-			request.Owners = aws.StringSlice([]string{"self"})
+			request.Owners = []string{"self"}
 			request.Filters = append(request.Filters, NewEC2Filter("name", name))
 		} else if len(tokens) == 2 {
-			owner := tokens[0]
+			owner := ResolveImageOwnerAlias(tokens[0])
 
-			// Check for well known owner aliases
-			switch owner {
-			case "amazon", "amazon.com":
-				owner = WellKnownAccountAmazonLinux2
-			case "centos":
-				owner = WellKnownAccountCentOS
-			case "coreos", "coreos.com":
-				owner = WellKnownAccountCoreOS
-			case "debian9":
-				owner = WellKnownAccountDebian9
-			case "debian10":
-				owner = WellKnownAccountDebian
-			case "debian11":
-				owner = WellKnownAccountDebian
-			case "flatcar":
-				owner = WellKnownAccountFlatcar
-			case "kopeio", "kope.io":
-				owner = WellKnownAccountKopeio
-			case "redhat", "redhat.com":
-				owner = WellKnownAccountRedhat
-			case "ubuntu":
-				owner = WellKnownAccountUbuntu
-			}
-
-			request.Owners = []*string{&owner}
+			request.Owners = []string{owner}
 			request.Filters = append(request.Filters, NewEC2Filter("name", tokens[1]))
 		} else {
 			return nil, fmt.Errorf("image name specification not recognized: %q", name)
 		}
 	}
 
-	response, err := ec2Client.DescribeImages(request)
-	if err != nil {
-		return nil, fmt.Errorf("error listing images: %v", err)
+	var image *ec2types.Image
+	paginator := ec2.NewDescribeImagesPaginator(ec2Client, request)
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("error listing images: %v", err)
+		}
+
+		for _, v := range page.Images {
+			if image == nil {
+				image = &v
+			} else {
+				itime, _ := time.Parse(time.RFC3339, *image.CreationDate)
+				vtime, _ := time.Parse(time.RFC3339, *v.CreationDate)
+				if vtime.After(itime) {
+					image = &v
+				}
+			}
+		}
 	}
-	if response == nil || len(response.Images) == 0 {
+	if image == nil {
 		return nil, fmt.Errorf("could not find Image for %q", name)
 	}
 
-	image := response.Images[0]
-	for _, v := range response.Images {
-		itime, _ := time.Parse(time.RFC3339, *image.CreationDate)
-		vtime, _ := time.Parse(time.RFC3339, *v.CreationDate)
-		if vtime.After(itime) {
-			image = v
-		}
-	}
-
-	klog.V(4).Infof("Resolved image %q", aws.StringValue(image.ImageId))
+	klog.V(4).Infof("Resolved image %q", aws.ToString(image.ImageId))
 	return image, nil
 }
 
-func (c *awsCloudImplementation) DescribeAvailabilityZones() ([]*ec2.AvailabilityZone, error) {
+// ResolveImageOwnerAlias maps a well-known image owner alias (e.g. "ubuntu") to its
+// AWS account ID. Unrecognized owners are returned unchanged.
+func ResolveImageOwnerAlias(owner string) string {
+	switch owner {
+	case "amazon", "amazon.com":
+		return WellKnownAccountAmazonLinux2023
+	case "debian", "debian11":
+		return WellKnownAccountDebian
+	case "flatcar":
+		return WellKnownAccountFlatcar
+	case "redhat", "redhat.com":
+		return WellKnownAccountRedhat
+	case "ubuntu":
+		return WellKnownAccountUbuntu
+	case "rocky", "rockylinux":
+		return WellKnownAccountRockyLinux
+	}
+	return owner
+}
+
+func (c *awsCloudImplementation) DescribeAvailabilityZones() ([]ec2types.AvailabilityZone, error) {
 	klog.V(2).Infof("Querying EC2 for all valid zones in region %q", c.region)
+	ctx := context.TODO()
 
 	request := &ec2.DescribeAvailabilityZonesInput{}
-	response, err := c.EC2().DescribeAvailabilityZones(request)
+	response, err := c.EC2().DescribeAvailabilityZones(ctx, request)
 	if err != nil {
 		return nil, fmt.Errorf("error querying for valid AZs in %q - verify your AWS credentials.  Error: %v", c.region, err)
 	}
@@ -1775,15 +1948,15 @@ func ValidateZones(zones []string, cloud AWSCloud) error {
 		return err
 	}
 
-	zoneMap := make(map[string]*ec2.AvailabilityZone)
+	zoneMap := make(map[string]ec2types.AvailabilityZone)
 	for _, z := range azs {
-		name := aws.StringValue(z.ZoneName)
+		name := aws.ToString(z.ZoneName)
 		zoneMap[name] = z
 	}
 
 	for _, zone := range zones {
-		z := zoneMap[zone]
-		if z == nil {
+		z, ok := zoneMap[zone]
+		if !ok {
 			var knownZones []string
 			for z := range zoneMap {
 				knownZones = append(knownZones, z)
@@ -1794,11 +1967,11 @@ func ValidateZones(zones []string, cloud AWSCloud) error {
 		}
 
 		for _, message := range z.Messages {
-			klog.Warningf("Zone %q has message: %q", zone, aws.StringValue(message.Message))
+			klog.Warningf("Zone %q has message: %q", zone, aws.ToString(message.Message))
 		}
 
-		if aws.StringValue(z.State) != ec2.AvailabilityZoneStateAvailable {
-			klog.Warningf("Zone %q has state %q", zone, aws.StringValue(z.State))
+		if z.State != ec2types.AvailabilityZoneStateAvailable {
+			klog.Warningf("Zone %q has state %q", zone, z.State)
 		}
 	}
 
@@ -1813,31 +1986,27 @@ func (c *awsCloudImplementation) DNS() (dnsprovider.Interface, error) {
 	return provider, nil
 }
 
-func (c *awsCloudImplementation) CloudFormation() *cloudformation.CloudFormation {
-	return c.cf
-}
-
-func (c *awsCloudImplementation) EC2() ec2iface.EC2API {
+func (c *awsCloudImplementation) EC2() awsinterfaces.EC2API {
 	return c.ec2
 }
 
-func (c *awsCloudImplementation) IAM() iamiface.IAMAPI {
+func (c *awsCloudImplementation) IAM() awsinterfaces.IAMAPI {
 	return c.iam
 }
 
-func (c *awsCloudImplementation) ELB() elbiface.ELBAPI {
+func (c *awsCloudImplementation) ELB() awsinterfaces.ELBAPI {
 	return c.elb
 }
 
-func (c *awsCloudImplementation) ELBV2() elbv2iface.ELBV2API {
+func (c *awsCloudImplementation) ELBV2() awsinterfaces.ELBV2API {
 	return c.elbv2
 }
 
-func (c *awsCloudImplementation) Autoscaling() autoscalingiface.AutoScalingAPI {
+func (c *awsCloudImplementation) Autoscaling() awsinterfaces.AutoScalingAPI {
 	return c.autoscaling
 }
 
-func (c *awsCloudImplementation) Route53() route53iface.Route53API {
+func (c *awsCloudImplementation) Route53() awsinterfaces.Route53API {
 	return c.route53
 }
 
@@ -1845,12 +2014,16 @@ func (c *awsCloudImplementation) Spotinst() spotinst.Cloud {
 	return c.spotinst
 }
 
-func (c *awsCloudImplementation) SQS() sqsiface.SQSAPI {
+func (c *awsCloudImplementation) SQS() awsinterfaces.SQSAPI {
 	return c.sqs
 }
 
-func (c *awsCloudImplementation) EventBridge() eventbridgeiface.EventBridgeAPI {
+func (c *awsCloudImplementation) EventBridge() awsinterfaces.EventBridgeAPI {
 	return c.eventbridge
+}
+
+func (c *awsCloudImplementation) SSM() awsinterfaces.SSMAPI {
+	return c.ssm
 }
 
 func (c *awsCloudImplementation) FindVPCInfo(vpcID string) (*fi.VPCInfo, error) {
@@ -1858,6 +2031,7 @@ func (c *awsCloudImplementation) FindVPCInfo(vpcID string) (*fi.VPCInfo, error) 
 }
 
 func findVPCInfo(c AWSCloud, vpcID string) (*fi.VPCInfo, error) {
+	ctx := context.TODO()
 	vpc, err := c.DescribeVPC(vpcID)
 	if err != nil {
 		return nil, err
@@ -1867,26 +2041,26 @@ func findVPCInfo(c AWSCloud, vpcID string) (*fi.VPCInfo, error) {
 	}
 
 	vpcInfo := &fi.VPCInfo{
-		CIDR: aws.StringValue(vpc.CidrBlock),
+		CIDR: aws.ToString(vpc.CidrBlock),
 	}
 
 	// Find subnets in the VPC
 	{
 		klog.V(2).Infof("Calling DescribeSubnets for subnets in VPC %q", vpcID)
 		request := &ec2.DescribeSubnetsInput{
-			Filters: []*ec2.Filter{NewEC2Filter("vpc-id", vpcID)},
+			Filters: []ec2types.Filter{NewEC2Filter("vpc-id", vpcID)},
 		}
 
-		response, err := c.EC2().DescribeSubnets(request)
+		response, err := c.EC2().DescribeSubnets(ctx, request)
 		if err != nil {
 			return nil, fmt.Errorf("error listing subnets in VPC %q: %v", vpcID, err)
 		}
 		if response != nil {
 			for _, subnet := range response.Subnets {
 				subnetInfo := &fi.SubnetInfo{
-					ID:   aws.StringValue(subnet.SubnetId),
-					CIDR: aws.StringValue(subnet.CidrBlock),
-					Zone: aws.StringValue(subnet.AvailabilityZone),
+					ID:   aws.ToString(subnet.SubnetId),
+					CIDR: aws.ToString(subnet.CidrBlock),
+					Zone: aws.ToString(subnet.AvailabilityZone),
 				}
 
 				vpcInfo.Subnets = append(vpcInfo.Subnets, subnetInfo)
@@ -1912,22 +2086,22 @@ func getApiIngressStatus(c AWSCloud, cluster *kops.Cluster) ([]fi.ApiIngressStat
 	return ingresses, nil
 }
 
-func findDNSName(c AWSCloud, cluster *kops.Cluster) (string, error) {
+func findDNSName(cloud AWSCloud, cluster *kops.Cluster) (string, error) {
+	ctx := context.TODO()
+
 	name := "api." + cluster.Name
-	if cluster.Spec.API == nil || cluster.Spec.API.LoadBalancer == nil {
+	if cluster.Spec.API.LoadBalancer == nil {
 		return "", nil
 	}
-	if cluster.Spec.API.LoadBalancer.Class == kops.LoadBalancerClassClassic {
-		if lb, err := c.FindELBByNameTag(name); err != nil {
-			return "", fmt.Errorf("error looking for AWS ELB: %v", err)
-		} else if lb != nil {
-			return aws.StringValue(lb.DNSName), nil
+	if cluster.Spec.API.LoadBalancer.Class == kops.LoadBalancerClassNetwork {
+		allLoadBalancers, err := ListELBV2LoadBalancers(ctx, cloud)
+		if err != nil {
+			return "", fmt.Errorf("looking for AWS NLB: %w", err)
 		}
-	} else if cluster.Spec.API.LoadBalancer.Class == kops.LoadBalancerClassNetwork {
-		if lb, err := c.FindELBV2ByNameTag(name); err != nil {
-			return "", fmt.Errorf("error looking for AWS NLB: %v", err)
-		} else if lb != nil {
-			return aws.StringValue(lb.DNSName), nil
+
+		latest := FindLatestELBV2ByNameTag(allLoadBalancers, name)
+		if latest != nil {
+			return aws.ToString(latest.LoadBalancer.DNSName), nil
 		}
 	}
 	return "", nil
@@ -1935,19 +2109,33 @@ func findDNSName(c AWSCloud, cluster *kops.Cluster) (string, error) {
 
 // DefaultInstanceType determines an instance type for the specified cluster & instance group
 func (c *awsCloudImplementation) DefaultInstanceType(cluster *kops.Cluster, ig *kops.InstanceGroup) (string, error) {
-	var candidates []string
+	var candidates []ec2types.InstanceType
 
-	switch ig.Spec.Role {
-	case kops.InstanceGroupRoleMaster, kops.InstanceGroupRoleNode, kops.InstanceGroupRoleAPIServer:
+	switch {
+	case ig.Spec.Role.HasNode() || ig.Spec.Role.IsControlPlaneType():
 		// t3.medium is the cheapest instance with 4GB of mem, unlimited by default, fast and has decent network
 		// c5.large and c4.large are a good second option in case t3.medium is not available in the AZ
-		candidates = []string{"t3.medium", "c5.large", "c4.large"}
+		candidates = []ec2types.InstanceType{
+			ec2types.InstanceTypeT3Medium,
+			ec2types.InstanceTypeC5Large,
+			ec2types.InstanceTypeC4Large,
+			ec2types.InstanceTypeT4gMedium,
+		}
 
-	case kops.InstanceGroupRoleBastion:
-		candidates = []string{"t3.micro", "t2.micro"}
+	case ig.Spec.Role.HasBastion():
+		candidates = []ec2types.InstanceType{
+			ec2types.InstanceTypeT3Micro,
+			ec2types.InstanceTypeT2Micro,
+			ec2types.InstanceTypeT4gMicro,
+		}
 
 	default:
 		return "", fmt.Errorf("unhandled role %q", ig.Spec.Role)
+	}
+
+	imageArch := ec2types.ArchitectureTypeX8664
+	if imageInfo, err := c.ResolveImage(ig.Spec.Image); err == nil {
+		imageArch = ec2types.ArchitectureType(imageInfo.Architecture)
 	}
 
 	// Find the AZs the InstanceGroup targets
@@ -1958,42 +2146,62 @@ func (c *awsCloudImplementation) DefaultInstanceType(cluster *kops.Cluster, ig *
 	igZonesSet := sets.NewString(igZones...)
 
 	// TODO: Validate that instance type exists in all AZs, but skip AZs that don't support any VPC stuff
+	var reasons []string
 	for _, instanceType := range candidates {
+		if strings.HasPrefix(string(instanceType), "t4g") {
+			if imageArch != ec2types.ArchitectureTypeArm64 {
+				reasons = append(reasons, fmt.Sprintf("instance type %q does not match image architecture %q", instanceType, imageArch))
+				continue
+			}
+		} else {
+			if imageArch == ec2types.ArchitectureTypeArm64 {
+				reasons = append(reasons, fmt.Sprintf("instance type %q does not match image architecture %q", instanceType, imageArch))
+				continue
+			}
+		}
+
 		zones, err := c.zonesWithInstanceType(instanceType)
 		if err != nil {
 			return "", err
 		}
 		if zones.IsSuperset(igZonesSet) {
-			return instanceType, nil
+			return string(instanceType), nil
 		} else {
+			reasons = append(reasons, fmt.Sprintf("instance type %q is not available in all zones (available in zones %v, need %v)", instanceType, zones, igZones))
 			klog.V(2).Infof("can't use instance type %q, available in zones %v but need %v", instanceType, zones, igZones)
 		}
 	}
 
+	// Log the detailed reasons why we can't find an instance type
+	klog.Warning("cannot find suitable instance type")
+	for _, reason := range reasons {
+		klog.Warning("  *  " + reason)
+	}
 	return "", fmt.Errorf("could not find a suitable supported instance type for the instance group %q (type %q) in region %q", ig.Name, ig.Spec.Role, c.region)
 }
 
 // supportsInstanceType uses the DescribeReservedInstancesOfferings API call to determine if an instance type is supported in a region
-func (c *awsCloudImplementation) zonesWithInstanceType(instanceType string) (sets.String, error) {
+func (c *awsCloudImplementation) zonesWithInstanceType(instanceType ec2types.InstanceType) (sets.String, error) {
 	klog.V(4).Infof("checking if instance type %q is supported in region %q", instanceType, c.region)
+	ctx := context.TODO()
 	request := &ec2.DescribeReservedInstancesOfferingsInput{}
-	request.InstanceTenancy = aws.String("default")
+	request.InstanceTenancy = ec2types.TenancyDefault
 	request.IncludeMarketplace = aws.Bool(false)
-	request.OfferingClass = aws.String(ec2.OfferingClassTypeStandard)
-	request.OfferingType = aws.String(ec2.OfferingTypeValuesNoUpfront)
-	request.ProductDescription = aws.String(ec2.RIProductDescriptionLinuxUnixamazonVpc)
-	request.InstanceType = aws.String(instanceType)
+	request.OfferingClass = ec2types.OfferingClassTypeStandard
+	request.OfferingType = ec2types.OfferingTypeValuesNoUpfront
+	request.ProductDescription = ec2types.RIProductDescriptionLinuxUnixAmazonVpc
+	request.InstanceType = instanceType
 
 	zones := sets.NewString()
 
-	response, err := c.ec2.DescribeReservedInstancesOfferings(request)
+	response, err := c.ec2.DescribeReservedInstancesOfferings(ctx, request)
 	if err != nil {
 		return zones, fmt.Errorf("error checking if instance type %q is supported in region %q: %v", instanceType, c.region, err)
 	}
 
 	for _, item := range response.ReservedInstancesOfferings {
-		if aws.StringValue(item.InstanceType) == instanceType {
-			zones.Insert(aws.StringValue(item.AvailabilityZone))
+		if item.InstanceType == instanceType {
+			zones.Insert(aws.ToString(item.AvailabilityZone))
 		} else {
 			klog.Warningf("skipping non-matching instance type offering: %v", item)
 		}
@@ -2003,7 +2211,7 @@ func (c *awsCloudImplementation) zonesWithInstanceType(instanceType string) (set
 }
 
 // DescribeInstanceType calls ec2.DescribeInstanceType to get information for a particular instance type
-func (c *awsCloudImplementation) DescribeInstanceType(instanceType string) (*ec2.InstanceTypeInfo, error) {
+func (c *awsCloudImplementation) DescribeInstanceType(instanceType string) (*ec2types.InstanceTypeInfo, error) {
 	if info, ok := c.instanceTypes.typeMap[instanceType]; ok {
 		return info, nil
 	}
@@ -2018,32 +2226,33 @@ func (c *awsCloudImplementation) DescribeInstanceType(instanceType string) (*ec2
 	return info, nil
 }
 
-func describeInstanceType(c AWSCloud, instanceType string) (*ec2.InstanceTypeInfo, error) {
+func describeInstanceType(c AWSCloud, instanceType string) (*ec2types.InstanceTypeInfo, error) {
+	ctx := context.TODO()
 	req := &ec2.DescribeInstanceTypesInput{
-		InstanceTypes: aws.StringSlice([]string{instanceType}),
+		InstanceTypes: []ec2types.InstanceType{ec2types.InstanceType(instanceType)},
 	}
-	resp, err := c.EC2().DescribeInstanceTypes(req)
+	resp, err := c.EC2().DescribeInstanceTypes(ctx, req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("describing instance type %q in region %q: %w", instanceType, c.Region(), err)
 	}
 	if len(resp.InstanceTypes) != 1 {
-		return nil, fmt.Errorf("invalid instance type specified: %v", instanceType)
+		return nil, fmt.Errorf("instance type %q not found in region %q", instanceType, c.Region())
 	}
-	return resp.InstanceTypes[0], nil
+	return &resp.InstanceTypes[0], nil
 }
 
 // AccountInfo returns the AWS account ID and AWS partition that we are deploying into
-func (c *awsCloudImplementation) AccountInfo() (string, string, error) {
+func (c *awsCloudImplementation) AccountInfo(ctx context.Context) (string, string, error) {
 	request := &sts.GetCallerIdentityInput{}
 
-	response, err := c.sts.GetCallerIdentity(request)
+	response, err := c.sts.GetCallerIdentity(ctx, request)
 	if err != nil {
-		return "", "", fmt.Errorf("error geting AWS account ID: %v", err)
+		return "", "", fmt.Errorf("error getting AWS account ID: %v", err)
 	}
 
-	arn, err := arn.Parse(aws.StringValue(response.Arn))
+	arn, err := arn.Parse(aws.ToString(response.Arn))
 	if err != nil {
-		return "", "", fmt.Errorf("Failed to parse GetCallerIdentity ARN")
+		return "", "", fmt.Errorf("failed to parse GetCallerIdentity ARN: %w", err)
 	}
 
 	if arn.AccountID == "" {
@@ -2057,7 +2266,7 @@ func (c *awsCloudImplementation) AccountInfo() (string, string, error) {
 
 // GetRolesInInstanceProfile return role names which are associated with the instance profile specified by profileName.
 func GetRolesInInstanceProfile(c AWSCloud, profileName string) ([]string, error) {
-	output, err := c.IAM().GetInstanceProfile(&iam.GetInstanceProfileInput{
+	output, err := c.IAM().GetInstanceProfile(context.TODO(), &iam.GetInstanceProfileInput{
 		InstanceProfileName: aws.String(profileName),
 	})
 	if err != nil {
@@ -2068,40 +2277,4 @@ func GetRolesInInstanceProfile(c AWSCloud, profileName string) ([]string, error)
 		roleNames = append(roleNames, *role.RoleName)
 	}
 	return roleNames, nil
-}
-
-// GetInstanceCertificateNames returns the instance hostname and addresses that should go into certificates.
-// The first value is the node name and any additional values are IP addresses.
-func GetInstanceCertificateNames(instances *ec2.DescribeInstancesOutput) (addrs []string, err error) {
-	if len(instances.Reservations) != 1 {
-		return nil, fmt.Errorf("too many reservations returned for the single instance-id")
-	}
-
-	if len(instances.Reservations[0].Instances) != 1 {
-		return nil, fmt.Errorf("too many instances returned for the single instance-id")
-	}
-
-	instance := instances.Reservations[0].Instances[0]
-
-	name := *instance.PrivateDnsName
-
-	addrs = append(addrs, name)
-
-	// We only use data for the first interface, and only the first IP
-	for _, iface := range instance.NetworkInterfaces {
-		if iface.Attachment == nil {
-			continue
-		}
-		if *iface.Attachment.DeviceIndex != 0 {
-			continue
-		}
-		addrs = append(addrs, *iface.PrivateIpAddress)
-		if iface.Ipv6Addresses != nil && len(iface.Ipv6Addresses) > 0 {
-			addrs = append(addrs, *iface.Ipv6Addresses[0].Ipv6Address)
-		}
-		if iface.Association != nil && iface.Association.PublicIp != nil {
-			addrs = append(addrs, *iface.Association.PublicIp)
-		}
-	}
-	return addrs, nil
 }

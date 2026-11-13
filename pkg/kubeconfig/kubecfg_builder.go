@@ -28,7 +28,8 @@ import (
 // KubeconfigBuilder builds a kubecfg file
 // This logic previously lives in the bash scripts (create-kubeconfig in cluster/common.sh)
 type KubeconfigBuilder struct {
-	Server string
+	Server        string
+	TLSServerName string
 
 	Context   string
 	Namespace string
@@ -77,20 +78,6 @@ func (b *KubeconfigBuilder) DeleteKubeConfig(configAccess clientcmd.ConfigAccess
 	return nil
 }
 
-// Create new Rest Client
-func (c *KubeconfigBuilder) BuildRestConfig() (*rest.Config, error) {
-	restConfig := &rest.Config{
-		Host: c.Server,
-	}
-	restConfig.CAData = c.CACerts
-	restConfig.CertData = c.ClientCert
-	restConfig.KeyData = c.ClientKey
-	restConfig.Username = c.KubeUser
-	restConfig.Password = c.KubePassword
-
-	return restConfig, nil
-}
-
 // Write out a new kubeconfig
 func (b *KubeconfigBuilder) WriteKubecfg(configAccess clientcmd.ConfigAccess) error {
 	config, err := configAccess.GetStartingConfig()
@@ -108,6 +95,7 @@ func (b *KubeconfigBuilder) WriteKubecfg(configAccess clientcmd.ConfigAccess) er
 			cluster = clientcmdapi.NewCluster()
 		}
 		cluster.Server = b.Server
+		cluster.TLSServerName = b.TLSServerName
 		cluster.CertificateAuthorityData = b.CACerts
 
 		if config.Clusters == nil {
@@ -127,14 +115,18 @@ func (b *KubeconfigBuilder) WriteKubecfg(configAccess clientcmd.ConfigAccess) er
 			authInfo = clientcmdapi.NewAuthInfo()
 		}
 
-		if b.KubeUser != "" && b.KubePassword != "" {
+		// If we are using the auth plugin, we want to clear the password & client-key,
+		// otherwise the auth plugin won't be used
+
+		usingAuthPlugin := len(b.AuthenticationExec) != 0
+		if (b.KubeUser != "" && b.KubePassword != "") || usingAuthPlugin {
 			authInfo.Username = b.KubeUser
 			authInfo.Password = b.KubePassword
 
 			haveUserInfo = true
 		}
 
-		if b.ClientCert != nil && b.ClientKey != nil {
+		if (b.ClientCert != nil && b.ClientKey != nil) || usingAuthPlugin {
 			authInfo.ClientCertificate = ""
 			authInfo.ClientCertificateData = b.ClientCert
 			authInfo.ClientKey = ""
@@ -143,7 +135,7 @@ func (b *KubeconfigBuilder) WriteKubecfg(configAccess clientcmd.ConfigAccess) er
 			haveUserInfo = true
 		}
 
-		if len(b.AuthenticationExec) != 0 {
+		if usingAuthPlugin {
 			authInfo.Exec = &clientcmdapi.ExecConfig{
 				APIVersion: "client.authentication.k8s.io/v1beta1",
 				Command:    b.AuthenticationExec[0],
@@ -216,4 +208,22 @@ func (b *KubeconfigBuilder) WriteKubecfg(configAccess clientcmd.ConfigAccess) er
 
 	fmt.Printf("kOps has set your kubectl context to %s\n", b.Context)
 	return nil
+}
+
+func (b *KubeconfigBuilder) ToRESTConfig() (*rest.Config, error) {
+	restConfig := &rest.Config{}
+
+	restConfig.Host = b.Server
+	restConfig.TLSClientConfig.CAData = b.CACerts
+	restConfig.TLSClientConfig.ServerName = b.TLSServerName
+
+	usingAuthPlugin := len(b.AuthenticationExec) != 0
+	if usingAuthPlugin {
+		return nil, fmt.Errorf("auth plugin not yet supported by ToRESTConfig")
+	}
+
+	restConfig.CertData = b.ClientCert
+	restConfig.KeyData = b.ClientKey
+
+	return restConfig, nil
 }

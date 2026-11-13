@@ -17,15 +17,16 @@ limitations under the License.
 package awstasks
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/eventbridge"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/eventbridge"
+	eventbridgetypes "github.com/aws/aws-sdk-go-v2/service/eventbridge/types"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	awsResources "k8s.io/kops/pkg/resources/aws"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
-	"k8s.io/kops/upup/pkg/fi/cloudup/cloudformation"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraform"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraformWriter"
 )
@@ -37,19 +38,19 @@ type EventBridgeRule struct {
 	Lifecycle fi.Lifecycle
 
 	EventPattern *string
-	TargetArn    *string // required for cloudformation rendering
+	SQSQueue     *SQS
 
 	Tags map[string]string
 }
 
-var _ fi.CompareWithID = &EventBridgeRule{}
+var _ fi.CompareWithID = (*EventBridgeRule)(nil)
 
 func (eb *EventBridgeRule) CompareWithID() *string {
 	return eb.Name
 }
 
-func (eb *EventBridgeRule) Find(c *fi.Context) (*EventBridgeRule, error) {
-	cloud := c.Cloud.(awsup.AWSCloud)
+func (eb *EventBridgeRule) Find(c *fi.CloudupContext) (*EventBridgeRule, error) {
+	cloud := awsup.GetCloud(c)
 
 	if eb.Name == nil {
 		return nil, nil
@@ -58,7 +59,7 @@ func (eb *EventBridgeRule) Find(c *fi.Context) (*EventBridgeRule, error) {
 	request := &eventbridge.ListRulesInput{
 		NamePrefix: eb.Name,
 	}
-	response, err := cloud.EventBridge().ListRules(request)
+	response, err := cloud.EventBridge().ListRules(c.Context(), request)
 	if err != nil {
 		return nil, fmt.Errorf("error listing EventBridge rules: %v", err)
 	}
@@ -71,7 +72,7 @@ func (eb *EventBridgeRule) Find(c *fi.Context) (*EventBridgeRule, error) {
 
 	rule := response.Rules[0]
 
-	tagResponse, err := cloud.EventBridge().ListTagsForResource(&eventbridge.ListTagsForResourceInput{ResourceARN: rule.Arn})
+	tagResponse, err := cloud.EventBridge().ListTagsForResource(c.Context(), &eventbridge.ListTagsForResourceInput{ResourceARN: rule.Arn})
 	if err != nil {
 		return nil, fmt.Errorf("error listing tags for EventBridge rule: %v", err)
 	}
@@ -81,14 +82,14 @@ func (eb *EventBridgeRule) Find(c *fi.Context) (*EventBridgeRule, error) {
 		Name:         eb.Name,
 		Lifecycle:    eb.Lifecycle,
 		EventPattern: rule.EventPattern,
-		TargetArn:    eb.TargetArn,
+		SQSQueue:     eb.SQSQueue,
 		Tags:         mapEventBridgeTagsToMap(tagResponse.Tags),
 	}
 	return actual, nil
 }
 
-func (eb *EventBridgeRule) Run(c *fi.Context) error {
-	return fi.DefaultDeltaRunMethod(eb, c)
+func (eb *EventBridgeRule) Run(c *fi.CloudupContext) error {
+	return fi.CloudupDefaultDeltaRunMethod(eb, c)
 }
 
 func (_ *EventBridgeRule) CheckChanges(a, e, changes *EventBridgeRule) error {
@@ -102,10 +103,14 @@ func (_ *EventBridgeRule) CheckChanges(a, e, changes *EventBridgeRule) error {
 }
 
 func (eb *EventBridgeRule) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *EventBridgeRule) error {
+	if e.EventPattern == nil {
+		return awsResources.DeleteEventBridgeRule(t.Cloud, *e.Name)
+	}
+
 	if a == nil {
-		var tags []*eventbridge.Tag
+		var tags []eventbridgetypes.Tag
 		for k, v := range eb.Tags {
-			tags = append(tags, &eventbridge.Tag{
+			tags = append(tags, eventbridgetypes.Tag{
 				Key:   aws.String(k),
 				Value: aws.String(v),
 			})
@@ -117,7 +122,7 @@ func (eb *EventBridgeRule) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *Event
 			Tags:         tags,
 		}
 
-		_, err := t.Cloud.EventBridge().PutRule(request)
+		_, err := t.Cloud.EventBridge().PutRule(context.TODO(), request)
 		if err != nil {
 			return fmt.Errorf("error creating EventBridge rule: %v", err)
 		}
@@ -127,9 +132,9 @@ func (eb *EventBridgeRule) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *Event
 }
 
 type terraformEventBridgeRule struct {
-	Name         *string                  `json:"name" cty:"name"`
-	EventPattern *terraformWriter.Literal `json:"event_pattern" cty:"event_pattern"`
-	Tags         map[string]string        `json:"tags,omitempty" cty:"tags"`
+	Name         *string                  `cty:"name"`
+	EventPattern *terraformWriter.Literal `cty:"event_pattern"`
+	Tags         map[string]string        `cty:"tags"`
 }
 
 func (_ *EventBridgeRule) RenderTerraform(t *terraform.TerraformTarget, a, e, changes *EventBridgeRule) error {
@@ -148,42 +153,5 @@ func (_ *EventBridgeRule) RenderTerraform(t *terraform.TerraformTarget, a, e, ch
 }
 
 func (eb *EventBridgeRule) TerraformLink() *terraformWriter.Literal {
-	return terraformWriter.LiteralProperty("aws_cloudwatch_event_rule", fi.StringValue(eb.Name), "id")
-}
-
-type cloudformationTarget struct {
-	Id  *string
-	Arn *string
-}
-
-type cloudformationEventBridgeRule struct {
-	Name         *string                `json:"Name"`
-	EventPattern map[string]interface{} `json:"EventPattern"`
-	Targets      []cloudformationTarget `json:"Targets"`
-}
-
-func (_ *EventBridgeRule) RenderCloudformation(t *cloudformation.CloudformationTarget, a, e, changes *EventBridgeRule) error {
-	// convert event pattern string into a json struct
-	jsonString, err := fi.ResourceAsBytes(fi.NewStringResource(*e.EventPattern))
-	if err != nil {
-		return err
-	}
-	data := make(map[string]interface{})
-	err = json.Unmarshal(jsonString, &data)
-	if err != nil {
-		return fmt.Errorf("error parsing SQS PolicyDocument: %v", err)
-	}
-
-	target := &cloudformationTarget{
-		Id:  s("1"),
-		Arn: e.TargetArn,
-	}
-
-	cf := &cloudformationEventBridgeRule{
-		Name:         e.Name,
-		EventPattern: data,
-		Targets:      []cloudformationTarget{*target},
-	}
-
-	return t.RenderResource("AWS::Events::Rule", *e.Name, cf)
+	return terraformWriter.LiteralProperty("aws_cloudwatch_event_rule", fi.ValueOf(eb.Name), "id")
 }

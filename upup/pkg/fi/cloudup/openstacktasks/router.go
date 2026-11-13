@@ -19,7 +19,7 @@ package openstacktasks
 import (
 	"fmt"
 
-	"github.com/gophercloud/gophercloud/openstack/networking/v2/extensions/layer3/routers"
+	"github.com/gophercloud/gophercloud/v2/openstack/networking/v2/extensions/layer3/routers"
 	"k8s.io/klog/v2"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/openstack"
@@ -33,17 +33,17 @@ type Router struct {
 	AvailabilityZoneHints []*string
 }
 
-var _ fi.CompareWithID = &Router{}
+var _ fi.CompareWithID = (*Router)(nil)
 
 func (n *Router) CompareWithID() *string {
 	return n.ID
 }
 
-//NewRouterTaskFromCloud initializes and returns a new Router
+// NewRouterTaskFromCloud initializes and returns a new Router
 func NewRouterTaskFromCloud(cloud openstack.OpenstackCloud, lifecycle fi.Lifecycle, router *routers.Router, find *Router) (*Router, error) {
 	actual := &Router{
-		ID:                    fi.String(router.ID),
-		Name:                  fi.String(router.Name),
+		ID:                    new(router.ID),
+		Name:                  new(router.Name),
 		Lifecycle:             lifecycle,
 		AvailabilityZoneHints: fi.StringSlice(router.AvailabilityZoneHints),
 	}
@@ -53,11 +53,11 @@ func NewRouterTaskFromCloud(cloud openstack.OpenstackCloud, lifecycle fi.Lifecyc
 	return actual, nil
 }
 
-func (n *Router) Find(context *fi.Context) (*Router, error) {
-	cloud := context.Cloud.(openstack.OpenstackCloud)
+func (n *Router) Find(context *fi.CloudupContext) (*Router, error) {
+	cloud := context.T.Cloud.(openstack.OpenstackCloud)
 	opt := routers.ListOpts{
-		Name: fi.StringValue(n.Name),
-		ID:   fi.StringValue(n.ID),
+		Name: fi.ValueOf(n.Name),
+		ID:   fi.ValueOf(n.ID),
 	}
 	rs, err := cloud.ListRouters(opt)
 	if err != nil {
@@ -66,13 +66,13 @@ func (n *Router) Find(context *fi.Context) (*Router, error) {
 	if rs == nil {
 		return nil, nil
 	} else if len(rs) != 1 {
-		return nil, fmt.Errorf("found multiple routers with name: %s", fi.StringValue(n.Name))
+		return nil, fmt.Errorf("found multiple routers with name: %s", fi.ValueOf(n.Name))
 	}
 	return NewRouterTaskFromCloud(cloud, n.Lifecycle, &rs[0], n)
 }
 
-func (c *Router) Run(context *fi.Context) error {
-	return fi.DefaultDeltaRunMethod(c, context)
+func (c *Router) Run(context *fi.CloudupContext) error {
+	return fi.CloudupDefaultDeltaRunMethod(c, context)
 }
 
 func (_ *Router) CheckChanges(a, e, changes *Router) error {
@@ -93,11 +93,11 @@ func (_ *Router) CheckChanges(a, e, changes *Router) error {
 
 func (_ *Router) RenderOpenstack(t *openstack.OpenstackAPITarget, a, e, changes *Router) error {
 	if a == nil {
-		klog.V(2).Infof("Creating Router with name:%q", fi.StringValue(e.Name))
+		klog.V(2).Infof("Creating Router with name:%q", fi.ValueOf(e.Name))
 
 		opt := routers.CreateOpts{
-			Name:                  fi.StringValue(e.Name),
-			AdminStateUp:          fi.Bool(true),
+			Name:                  fi.ValueOf(e.Name),
+			AdminStateUp:          new(true),
 			AvailabilityZoneHints: fi.StringSliceValue(e.AvailabilityZoneHints),
 		}
 		floatingNet, err := t.Cloud.GetExternalNetwork()
@@ -125,11 +125,11 @@ func (_ *Router) RenderOpenstack(t *openstack.OpenstackAPITarget, a, e, changes 
 		if err != nil {
 			return fmt.Errorf("Error creating router: %v", err)
 		}
-		e.ID = fi.String(v.ID)
+		e.ID = new(v.ID)
 		klog.V(2).Infof("Creating a new Openstack router, id=%s", v.ID)
 		return nil
 	}
 	e.ID = a.ID
-	klog.V(2).Infof("Using an existing Openstack router, id=%s", fi.StringValue(e.ID))
+	klog.V(2).Infof("Using an existing Openstack router, id=%s", fi.ValueOf(e.ID))
 	return nil
 }

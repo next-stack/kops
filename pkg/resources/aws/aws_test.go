@@ -17,16 +17,19 @@ limitations under the License.
 package aws
 
 import (
+	"context"
 	"reflect"
 	"sort"
 	"testing"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/ec2"
-	"github.com/aws/aws-sdk-go/service/elb"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	elbtypes "github.com/aws/aws-sdk-go-v2/service/elasticloadbalancing/types"
+	iamtypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
 	"k8s.io/kops/cloudmock/aws/mockec2"
+	"k8s.io/kops/cloudmock/aws/mockiam"
 	"k8s.io/kops/pkg/resources"
-	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
 )
 
@@ -40,16 +43,16 @@ func TestAddUntaggedRouteTables(t *testing.T) {
 	cloud.MockEC2 = c
 
 	// Matches by vpc id
-	c.AddRouteTable(&ec2.RouteTable{
+	c.AddRouteTable(&ec2types.RouteTable{
 		VpcId:        aws.String("vpc-1234"),
 		RouteTableId: aws.String("rtb-1234"),
 	})
 
 	// Skips main route tables
-	c.AddRouteTable(&ec2.RouteTable{
+	c.AddRouteTable(&ec2types.RouteTable{
 		VpcId:        aws.String("vpc-1234"),
 		RouteTableId: aws.String("rtb-1234main"),
-		Associations: []*ec2.RouteTableAssociation{
+		Associations: []ec2types.RouteTableAssociation{
 			{
 				Main: aws.Bool(true),
 			},
@@ -57,10 +60,10 @@ func TestAddUntaggedRouteTables(t *testing.T) {
 	})
 
 	// Skips route table tagged with other cluster
-	c.AddRouteTable(&ec2.RouteTable{
+	c.AddRouteTable(&ec2types.RouteTable{
 		VpcId:        aws.String("vpc-1234"),
 		RouteTableId: aws.String("rtb-1234notmain"),
-		Tags: []*ec2.Tag{
+		Tags: []ec2types.Tag{
 			{
 				Key:   aws.String(awsup.TagClusterName),
 				Value: aws.String("other.example.com"),
@@ -69,7 +72,7 @@ func TestAddUntaggedRouteTables(t *testing.T) {
 	})
 
 	// Ignores non-matching vpcs
-	c.AddRouteTable(&ec2.RouteTable{
+	c.AddRouteTable(&ec2types.RouteTable{
 		VpcId:        aws.String("vpc-5555"),
 		RouteTableId: aws.String("rtb-5555"),
 	})
@@ -92,19 +95,159 @@ func TestAddUntaggedRouteTables(t *testing.T) {
 	}
 }
 
+func TestListIAMInstanceProfiles(t *testing.T) {
+	cloud := awsup.BuildMockAWSCloud("us-east-1", "abc")
+	// resources := make(map[string]*Resource)
+	clusterName := "me.example.com"
+	ownershipTagKey := "kubernetes.io/cluster/" + clusterName
+
+	c := &mockiam.MockIAM{
+		InstanceProfiles: make(map[string]*iamtypes.InstanceProfile),
+	}
+	cloud.MockIAM = c
+
+	tags := []iamtypes.Tag{
+		{
+			Key:   &ownershipTagKey,
+			Value: new("owned"),
+		},
+	}
+
+	{
+		name := "prefixed." + clusterName
+
+		c.InstanceProfiles[name] = &iamtypes.InstanceProfile{
+			InstanceProfileName: &name,
+			Tags:                tags,
+		}
+	}
+	{
+
+		name := clusterName + ".not-prefixed"
+
+		c.InstanceProfiles[name] = &iamtypes.InstanceProfile{
+			InstanceProfileName: &name,
+			Tags:                tags,
+		}
+	}
+	{
+		name := "prefixed2." + clusterName
+		owner := "kubernetes.io/cluster/foo." + clusterName
+		c.InstanceProfiles[name] = &iamtypes.InstanceProfile{
+			InstanceProfileName: &name,
+			Tags: []iamtypes.Tag{
+				{
+					Key:   &owner,
+					Value: new("owned"),
+				},
+			},
+		}
+	}
+
+	{
+		name := "prefixed3." + clusterName
+		c.InstanceProfiles[name] = &iamtypes.InstanceProfile{
+			InstanceProfileName: &name,
+		}
+	}
+
+	// This is a special entity that will appear in list, but not in get
+	{
+		name := "__no_entity__." + clusterName
+		c.InstanceProfiles[name] = &iamtypes.InstanceProfile{
+			InstanceProfileName: &name,
+		}
+	}
+
+	resourceTrackers, err := ListIAMInstanceProfiles(cloud, "", clusterName)
+	if err != nil {
+		t.Fatalf("error listing IAM roles: %v", err)
+	}
+
+	if len(resourceTrackers) != 2 {
+		t.Errorf("Unexpected number of resources to delete. Expected 2, got %d", len(resourceTrackers))
+	}
+}
+
+func TestListIAMRoles(t *testing.T) {
+	cloud := awsup.BuildMockAWSCloud("us-east-1", "abc")
+	// resources := make(map[string]*Resource)
+	clusterName := "me.example.com"
+	ownershipTagKey := "kubernetes.io/cluster/" + clusterName
+
+	c := &mockiam.MockIAM{
+		Roles: make(map[string]*iamtypes.Role),
+	}
+	cloud.MockIAM = c
+
+	tags := []iamtypes.Tag{
+		{
+			Key:   &ownershipTagKey,
+			Value: new("owned"),
+		},
+	}
+
+	{
+		name := "prefixed." + clusterName
+
+		c.Roles[name] = &iamtypes.Role{
+			RoleName: &name,
+			Tags:     tags,
+		}
+	}
+	{
+
+		name := clusterName + ".not-prefixed"
+
+		c.Roles[name] = &iamtypes.Role{
+			RoleName: &name,
+			Tags:     tags,
+		}
+	}
+	{
+		name := "prefixed2." + clusterName
+		owner := "kubernetes.io/cluster/foo." + clusterName
+		c.Roles[name] = &iamtypes.Role{
+			RoleName: &name,
+			Tags: []iamtypes.Tag{
+				{
+					Key:   &owner,
+					Value: new("owned"),
+				},
+			},
+		}
+	}
+
+	{
+		name := "prefixed3." + clusterName
+		c.Roles[name] = &iamtypes.Role{
+			RoleName: &name,
+		}
+	}
+
+	resourceTrackers, err := ListIAMRoles(cloud, "", clusterName)
+	if err != nil {
+		t.Fatalf("error listing IAM roles: %v", err)
+	}
+
+	if len(resourceTrackers) != 2 {
+		t.Errorf("Unexpected number of resources to delete. Expected 2, got %d", len(resourceTrackers))
+	}
+}
+
 func TestListRouteTables(t *testing.T) {
 	cloud := awsup.BuildMockAWSCloud("us-east-1", "abc")
-	//resources := make(map[string]*Resource)
+	// resources := make(map[string]*Resource)
 	clusterName := "me.example.com"
 	ownershipTagKey := "kubernetes.io/cluster/" + clusterName
 
 	c := &mockec2.MockEC2{}
 	cloud.MockEC2 = c
 
-	c.AddRouteTable(&ec2.RouteTable{
+	c.AddRouteTable(&ec2types.RouteTable{
 		VpcId:        aws.String("vpc-1234"),
 		RouteTableId: aws.String("rtb-shared"),
-		Tags: []*ec2.Tag{
+		Tags: []ec2types.Tag{
 			{
 				Key:   aws.String("KubernetesCluster"),
 				Value: aws.String(clusterName),
@@ -115,10 +258,10 @@ func TestListRouteTables(t *testing.T) {
 			},
 		},
 	})
-	c.AddRouteTable(&ec2.RouteTable{
+	c.AddRouteTable(&ec2types.RouteTable{
 		VpcId:        aws.String("vpc-1234"),
 		RouteTableId: aws.String("rtb-owned"),
-		Tags: []*ec2.Tag{
+		Tags: []ec2types.Tag{
 			{
 				Key:   aws.String("KubernetesCluster"),
 				Value: aws.String(clusterName),
@@ -130,7 +273,7 @@ func TestListRouteTables(t *testing.T) {
 		},
 	})
 
-	resourceTrackers, err := ListRouteTables(cloud, clusterName)
+	resourceTrackers, err := ListRouteTables(cloud, "", clusterName)
 	if err != nil {
 		t.Fatalf("error listing route tables: %v", err)
 	}
@@ -145,6 +288,7 @@ func TestListRouteTables(t *testing.T) {
 }
 
 func TestSharedVolume(t *testing.T) {
+	ctx := context.Background()
 	cloud := awsup.BuildMockAWSCloud("us-east-1", "abc")
 	clusterName := "me.example.com"
 	ownershipTagKey := "kubernetes.io/cluster/" + clusterName
@@ -152,11 +296,11 @@ func TestSharedVolume(t *testing.T) {
 	c := &mockec2.MockEC2{}
 	cloud.MockEC2 = c
 
-	sharedVolume, err := c.CreateVolume(&ec2.CreateVolumeInput{
-		TagSpecifications: []*ec2.TagSpecification{
+	sharedVolume, err := c.CreateVolume(ctx, &ec2.CreateVolumeInput{
+		TagSpecifications: []ec2types.TagSpecification{
 			{
-				ResourceType: aws.String(ec2.ResourceTypeVolume),
-				Tags: []*ec2.Tag{
+				ResourceType: ec2types.ResourceTypeVolume,
+				Tags: []ec2types.Tag{
 					{
 						Key:   aws.String(ownershipTagKey),
 						Value: aws.String("shared"),
@@ -169,10 +313,10 @@ func TestSharedVolume(t *testing.T) {
 		t.Fatalf("error creating volume: %v", err)
 	}
 
-	ownedVolume, err := c.CreateVolume(&ec2.CreateVolumeInput{
-		TagSpecifications: []*ec2.TagSpecification{
+	ownedVolume, err := c.CreateVolume(ctx, &ec2.CreateVolumeInput{
+		TagSpecifications: []ec2types.TagSpecification{
 			{
-				Tags: []*ec2.Tag{
+				Tags: []ec2types.Tag{
 					{
 						Key:   aws.String(ownershipTagKey),
 						Value: aws.String("owned"),
@@ -185,7 +329,7 @@ func TestSharedVolume(t *testing.T) {
 		t.Fatalf("error creating volume: %v", err)
 	}
 
-	resourceTrackers, err := ListVolumes(cloud, clusterName)
+	resourceTrackers, err := ListVolumes(cloud, "", clusterName)
 	if err != nil {
 		t.Fatalf("error listing volumes: %v", err)
 	}
@@ -203,47 +347,47 @@ func TestSharedVolume(t *testing.T) {
 func TestMatchesElbTags(t *testing.T) {
 	tc := []struct {
 		tags     map[string]string
-		actual   []*elb.Tag
+		actual   []elbtypes.Tag
 		expected bool
 	}{
 		{
 			tags: map[string]string{"tagkey1": "tagvalue1"},
-			actual: []*elb.Tag{
+			actual: []elbtypes.Tag{
 				{
-					Key:   fi.String("tagkey1"),
-					Value: fi.String("tagvalue1"),
+					Key:   new("tagkey1"),
+					Value: new("tagvalue1"),
 				},
 				{
-					Key:   fi.String("tagkey2"),
-					Value: fi.String("tagvalue2"),
+					Key:   new("tagkey2"),
+					Value: new("tagvalue2"),
 				},
 			},
 			expected: true,
 		},
 		{
 			tags: map[string]string{"tagkey2": "tagvalue2"},
-			actual: []*elb.Tag{
+			actual: []elbtypes.Tag{
 				{
-					Key:   fi.String("tagkey1"),
-					Value: fi.String("tagvalue1"),
+					Key:   new("tagkey1"),
+					Value: new("tagvalue1"),
 				},
 				{
-					Key:   fi.String("tagkey2"),
-					Value: fi.String("tagvalue2"),
+					Key:   new("tagkey2"),
+					Value: new("tagvalue2"),
 				},
 			},
 			expected: true,
 		},
 		{
 			tags: map[string]string{"tagkey3": "tagvalue3"},
-			actual: []*elb.Tag{
+			actual: []elbtypes.Tag{
 				{
-					Key:   fi.String("tagkey1"),
-					Value: fi.String("tagvalue1"),
+					Key:   new("tagkey1"),
+					Value: new("tagvalue1"),
 				},
 				{
-					Key:   fi.String("tagkey2"),
-					Value: fi.String("tagvalue2"),
+					Key:   new("tagkey2"),
+					Value: new("tagvalue2"),
 				},
 			},
 			expected: false,
@@ -255,5 +399,45 @@ func TestMatchesElbTags(t *testing.T) {
 		if got != test.expected {
 			t.Fatalf("unexpected result from testcase %d, expected %v, got %v", i, test.expected, got)
 		}
+	}
+}
+
+func TestGuessSSHUser(t *testing.T) {
+	cases := []struct {
+		name     string
+		ownerID  string
+		image    string
+		expected string
+	}{
+		{name: "amazon linux 2023", ownerID: awsup.WellKnownAccountAmazonLinux2023, expected: "ec2-user"},
+		{name: "redhat", ownerID: awsup.WellKnownAccountRedhat, expected: "ec2-user"},
+		{name: "debian", ownerID: awsup.WellKnownAccountDebian, expected: "admin"},
+		{name: "ubuntu", ownerID: awsup.WellKnownAccountUbuntu, expected: "ubuntu"},
+		{name: "flatcar", ownerID: awsup.WellKnownAccountFlatcar, expected: "core"},
+		{name: "rocky linux", ownerID: awsup.WellKnownAccountRockyLinux, expected: "rocky"},
+		{
+			name:     "centos is matched on the image name",
+			ownerID:  "123456789012",
+			image:    "CentOS-Stream-ec2-9-20260101.0.x86_64",
+			expected: "centos",
+		},
+		{
+			name:     "an unrecognized image has no known user",
+			ownerID:  "123456789012",
+			image:    "my-custom-image",
+			expected: "",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			image := &ec2types.Image{
+				OwnerId: aws.String(tc.ownerID),
+				Name:    aws.String(tc.image),
+			}
+			if actual := guessSSHUser(image); actual != tc.expected {
+				t.Errorf("guessSSHUser(owner=%q, name=%q) = %q, expected %q", tc.ownerID, tc.image, actual, tc.expected)
+			}
+		})
 	}
 }

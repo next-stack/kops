@@ -1,0 +1,126 @@
+apiVersion: kops.k8s.io/v1alpha2
+kind: Cluster
+metadata:
+  name: {{.clusterName}}
+spec:
+  api:
+    loadBalancer:
+      class: Network
+      type: Public
+  authorization:
+    rbac: {}
+  awsLoadBalancerController:
+    enabled: true
+  kubernetesApiAccess:
+  - {{.publicIP}}
+  certManager:
+    enabled: true
+  channel: stable
+  cloudProvider: {{.cloudProvider}}
+  clusterAutoscaler:
+    enabled: true
+  configBase: "{{.stateStore}}/{{.clusterName}}"
+  etcdClusters:
+  - etcdMembers:
+    {{ range $zone := .zones }}
+    - instanceGroup: master-{{$zone}}
+      name: {{$zone}}
+    {{ end }}
+    name: main
+  - etcdMembers:
+    {{ range $zone := .zones }}
+    - instanceGroup: master-{{$zone}}
+      name: {{$zone}}
+    {{ end }}
+    name: events
+  iam: {}
+  kubelet:
+    anonymousAuth: false
+  kubernetesVersion: {{.kubernetesVersion}}
+  kubeDNS:
+    provider: CoreDNS
+    nodeLocalDNS:
+      enabled: true
+  masterPublicName: api.{{.clusterName}}
+  metricsServer:
+    enabled: true
+  networkCIDR: 172.20.0.0/16
+  networking:
+    cilium:
+      hubble:
+        enabled: true
+  nodePortAccess:
+    - 0.0.0.0/0
+  nodeProblemDetector:
+    enabled: true
+  nodeTerminationHandler:
+    enabled: true
+    enableSQSTerminationDraining: true
+  nonMasqueradeCIDR: 100.64.0.0/10
+  podIdentityWebhook:
+    enabled: true
+  sshAccess:
+    - {{.publicIP}}
+  subnets:
+  {{ range $index, $zone := .zones }}
+  - cidr: 172.20.{{$index}}.0/24
+    name: {{$zone}}
+    type: Public
+    zone: {{$zone}}
+  {{end}}
+  rollingUpdate:
+    maxSurge: "100%"
+  topology:
+    dns:
+      type: None
+---
+
+apiVersion: kops.k8s.io/v1alpha2
+kind: SSHCredential
+metadata:
+  name: admin
+  labels:
+    kops.k8s.io/cluster: {{.clusterName}}
+spec:
+  publicKey: {{.sshPublicKey}}
+
+
+{{ range $zone := .zones }}
+---
+
+apiVersion: kops.k8s.io/v1alpha2
+kind: InstanceGroup
+metadata:
+  name: nodes-{{$zone}}
+  labels:
+    kops.k8s.io/cluster: {{$.clusterName}}
+spec:
+  associatePublicIp: true
+  image: ssm:/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id
+  machineType: t3.medium
+  maxSize: 2
+  minSize: 2
+  role: Node
+  subnets:
+  - {{$zone}}
+{{ end }}
+
+{{ range $zone := .zones }}
+---
+apiVersion: kops.k8s.io/v1alpha2
+kind: InstanceGroup
+metadata:
+  name: master-{{$zone}}
+  labels:
+    kops.k8s.io/cluster: {{$.clusterName}}
+spec:
+  associatePublicIp: true
+  image: ssm:/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id
+  machineType: c5.large
+  maxSize: 1
+  minSize: 1
+  role: Master
+  subnets:
+  - {{$zone}}
+
+{{ end }}

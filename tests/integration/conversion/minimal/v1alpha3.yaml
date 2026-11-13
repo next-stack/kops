@@ -4,17 +4,22 @@ metadata:
   creationTimestamp: "2016-12-10T22:42:27Z"
   name: minimal.example.com
 spec:
-  additionalSans:
-  - proxy.api.minimal.example.com
   addons:
   - manifest: s3://somebucket/example.yaml
   api:
+    access:
+    - 0.0.0.0/0
+    additionalSANs:
+    - proxy.api.minimal.example.com
     dns: {}
+    publicName: api.minimal.example.com
   authorization:
     alwaysAllow: {}
   channel: stable
-  cloudProvider: aws
-  configBase: memfs://clusters.example.com/minimal.example.com
+  cloudProvider:
+    aws: {}
+  configStore:
+    base: memfs://clusters.example.com/minimal.example.com
   etcdClusters:
   - cpuRequest: 200m
     etcdMembers:
@@ -29,27 +34,20 @@ spec:
     memoryRequest: 100Mi
     name: events
   iam: {}
-  kubernetesApiAccess:
-  - 0.0.0.0/0
-  kubernetesVersion: v1.14.0
-  masterInternalName: api.internal.minimal.example.com
-  masterPublicName: api.minimal.example.com
-  networkCIDR: 172.20.0.0/16
+  kubernetesVersion: v1.35.0
   networking:
     kubenet: {}
-  nonMasqueradeCIDR: 100.64.0.0/10
+    networkCIDR: 172.20.0.0/16
+    nonMasqueradeCIDR: 100.64.0.0/10
+    subnets:
+    - cidr: 172.20.32.0/19
+      name: us-test-1a
+      type: Public
+      zone: us-test-1a
+    topology:
+      dns: None
   sshAccess:
   - 0.0.0.0/0
-  subnets:
-  - cidr: 172.20.32.0/19
-    name: us-test-1a
-    type: Public
-    zone: us-test-1a
-  topology:
-    dns:
-      type: Public
-    masters: public
-    nodes: public
 
 ---
 
@@ -61,8 +59,8 @@ metadata:
     kops.k8s.io/cluster: minimal.example.com
   name: nodes
 spec:
-  associatePublicIp: true
-  image: kope.io/k8s-1.4-debian-jessie-amd64-hvm-ebs-2016-10-21
+  associatePublicIP: true
+  image: ubuntu/images/hvm-ssd-gp3/ubuntu-resolute-26.04-amd64-server-20220404
   machineType: t2.medium
   maxSize: 2
   minSize: 2
@@ -80,11 +78,11 @@ metadata:
     kops.k8s.io/cluster: minimal.example.com
   name: master-us-test-1a
 spec:
-  associatePublicIp: true
-  image: kope.io/k8s-1.4-debian-jessie-amd64-hvm-ebs-2016-10-21
+  associatePublicIP: true
+  image: ubuntu/images/hvm-ssd-gp3/ubuntu-resolute-26.04-amd64-server-20220404
   machineType: m3.medium
   maxSize: 1
   minSize: 1
-  role: Master
+  role: ControlPlane
   subnets:
   - us-test-1a

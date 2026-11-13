@@ -19,7 +19,7 @@ metadata:
   labels:
     k8s-addon: kops-controller.addons.k8s.io
     k8s-app: kops-controller
-    version: v1.23.0-alpha.1
+    version: {{ KopsVersionForLabel }}
 spec:
   selector:
     matchLabels:
@@ -31,13 +31,24 @@ spec:
       labels:
         k8s-addon: kops-controller.addons.k8s.io
         k8s-app: kops-controller
-        version: v1.23.0-alpha.1
-{{ if UseKopsControllerForNodeBootstrap }}
+        version: {{ KopsVersionForLabel }}
       annotations:
         dns.alpha.kubernetes.io/internal: kops-controller.internal.{{ ClusterName }}
-{{ end }}
     spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: node-role.kops.k8s.io/kops-controller
+                operator: Exists
+            - matchExpressions:
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
+              - key: kops.k8s.io/kops-controller-pki
+                operator: Exists
       priorityClassName: system-cluster-critical
+      nodeSelector: null
       tolerations:
       - key: node.cloudprovider.kubernetes.io/uninitialized
         operator: Exists
@@ -45,15 +56,16 @@ spec:
         operator: Exists
       - key: node-role.kubernetes.io/master
         operator: Exists
-      nodeSelector:
-        node-role.kubernetes.io/master: ""
-        kops.k8s.io/kops-controller-pki: ""
+      - key: node-role.kubernetes.io/control-plane
+        operator: Exists
+      - key: node-role.kubernetes.io/api-server
+        operator: Exists
       dnsPolicy: Default  # Don't use cluster DNS (we are likely running before kube-dns)
       hostNetwork: true
       serviceAccount: kops-controller
       containers:
       - name: kops-controller
-        image: k8s.gcr.io/kops/kops-controller:1.23.0-alpha.1
+        image: registry.k8s.io/kops/kops-controller:{{ KopsVersionImageTag }}
         volumeMounts:
 {{ if .UseHostCertificates }}
         - mountPath: /etc/ssl/certs
@@ -64,17 +76,18 @@ spec:
           name: kops-controller-config
         - mountPath: /etc/kubernetes/kops-controller/pki/
           name: kops-controller-pki
-        command:
+        args:
 {{ range $arg := KopsControllerArgv }}
         - "{{ $arg }}"
 {{ end }}
+        command: null
         env:
         - name: KUBERNETES_SERVICE_HOST
           value: "127.0.0.1"
-{{- if KopsSystemEnv }}
-{{ range $var := KopsSystemEnv }}
-        - name: {{ $var.Name }}
-          value: {{ $var.Value }}
+{{- if KopsControllerEnv }}
+{{ range $var := KopsControllerEnv }}
+        - name: "{{ $var.Name }}"
+          value: "{{ $var.Value }}"
 {{ end }}
 {{- end }}
         resources:
@@ -83,6 +96,12 @@ spec:
             memory: 50Mi
         securityContext:
           runAsNonRoot: true
+          runAsUser: 10011
+{{ if ContainerdSELinuxEnabled }}
+          seLinuxOptions:
+            type: spc_t
+            level: s0
+{{ end }}
       volumes:
 {{ if .UseHostCertificates }}
       - hostPath:
@@ -205,3 +224,4 @@ subjects:
 - apiGroup: rbac.authorization.k8s.io
   kind: User
   name: system:serviceaccount:kube-system:kops-controller
+

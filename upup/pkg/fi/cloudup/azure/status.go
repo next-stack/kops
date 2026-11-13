@@ -21,12 +21,12 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2020-06-01/compute"
+	compute "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v7"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/cloudinstances"
-	"k8s.io/kops/protokube/pkg/etcd"
+	"k8s.io/kops/pkg/etcd"
 	"k8s.io/kops/upup/pkg/fi"
 )
 
@@ -49,10 +49,10 @@ func (c *azureCloudImplementation) FindClusterStatus(cluster *kops.Cluster) (*ko
 	return status, nil
 }
 
-func (c *azureCloudImplementation) findEtcdStatus(disks []compute.Disk) ([]kops.EtcdClusterStatus, error) {
+func (c *azureCloudImplementation) findEtcdStatus(disks []*compute.Disk) ([]kops.EtcdClusterStatus, error) {
 	statusMap := make(map[string]*kops.EtcdClusterStatus)
 	for _, disk := range disks {
-		if !c.isDiskForCluster(&disk) {
+		if !c.isDiskForCluster(disk) {
 			continue
 		}
 
@@ -62,7 +62,7 @@ func (c *azureCloudImplementation) findEtcdStatus(disks []compute.Disk) ([]kops.
 			master          bool
 		)
 		for k, v := range disk.Tags {
-			if k == TagNameRolePrefix+TagRoleMaster {
+			if k == TagNameRolePrefix+TagRoleControlPlane || k == TagNameRolePrefix+TagRoleMaster {
 				master = true
 				continue
 			}
@@ -90,7 +90,7 @@ func (c *azureCloudImplementation) findEtcdStatus(disks []compute.Disk) ([]kops.
 		}
 		status.Members = append(status.Members, &kops.EtcdMemberStatus{
 			Name:     etcdClusterSpec.NodeName,
-			VolumeId: *disk.Name,
+			VolumeID: *disk.Name,
 		})
 	}
 
@@ -120,9 +120,13 @@ func (c *azureCloudImplementation) GetCloudGroups(
 	warnUnmatched bool,
 	nodes []v1.Node,
 ) (map[string]*cloudinstances.CloudInstanceGroup, error) {
-	igsByName, err := keyedByName(instancegroups, cluster.Name)
+	igsByLegacyName, err := keyedByLegacyName(instancegroups, cluster.Name)
 	if err != nil {
 		return nil, err
+	}
+	igsByName := make(map[string]*kops.InstanceGroup)
+	for _, ig := range igsByLegacyName {
+		igsByName[ig.Name] = ig
 	}
 
 	ctx := context.TODO()
@@ -135,19 +139,32 @@ func (c *azureCloudImplementation) GetCloudGroups(
 
 	groups := make(map[string]*cloudinstances.CloudInstanceGroup)
 	for _, vmss := range vmsses {
-		if !isOwnedByCluster(&vmss, cluster.Name) {
+		if !isOwnedByCluster(vmss, cluster.Name) {
 			continue
 		}
 
-		ig, ok := igsByName[*vmss.Name]
-		if !ok {
+		var ig *kops.InstanceGroup
+		if igName := fi.ValueOf(vmss.Tags[InstanceGroupNameTag]); igName != "" {
+			ig = igsByName[igName]
+		} else {
+			name := strings.ToLower(fi.ValueOf(vmss.Name))
+			ig = igsByLegacyName[name]
+			if ig == nil {
+				ig = igsByName[name]
+			}
+		}
+		if ig == nil {
 			if warnUnmatched {
 				klog.Warningf("Found VM Scale Set with no corresponding instance group %q", *vmss.Name)
 			}
 			continue
 		}
 
-		cig, err := c.buildCloudInstanceGroup(ctx, cluster, ig, &vmss, nodeMap)
+		if _, ok := groups[ig.Name]; ok {
+			return nil, fmt.Errorf("found multiple VM Scale Sets matching instance group %q", ig.Name)
+		}
+
+		cig, err := c.buildCloudInstanceGroup(ctx, cluster, ig, vmss, nodeMap)
 		if err != nil {
 			return nil, fmt.Errorf("error getting cloud instance group %q: %v", ig.Name, err)
 		}
@@ -163,7 +180,7 @@ func (c *azureCloudImplementation) buildCloudInstanceGroup(
 	vmss *compute.VirtualMachineScaleSet,
 	nodeMap map[string]*v1.Node,
 ) (*cloudinstances.CloudInstanceGroup, error) {
-	cap := int(*vmss.Sku.Capacity)
+	cap := int(*vmss.SKU.Capacity)
 	cg := &cloudinstances.CloudInstanceGroup{
 		HumanName:     *vmss.Name,
 		InstanceGroup: ig,
@@ -180,9 +197,13 @@ func (c *azureCloudImplementation) buildCloudInstanceGroup(
 	for _, vm := range vms {
 		// TODO(kenji): Ignore an instance that is being terminated.
 
-		// TODO(kenji): Set the status properly so that kops can
-		// tell whether a VM is up-to-date or not.
+		// kOps uses a Manual scale set upgrade policy, so latestModelApplied remains false until a
+		// rolling update replaces the VM. Missing values are treated as up-to-date to prevent
+		// incomplete Azure data from triggering a rolling update.
 		status := cloudinstances.CloudInstanceStatusUpToDate
+		if vm.Properties != nil && vm.Properties.LatestModelApplied != nil && !*vm.Properties.LatestModelApplied {
+			status = cloudinstances.CloudInstanceStatusNeedsUpdate
+		}
 		_, err := cg.NewCloudInstance(*vm.Name, status, nodeMap[*vm.Name])
 		if err != nil {
 			return nil, fmt.Errorf("error creating cloud instance group member: %s", err)
@@ -194,23 +215,21 @@ func (c *azureCloudImplementation) buildCloudInstanceGroup(
 }
 
 func isOwnedByCluster(vmss *compute.VirtualMachineScaleSet, clusterName string) bool {
-	for k, v := range vmss.Tags {
-		if k == TagClusterName && *v == clusterName {
-			return true
-		}
-	}
-	return false
+	tag := vmss.Tags[TagClusterName]
+	return tag != nil && *tag == clusterName
 }
 
-// keyedByName creates a map of instance groups keyed by VM Scale Set names.
-func keyedByName(instancegroups []*kops.InstanceGroup, clusterName string) (map[string]*kops.InstanceGroup, error) {
+// keyedByLegacyName keeps legacy VMSS names separate from instance group names,
+// because a valid instance group name can equal another group's legacy VMSS name.
+func keyedByLegacyName(instancegroups []*kops.InstanceGroup, clusterName string) (map[string]*kops.InstanceGroup, error) {
 	m := map[string]*kops.InstanceGroup{}
 	for _, ig := range instancegroups {
 		var name string
-		switch ig.Spec.Role {
-		case kops.InstanceGroupRoleMaster:
+		switch {
+		case ig.Spec.Role.HasControlPlane():
 			name = ig.Name + ".masters." + clusterName
-		case kops.InstanceGroupRoleNode, kops.InstanceGroupRoleBastion:
+		case ig.Spec.Role.HasNode(),
+			ig.Spec.Role.HasBastion():
 			name = ig.Name + "." + clusterName
 		default:
 			klog.Warningf("Ignoring InstanceGroup of unknown role %q", ig.Spec.Role)

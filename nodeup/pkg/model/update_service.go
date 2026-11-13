@@ -31,14 +31,15 @@ type UpdateServiceBuilder struct {
 	*NodeupModelContext
 }
 
-const flatcarServiceName = "update-service"
-const debianPackageName = "unattended-upgrades"
+const (
+	flatcarServiceName = "update-service"
+	debianPackageName  = "unattended-upgrades"
+)
 
-var _ fi.ModelBuilder = &UpdateServiceBuilder{}
+var _ fi.NodeupModelBuilder = &UpdateServiceBuilder{}
 
 // Build is responsible for configuring automatic updates based on the OS.
-func (b *UpdateServiceBuilder) Build(c *fi.ModelBuilderContext) error {
-
+func (b *UpdateServiceBuilder) Build(c *fi.NodeupModelBuilderContext) error {
 	if b.Distribution == distributions.DistributionFlatcar {
 		b.buildFlatcarSystemdService(c)
 	} else if b.Distribution.IsDebianFamily() {
@@ -48,12 +49,7 @@ func (b *UpdateServiceBuilder) Build(c *fi.ModelBuilderContext) error {
 	return nil
 }
 
-func (b *UpdateServiceBuilder) buildFlatcarSystemdService(c *fi.ModelBuilderContext) {
-	if b.NodeupConfig.UpdatePolicy != kops.UpdatePolicyExternal {
-		klog.Infof("UpdatePolicy requests automatic updates; skipping creation of systemd unit %q", flatcarServiceName)
-		return
-	}
-
+func (b *UpdateServiceBuilder) buildFlatcarSystemdService(c *fi.NodeupModelBuilderContext) {
 	for _, spec := range b.NodeupConfig.Hooks {
 		for _, hook := range spec {
 			if hook.Name == flatcarServiceName || hook.Name == flatcarServiceName+".service" {
@@ -63,7 +59,7 @@ func (b *UpdateServiceBuilder) buildFlatcarSystemdService(c *fi.ModelBuilderCont
 		}
 	}
 
-	klog.Infof("Detected OS %s; building %s service to disable update scheduler", b.Distribution, flatcarServiceName)
+	klog.Infof("Detected OS %v; building %s service to disable update scheduler", b.Distribution, flatcarServiceName)
 
 	manifest := &systemd.Manifest{}
 	manifest.Set("Unit", "Description", "Disable OS Update Scheduler")
@@ -84,7 +80,7 @@ func (b *UpdateServiceBuilder) buildFlatcarSystemdService(c *fi.ModelBuilderCont
 	c.AddTask(service)
 }
 
-func (b *UpdateServiceBuilder) buildDebianPackage(c *fi.ModelBuilderContext) {
+func (b *UpdateServiceBuilder) buildDebianPackage(c *fi.NodeupModelBuilderContext) {
 	contents := ""
 	if b.NodeupConfig.UpdatePolicy == kops.UpdatePolicyExternal {
 		klog.Infof("UpdatePolicy requests automatic updates; skipping installation of package %q", debianPackageName)
@@ -107,5 +103,4 @@ APT::Periodic::AutocleanInterval "7";
 		Contents: fi.NewStringResource(contents),
 		Type:     nodetasks.FileType_File,
 	})
-
 }

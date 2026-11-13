@@ -113,23 +113,13 @@ func TestBindMountDependencies(t *testing.T) {
 	containerizedMounterHome := "/containerized_mounter"
 
 	grid := []struct {
-		parent fi.Task
-		child  fi.Task
+		parent fi.NodeupTask
+		child  fi.NodeupTask
 	}{
 		{
 			parent: &File{
 				Path: containerizedMounterHome,
 				Type: FileType_Directory,
-			},
-			child: &BindMount{
-				Source:     containerizedMounterHome,
-				Mountpoint: containerizedMounterHome,
-				Options:    []string{"exec"},
-			},
-		},
-		{
-			parent: &Archive{
-				TargetDir: containerizedMounterHome,
 			},
 			child: &BindMount{
 				Source:     containerizedMounterHome,
@@ -189,16 +179,16 @@ func TestBindMountDependencies(t *testing.T) {
 	}
 
 	for _, g := range grid {
-		allTasks := make(map[string]fi.Task)
+		allTasks := make(map[string]fi.NodeupTask)
 		allTasks["parent"] = g.parent
 		allTasks["child"] = g.child
 
-		deps := g.parent.(fi.HasDependencies).GetDependencies(allTasks)
+		deps := g.parent.(fi.NodeupHasDependencies).GetDependencies(allTasks)
 		if len(deps) != 0 {
 			t.Errorf("found unexpected dependencies for parent: %v %v", g.parent, deps)
 		}
 
-		childDeps := g.child.(fi.HasDependencies).GetDependencies(allTasks)
+		childDeps := g.child.(fi.NodeupHasDependencies).GetDependencies(allTasks)
 		if len(childDeps) != 1 {
 			t.Errorf("found unexpected dependencies for child: %v %v", g.child, childDeps)
 		}
@@ -220,7 +210,7 @@ func (c *MockCommand) String() string {
 	return strings.Join(c.Args, " ")
 }
 
-var _ Executor = &MockExecutor{}
+var _ Executor = (*MockExecutor)(nil)
 
 func (m *MockExecutor) Expect(args []string) *MockCommand {
 	c := &MockCommand{

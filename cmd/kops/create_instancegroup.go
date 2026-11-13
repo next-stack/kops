@@ -48,6 +48,7 @@ type CreateInstanceGroupOptions struct {
 	InstanceGroupName string
 	Role              string
 	Subnets           []string
+	Zones             []string
 	// DryRun mode output an ig manifest of Output type.
 	DryRun bool
 	// Output type during a DryRun
@@ -63,7 +64,7 @@ var (
 	    An InstanceGroup is a group of similar virtual machines.
 		On AWS, an InstanceGroup maps to an AutoScalingGroup.
 
-		The Role of an InstanceGroup defines whether machines will act as a Kubernetes master or node.`))
+		The Role of an InstanceGroup defines whether machines will act as a Kubernetes control-plane, or worker node.`))
 
 	createInstanceGroupExample = templates.Examples(i18n.T(`
 
@@ -82,7 +83,7 @@ var (
 // NewCmdCreateInstanceGroup create a new cobra command object for creating a instancegroup.
 func NewCmdCreateInstanceGroup(f *util.Factory, out io.Writer) *cobra.Command {
 	options := &CreateInstanceGroupOptions{
-		Role: string(kopsapi.InstanceGroupRoleNode),
+		Role: kopsapi.InstanceGroupRoleNode.ToLowerString(),
 		Edit: true,
 	}
 
@@ -119,16 +120,30 @@ func NewCmdCreateInstanceGroup(f *util.Factory, out io.Writer) *cobra.Command {
 			return nil, cobra.ShellCompDirectiveNoFileComp
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return RunCreateInstanceGroup(context.TODO(), f, out, options)
+			return RunCreateInstanceGroup(cmd.Context(), f, out, options)
 		},
 	}
 
 	allRoles := make([]string, 0, len(kopsapi.AllInstanceGroupRoles))
 	for _, r := range kopsapi.AllInstanceGroupRoles {
-		if r == kopsapi.InstanceGroupRoleAPIServer && !featureflag.APIServerNodes.Enabled() {
+		if r.HasAPIServer() && !featureflag.APIServerNodes.Enabled() {
 			continue
 		}
-		allRoles = append(allRoles, strings.ToLower(string(r)))
+		if !featureflag.ExperimentalRoles.Enabled() {
+			if roles := strings.Split(string(r), ","); len(roles) > 1 {
+				continue
+			}
+			if r.HasEtcd() {
+				continue
+			}
+			if r.HasScheduler() {
+				continue
+			}
+			if r.HasKubeControllerManager() {
+				continue
+			}
+		}
+		allRoles = append(allRoles, r.ToLowerString())
 	}
 
 	cmd.Flags().StringVar(&options.Role, "role", options.Role, "Type of instance group to create ("+strings.Join(allRoles, ",")+")")
@@ -137,6 +152,9 @@ func NewCmdCreateInstanceGroup(f *util.Factory, out io.Writer) *cobra.Command {
 	})
 	cmd.Flags().StringSliceVar(&options.Subnets, "subnet", options.Subnets, "Subnet in which to create instance group. One of Availability Zone like eu-west-1a or a comma-separated list of multiple Availability Zones.")
 	cmd.RegisterFlagCompletionFunc("subnet", completeClusterSubnet(f, &options.Subnets))
+
+	cmd.Flags().StringSliceVar(&options.Zones, "zone", options.Zones, "Zones in which to create instance group. One of Availability Zone like eu-west-1a or a comma-separated list of multiple Availability Zones.")
+
 	// DryRun mode that will print YAML or JSON
 	cmd.Flags().BoolVar(&options.DryRun, "dry-run", options.DryRun, "Only print the object that would be created, without created it. This flag can be used to create an instance group YAML or JSON manifest.")
 	cmd.Flags().StringVarP(&options.Output, "output", "o", options.Output, "Output format. One of json or yaml")
@@ -154,12 +172,12 @@ func RunCreateInstanceGroup(ctx context.Context, f *util.Factory, out io.Writer,
 		return fmt.Errorf("error getting cluster: %q: %v", options.ClusterName, err)
 	}
 
-	clientset, err := f.Clientset()
+	clientset, err := f.KopsClient()
 	if err != nil {
 		return err
 	}
 
-	channel, err := cloudup.ChannelForCluster(cluster)
+	channel, err := cloudup.ChannelForCluster(clientset.VFSContext(), cluster)
 	if err != nil {
 		klog.Warningf("%v", err)
 	}
@@ -188,6 +206,8 @@ func RunCreateInstanceGroup(ctx context.Context, f *util.Factory, out io.Writer,
 
 	ig.Spec.Subnets = options.Subnets
 
+	ig.Spec.Zones = options.Zones
+
 	cloud, err := cloudup.BuildCloud(cluster)
 	if err != nil {
 		return err
@@ -199,9 +219,10 @@ func RunCreateInstanceGroup(ctx context.Context, f *util.Factory, out io.Writer,
 	}
 
 	ig.AddInstanceGroupNodeLabel()
-	if kopsapi.CloudProviderID(cluster.Spec.CloudProvider) == kopsapi.CloudProviderGCE {
-		fmt.Println("detected a GCE cluster; labeling nodes to receive metadata-proxy.")
-		ig.Spec.NodeLabels["cloud.google.com/metadata-proxy-ready"] = "true"
+	if cluster.GetCloudProvider() == kopsapi.CloudProviderGCE {
+		if len(ig.Spec.Zones) == 0 {
+			return fmt.Errorf("zone flag is required for GCE clusters")
+		}
 	}
 
 	if options.DryRun {
@@ -221,7 +242,7 @@ func RunCreateInstanceGroup(ctx context.Context, f *util.Factory, out io.Writer,
 			}
 			return nil
 		case OutputJSON:
-			if err := fullOutputJSON(out, ig); err != nil {
+			if err := fullOutputJSON(out, true, ig); err != nil {
 				return fmt.Errorf("error writing cluster json to stdout: %v", err)
 			}
 			return nil
@@ -231,9 +252,7 @@ func RunCreateInstanceGroup(ctx context.Context, f *util.Factory, out io.Writer,
 	}
 
 	if options.Edit {
-		var (
-			edit = editor.NewDefaultEditor(commandutils.EditorEnvs)
-		)
+		edit := editor.NewDefaultEditor(commandutils.EditorEnvs)
 
 		raw, err := kopscodecs.ToVersionedYaml(ig)
 		if err != nil {
@@ -261,7 +280,7 @@ func RunCreateInstanceGroup(ctx context.Context, f *util.Factory, out io.Writer,
 			return fmt.Errorf("unexpected object type: %T", obj)
 		}
 
-		err = validation.CrossValidateInstanceGroup(group, cluster, cloud).ToAggregate()
+		err = validation.CrossValidateInstanceGroup(group, cluster, cloud, true).ToAggregate()
 		if err != nil {
 			return err
 		}
@@ -279,8 +298,9 @@ func RunCreateInstanceGroup(ctx context.Context, f *util.Factory, out io.Writer,
 
 func completeClusterSubnet(f commandutils.Factory, excludeSubnets *[]string) func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 	return func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		ctx := cmd.Context()
+
 		commandutils.ConfigureKlogForCompletion()
-		ctx := context.TODO()
 
 		cluster, _, completions, directive := GetClusterForCompletion(ctx, f, nil)
 		if cluster == nil {
@@ -294,12 +314,12 @@ func completeClusterSubnet(f commandutils.Factory, excludeSubnets *[]string) fun
 		var requiredType kopsapi.SubnetType
 		var subnets []string
 		alreadySelected := sets.NewString(*excludeSubnets...)
-		for _, subnet := range cluster.Spec.Subnets {
+		for _, subnet := range cluster.Spec.Networking.Subnets {
 			if alreadySelected.Has(subnet.Name) {
 				requiredType = subnet.Type
 			}
 		}
-		for _, subnet := range cluster.Spec.Subnets {
+		for _, subnet := range cluster.Spec.Networking.Subnets {
 			if !alreadySelected.Has(subnet.Name) && subnet.Type != kopsapi.SubnetTypeUtility &&
 				(subnet.Type == requiredType || requiredType == "") {
 				subnets = append(subnets, subnet.Name)

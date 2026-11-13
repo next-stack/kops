@@ -17,26 +17,28 @@ limitations under the License.
 package testutils
 
 import (
-	"io/ioutil"
+	"context"
 	"os"
 	"path"
 	"path/filepath"
 	"testing"
 
+	"google.golang.org/api/compute/v1"
 	"k8s.io/kops/cloudmock/aws/mockeventbridge"
 	"k8s.io/kops/cloudmock/aws/mocksqs"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/ec2"
-	"github.com/aws/aws-sdk-go/service/elbv2"
-	"github.com/aws/aws-sdk-go/service/iam"
-	"github.com/aws/aws-sdk-go/service/route53"
-	"github.com/gophercloud/gophercloud/openstack/compute/v2/flavors"
-	"github.com/gophercloud/gophercloud/openstack/dns/v2/zones"
-	"github.com/gophercloud/gophercloud/openstack/imageservice/v2/images"
-	"github.com/gophercloud/gophercloud/openstack/networking/v2/extensions/external"
-	"github.com/gophercloud/gophercloud/openstack/networking/v2/networks"
-	"github.com/gophercloud/gophercloud/openstack/networking/v2/subnets"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	elbv2 "github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2"
+	"github.com/aws/aws-sdk-go-v2/service/iam"
+	route53types "github.com/aws/aws-sdk-go-v2/service/route53/types"
+	"github.com/gophercloud/gophercloud/v2/openstack/compute/v2/flavors"
+	"github.com/gophercloud/gophercloud/v2/openstack/dns/v2/zones"
+	"github.com/gophercloud/gophercloud/v2/openstack/image/v2/images"
+	"github.com/gophercloud/gophercloud/v2/openstack/networking/v2/extensions/external"
+	"github.com/gophercloud/gophercloud/v2/openstack/networking/v2/networks"
+	"github.com/gophercloud/gophercloud/v2/openstack/networking/v2/subnets"
 	"k8s.io/klog/v2"
 	kopsroot "k8s.io/kops"
 	"k8s.io/kops/cloudmock/aws/mockautoscaling"
@@ -53,9 +55,10 @@ import (
 	"k8s.io/kops/cloudmock/openstack/mockloadbalancer"
 	"k8s.io/kops/cloudmock/openstack/mocknetworking"
 	"k8s.io/kops/pkg/apis/kops"
+	"k8s.io/kops/pkg/featureflag"
 	"k8s.io/kops/pkg/pki"
-	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
+	"k8s.io/kops/upup/pkg/fi/cloudup/azuretasks"
 	"k8s.io/kops/upup/pkg/fi/cloudup/openstack"
 	"k8s.io/kops/util/pkg/vfs"
 )
@@ -75,8 +78,9 @@ type IntegrationTestHarness struct {
 }
 
 func NewIntegrationTestHarness(t *testing.T) *IntegrationTestHarness {
-	h := &IntegrationTestHarness{}
-	tempDir, err := ioutil.TempDir("", "test")
+	featureflag.ParseFlags("-ImageDigest")
+	h := &IntegrationTestHarness{T: t}
+	tempDir, err := os.MkdirTemp("", "test")
 	if err != nil {
 		t.Fatalf("failed to create temp dir: %v", err)
 	}
@@ -86,7 +90,7 @@ func NewIntegrationTestHarness(t *testing.T) *IntegrationTestHarness {
 
 	// Generate much smaller keys, as this is often the bottleneck for tests
 	h.originalPKIDefaultPrivateKeySize = pki.DefaultPrivateKeySize
-	pki.DefaultPrivateKeySize = 512
+	pki.DefaultPrivateKeySize = 1024
 
 	// Replace the default channel path with a local filesystem path, so we don't try to retrieve it from a server
 	{
@@ -129,7 +133,12 @@ func (h *IntegrationTestHarness) Close() {
 	}
 }
 
+func (h *IntegrationTestHarness) SetupMockAzure(resourceGroupName string) *azuretasks.MockAzureCloud {
+	return azuretasks.InstallMockAzureCloud("eastus", "sub-123", resourceGroupName)
+}
+
 func (h *IntegrationTestHarness) SetupMockAWS() *awsup.MockAWSCloud {
+	ctx := context.TODO()
 	cloud := awsup.InstallMockAWSCloud("us-test-1", "abc")
 	mockEC2 := &mockec2.MockEC2{}
 	cloud.MockEC2 = mockEC2
@@ -137,7 +146,7 @@ func (h *IntegrationTestHarness) SetupMockAWS() *awsup.MockAWSCloud {
 	cloud.MockRoute53 = mockRoute53
 	mockELB := &mockelb.MockELB{}
 	cloud.MockELB = mockELB
-	mockELBV2 := &mockelbv2.MockELBV2{}
+	mockELBV2 := &mockelbv2.MockELBV2{EC2: mockEC2}
 	cloud.MockELBV2 = mockELBV2
 	mockIAM := &mockiam.MockIAM{}
 	cloud.MockIAM = mockIAM
@@ -148,65 +157,47 @@ func (h *IntegrationTestHarness) SetupMockAWS() *awsup.MockAWSCloud {
 	mockEventBridge := &mockeventbridge.MockEventBridge{}
 	cloud.MockEventBridge = mockEventBridge
 
-	mockRoute53.MockCreateZone(&route53.HostedZone{
+	mockRoute53.MockCreateZone(&route53types.HostedZone{
 		Id:   aws.String("/hostedzone/Z1AFAKE1ZON3YO"),
 		Name: aws.String("example.com."),
-		Config: &route53.HostedZoneConfig{
-			PrivateZone: aws.Bool(false),
+		Config: &route53types.HostedZoneConfig{
+			PrivateZone: false,
 		},
 	}, nil)
-	mockRoute53.MockCreateZone(&route53.HostedZone{
+	mockRoute53.MockCreateZone(&route53types.HostedZone{
 		Id:   aws.String("/hostedzone/Z2AFAKE1ZON3NO"),
 		Name: aws.String("internal.example.com."),
-		Config: &route53.HostedZoneConfig{
-			PrivateZone: aws.Bool(true),
+		Config: &route53types.HostedZoneConfig{
+			PrivateZone: true,
 		},
-	}, []*route53.VPC{{
+	}, []*route53types.VPC{{
 		VPCId: aws.String("vpc-23456789"),
 	}})
-	mockRoute53.MockCreateZone(&route53.HostedZone{
+	mockRoute53.MockCreateZone(&route53types.HostedZone{
 		Id:   aws.String("/hostedzone/Z3AFAKE1ZOMORE"),
 		Name: aws.String("private.example.com."),
-		Config: &route53.HostedZoneConfig{
-			PrivateZone: aws.Bool(true),
+		Config: &route53types.HostedZoneConfig{
+			PrivateZone: true,
 		},
-	}, []*route53.VPC{{
+	}, []*route53types.VPC{{
 		VPCId: aws.String("vpc-12345678"),
 	}})
 
-	mockEC2.Images = append(mockEC2.Images, &ec2.Image{
-		CreationDate:   aws.String("2016-10-21T20:07:19.000Z"),
+	mockEC2.Images = append(mockEC2.Images, &ec2types.Image{
+		CreationDate:   aws.String("2022-04-04T00:00:00.000Z"),
 		ImageId:        aws.String("ami-12345678"),
-		Name:           aws.String("k8s-1.4-debian-jessie-amd64-hvm-ebs-2016-10-21"),
-		OwnerId:        aws.String(awsup.WellKnownAccountKopeio),
+		Name:           aws.String("images/hvm-ssd-gp3/ubuntu-resolute-26.04-amd64-server-20220404"),
+		OwnerId:        aws.String(awsup.WellKnownAccountUbuntu),
 		RootDeviceName: aws.String("/dev/xvda"),
-		Architecture:   aws.String("x86_64"),
-	})
-
-	mockEC2.Images = append(mockEC2.Images, &ec2.Image{
-		CreationDate:   aws.String("2017-01-09T17:08:27.000Z"),
-		ImageId:        aws.String("ami-15000000"),
-		Name:           aws.String("k8s-1.5-debian-jessie-amd64-hvm-ebs-2017-01-09"),
-		OwnerId:        aws.String(awsup.WellKnownAccountKopeio),
-		RootDeviceName: aws.String("/dev/xvda"),
-		Architecture:   aws.String("x86_64"),
-	})
-
-	mockEC2.Images = append(mockEC2.Images, &ec2.Image{
-		CreationDate:   aws.String("2019-08-06T00:00:00.000Z"),
-		ImageId:        aws.String("ami-11400000"),
-		Name:           aws.String("k8s-1.14-debian-stretch-amd64-hvm-ebs-2019-08-16"),
-		OwnerId:        aws.String(awsup.WellKnownAccountKopeio),
-		RootDeviceName: aws.String("/dev/xvda"),
-		Architecture:   aws.String("x86_64"),
+		Architecture:   ec2types.ArchitectureValuesX8664,
 	})
 
 	mockEC2.CreateVpcWithId(&ec2.CreateVpcInput{
 		CidrBlock: aws.String("172.20.0.0/16"),
-		TagSpecifications: []*ec2.TagSpecification{
+		TagSpecifications: []ec2types.TagSpecification{
 			{
-				ResourceType: aws.String(ec2.ResourceTypeVpc),
-				Tags: []*ec2.Tag{
+				ResourceType: ec2types.ResourceTypeVpc,
+				Tags: []ec2types.Tag{
 					{
 						Key:   aws.String("kubernetes.io/cluster/minimal.example.com"),
 						Value: aws.String(""),
@@ -215,10 +206,13 @@ func (h *IntegrationTestHarness) SetupMockAWS() *awsup.MockAWSCloud {
 			},
 		},
 	}, "vpc-12345678")
-	mockEC2.CreateInternetGateway(&ec2.CreateInternetGatewayInput{})
-	mockEC2.AttachInternetGateway(&ec2.AttachInternetGatewayInput{
+	mockEC2.CreateInternetGateway(ctx, &ec2.CreateInternetGatewayInput{})
+	mockEC2.AttachInternetGateway(ctx, &ec2.AttachInternetGatewayInput{
 		InternetGatewayId: aws.String("igw-1"),
 		VpcId:             aws.String("vpc-12345678"),
+	})
+	mockEC2.CreateEgressOnlyInternetGateway(ctx, &ec2.CreateEgressOnlyInternetGatewayInput{
+		VpcId: aws.String("vpc-12345678"),
 	})
 
 	mockEC2.CreateRouteTableWithId(&ec2.CreateRouteTableInput{
@@ -230,7 +224,7 @@ func (h *IntegrationTestHarness) SetupMockAWS() *awsup.MockAWSCloud {
 		AvailabilityZone: aws.String("us-test-1a"),
 		CidrBlock:        aws.String("172.20.32.0/19"),
 	}, "subnet-12345678")
-	mockEC2.AssociateRouteTable(&ec2.AssociateRouteTableInput{
+	mockEC2.AssociateRouteTable(ctx, &ec2.AssociateRouteTableInput{
 		RouteTableId: aws.String("rtb-12345678"),
 		SubnetId:     aws.String("subnet-12345678"),
 	})
@@ -245,7 +239,7 @@ func (h *IntegrationTestHarness) SetupMockAWS() *awsup.MockAWSCloud {
 		CidrBlock:        aws.String("172.20.8.0/22"),
 	}, "subnet-b2345678")
 
-	mockEC2.AssociateRouteTable(&ec2.AssociateRouteTableInput{
+	mockEC2.AssociateRouteTable(ctx, &ec2.AssociateRouteTableInput{
 		RouteTableId: aws.String("rtb-12345678"),
 		SubnetId:     aws.String("subnet-abcdef"),
 	})
@@ -268,23 +262,23 @@ func (h *IntegrationTestHarness) SetupMockAWS() *awsup.MockAWSCloud {
 		AllocationId: aws.String("eipalloc-b2345678"),
 	}, "nat-b2345678")
 
-	mockELBV2.CreateTargetGroup(&elbv2.CreateTargetGroupInput{
+	mockELBV2.CreateTargetGroup(ctx, &elbv2.CreateTargetGroupInput{
 		Name: aws.String("my-external-tg-1"),
 	})
-	mockELBV2.CreateTargetGroup(&elbv2.CreateTargetGroupInput{
+	mockELBV2.CreateTargetGroup(ctx, &elbv2.CreateTargetGroupInput{
 		Name: aws.String("my-external-tg-2"),
 	})
-	mockELBV2.CreateTargetGroup(&elbv2.CreateTargetGroupInput{
+	mockELBV2.CreateTargetGroup(ctx, &elbv2.CreateTargetGroupInput{
 		Name: aws.String("my-external-tg-3"),
 	})
 
-	mockIAM.CreateRole(&iam.CreateRoleInput{
+	mockIAM.CreateRole(ctx, &iam.CreateRoleInput{
 		RoleName: aws.String("kops-custom-node-role"),
 	})
-	mockIAM.CreateInstanceProfile(&iam.CreateInstanceProfileInput{
+	mockIAM.CreateInstanceProfile(ctx, &iam.CreateInstanceProfileInput{
 		InstanceProfileName: aws.String("kops-custom-node-role"),
 	})
-	mockIAM.AddRoleToInstanceProfile(&iam.AddRoleToInstanceProfileInput{
+	mockIAM.AddRoleToInstanceProfile(ctx, &iam.AddRoleToInstanceProfileInput{
 		InstanceProfileName: aws.String("kops-custom-node-role"),
 		RoleName:            aws.String("kops-custom-node-role"),
 	})
@@ -294,7 +288,23 @@ func (h *IntegrationTestHarness) SetupMockAWS() *awsup.MockAWSCloud {
 
 // SetupMockGCE configures a mock GCE cloud provider
 func (h *IntegrationTestHarness) SetupMockGCE() *gcemock.MockGCECloud {
-	return gcemock.InstallMockGCECloud("us-test1", "testproject")
+	project := "testproject"
+	region := "us-test1"
+
+	cloud := gcemock.InstallMockGCECloud(region, project)
+
+	cloud.Compute().Networks().Insert(project, &compute.Network{
+		Name:                  "default",
+		AutoCreateSubnetworks: true,
+	})
+
+	cloud.Compute().Subnetworks().Insert(project, region, &compute.Subnetwork{
+		Name:    "default",
+		Network: "default",
+		Region:  region,
+	})
+
+	return cloud
 }
 
 func SetupMockOpenstack() *openstack.MockCloud {
@@ -314,11 +324,11 @@ func SetupMockOpenstack() *openstack.MockCloud {
 	extNetworkName := "external"
 	networkCreateOpts := networks.CreateOpts{
 		Name:         extNetworkName,
-		AdminStateUp: fi.Bool(true),
+		AdminStateUp: new(true),
 	}
 	extNetwork := external.CreateOptsExt{
 		CreateOptsBuilder: networkCreateOpts,
-		External:          fi.Bool(true),
+		External:          new(true),
 	}
 	c.CreateNetwork(extNetwork)
 	c.SetExternalNetwork(&extNetworkName)
@@ -327,29 +337,29 @@ func SetupMockOpenstack() *openstack.MockCloud {
 	extSubnet := subnets.CreateOpts{
 		Name:       extSubnetName,
 		NetworkID:  extNetworkName,
-		EnableDHCP: fi.Bool(true),
+		EnableDHCP: new(true),
 		CIDR:       "172.20.0.0/22",
 	}
 	c.CreateSubnet(extSubnet)
-	c.SetExternalSubnet(fi.String(extSubnetName))
-	c.SetLBFloatingSubnet(fi.String(extSubnetName))
-	images.Create(c.MockImageClient.ServiceClient(), images.CreateOpts{
-		Name:    "Ubuntu-20.04",
+	c.SetExternalSubnet(new(extSubnetName))
+	c.SetLBFloatingSubnet(new(extSubnetName))
+	images.Create(context.TODO(), c.MockImageClient.ServiceClient(), images.CreateOpts{
+		Name:    "Ubuntu-26.04",
 		MinDisk: 12,
 	})
-	flavors.Create(c.MockNovaClient.ServiceClient(), flavors.CreateOpts{
+	flavors.Create(context.TODO(), c.MockNovaClient.ServiceClient(), flavors.CreateOpts{
 		Name:  "n1-standard-2",
 		RAM:   8192,
-		VCPUs: 4,
-		Disk:  fi.Int(16),
+		VCPUs: 8,
+		Disk:  new(16),
 	})
-	flavors.Create(c.MockNovaClient.ServiceClient(), flavors.CreateOpts{
+	flavors.Create(context.TODO(), c.MockNovaClient.ServiceClient(), flavors.CreateOpts{
 		Name:  "n1-standard-1",
 		RAM:   8192,
 		VCPUs: 4,
-		Disk:  fi.Int(16),
+		Disk:  new(16),
 	})
-	zones.Create(c.MockDNSClient.ServiceClient(), zones.CreateOpts{
+	zones.Create(context.TODO(), c.MockDNSClient.ServiceClient(), zones.CreateOpts{
 		Name: "minimal-openstack.k8s.local",
 	})
 	return c

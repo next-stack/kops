@@ -18,6 +18,7 @@ package model
 
 import (
 	"k8s.io/klog/v2"
+	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/nodeup/nodetasks"
 	"k8s.io/kops/util/pkg/distributions"
@@ -30,11 +31,11 @@ type NTPBuilder struct {
 	*NodeupModelContext
 }
 
-var _ fi.ModelBuilder = &NTPBuilder{}
+var _ fi.NodeupModelBuilder = &NTPBuilder{}
 
 // Build is responsible for configuring NTP
-func (b *NTPBuilder) Build(c *fi.ModelBuilderContext) error {
-	if !b.managed() {
+func (b *NTPBuilder) Build(c *fi.NodeupModelBuilderContext) error {
+	if b.NodeupModelContext.NodeupConfig.NTPUnmanaged {
 		klog.Infof("Managed is set to false; won't install NTP")
 		return nil
 	}
@@ -49,29 +50,21 @@ func (b *NTPBuilder) Build(c *fi.ModelBuilderContext) error {
 	}
 
 	var ntpHost string
-	switch b.Cluster.Spec.CloudProvider {
-	case "aws":
+	switch b.CloudProvider() {
+	case kops.CloudProviderAWS:
 		ntpHost = "169.254.169.123"
-	case "gce":
+	case kops.CloudProviderGCE:
 		ntpHost = "time.google.com"
 	default:
 		ntpHost = ""
 	}
 
 	if b.Distribution.IsDebianFamily() {
-		// Ubuntu recommends systemd-timesyncd, but on ubuntu on GCE systemd-timesyncd is blocked (in favor of chrony)
-		if b.Distribution.IsUbuntu() && !b.RunningOnGCE() {
-			if ntpHost != "" {
-				c.AddTask(b.buildTimesyncdConf("/etc/systemd/timesyncd.conf", ntpHost))
-			}
-			c.AddTask((&nodetasks.Service{Name: "systemd-timesyncd"}).InitDefaults())
-		} else {
-			c.AddTask(&nodetasks.Package{Name: "chrony"})
-			if ntpHost != "" {
-				c.AddTask(b.buildChronydConf("/etc/chrony/chrony.conf", ntpHost))
-			}
-			c.AddTask((&nodetasks.Service{Name: "chrony"}).InitDefaults())
+		c.AddTask(&nodetasks.Package{Name: "chrony"})
+		if ntpHost != "" {
+			c.AddTask(b.buildChronydConf("/etc/chrony/chrony.conf", ntpHost))
 		}
+		c.AddTask((&nodetasks.Service{Name: "chrony"}).InitDefaults())
 	} else if b.Distribution.IsRHELFamily() {
 		c.AddTask(&nodetasks.Package{Name: "chrony"})
 		if ntpHost != "" {
@@ -86,12 +79,13 @@ func (b *NTPBuilder) Build(c *fi.ModelBuilderContext) error {
 	return nil
 }
 
+// buildChronydConf builds the chrony configuration for a leap-smearing NTP host,
+// so it deliberately sets no leapsectz or leapseclist directive.
 func (b *NTPBuilder) buildChronydConf(path string, host string) *nodetasks.File {
-	conf := `# Built by Kops - do NOT edit
+	conf := `# Built by kOps - do NOT edit
 
 pool ` + host + ` prefer iburst
 driftfile /var/lib/chrony/drift
-leapsectz right/UTC
 logdir /var/log/chrony
 makestep 1.0 3
 maxupdateskew 100.0
@@ -103,26 +97,4 @@ rtcsync
 		Type:     nodetasks.FileType_File,
 		Mode:     s("0644"),
 	}
-}
-
-func (b *NTPBuilder) buildTimesyncdConf(path string, host string) *nodetasks.File {
-	conf := `# Built by Kops - do NOT edit
-
-[Time]
-NTP=` + host + `
-`
-	return &nodetasks.File{
-		Path:     path,
-		Contents: fi.NewStringResource(conf),
-		Type:     nodetasks.FileType_File,
-		Mode:     s("0644"),
-	}
-}
-
-// managed determines if kops should manage the installation and configuration of NTP.
-func (b *NTPBuilder) managed() bool {
-	n := b.Cluster.Spec.NTP
-	// Consider the NTP is managed when the NTP configuration
-	// is not specified (for backward compatibility).
-	return n == nil || n.Managed == nil || *n.Managed
 }

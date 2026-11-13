@@ -27,7 +27,7 @@ import (
 
 // VPC
 
-var _ fi.HasLifecycle = &VPC{}
+var _ fi.HasLifecycle = (*VPC)(nil)
 
 // GetLifecycle returns the Lifecycle of the object, implementing fi.HasLifecycle
 func (o *VPC) GetLifecycle() fi.Lifecycle {
@@ -39,7 +39,7 @@ func (o *VPC) SetLifecycle(lifecycle fi.Lifecycle) {
 	o.Lifecycle = lifecycle
 }
 
-var _ fi.HasName = &VPC{}
+var _ fi.HasName = (*VPC)(nil)
 
 // GetName returns the Name of the object, implementing fi.HasName
 func (o *VPC) GetName() *string {
@@ -48,5 +48,5 @@ func (o *VPC) GetName() *string {
 
 // String is the stringer function for the task, producing readable output using fi.TaskAsString
 func (o *VPC) String() string {
-	return fi.TaskAsString(o)
+	return fi.CloudupTaskAsString(o)
 }

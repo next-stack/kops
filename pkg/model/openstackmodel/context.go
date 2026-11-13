@@ -20,8 +20,8 @@ import (
 	"fmt"
 
 	"k8s.io/klog/v2"
+	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/model"
-	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/openstack"
 	"k8s.io/kops/upup/pkg/fi/cloudup/openstacktasks"
 )
@@ -33,16 +33,13 @@ type OpenstackModelContext struct {
 
 func (c *OpenstackModelContext) createCloud() (openstack.OpenstackCloud, error) {
 	if c.cloud == nil {
-		tags := make(map[string]string)
-		tags[openstack.TagClusterName] = c.ClusterName()
-		osCloud, err := openstack.NewOpenstackCloud(tags, &c.Cluster.Spec, "openstackmodel")
+		osCloud, err := openstack.NewOpenstackCloud(c.Cluster, "openstackmodel")
 		if err != nil {
 			return nil, err
 		}
 		c.cloud = osCloud
 	}
 	return c.cloud, nil
-
 }
 
 func (c *OpenstackModelContext) UseVIPACL() bool {
@@ -58,7 +55,7 @@ func (c *OpenstackModelContext) UseVIPACL() bool {
 }
 
 func (c *OpenstackModelContext) GetNetworkName() (string, error) {
-	if c.Cluster.Spec.NetworkID == "" {
+	if c.Cluster.Spec.Networking.NetworkID == "" {
 		return c.ClusterName(), nil
 	}
 
@@ -67,24 +64,31 @@ func (c *OpenstackModelContext) GetNetworkName() (string, error) {
 		return "", err
 	}
 
-	network, err := osCloud.GetNetwork(c.Cluster.Spec.NetworkID)
+	network, err := osCloud.GetNetwork(c.Cluster.Spec.Networking.NetworkID)
 	if err != nil {
 		return "", err
 	}
 	return network.Name, nil
 }
 
-func (c *OpenstackModelContext) findSubnetClusterSpec(subnet string) (string, error) {
-	for _, sp := range c.Cluster.Spec.Subnets {
+func (c *OpenstackModelContext) APIResourceName() string {
+	if c.Cluster.Spec.API.PublicName != "" {
+		return c.Cluster.Spec.API.PublicName
+	}
+	return "api." + c.ClusterName()
+}
+
+func (c *OpenstackModelContext) findSubnetClusterSpec(subnet string) (string, kops.SubnetType, error) {
+	for _, sp := range c.Cluster.Spec.Networking.Subnets {
 		if sp.Name == subnet {
-			name, err := c.findSubnetNameByID(sp.ProviderID, sp.Name)
+			name, err := c.findSubnetNameByID(sp.ID, sp.Name)
 			if err != nil {
-				return "", err
+				return "", "", err
 			}
-			return name, nil
+			return name, sp.Type, nil
 		}
 	}
-	return "", fmt.Errorf("could not find subnet %s from clusterSpec", subnet)
+	return "", "", fmt.Errorf("could not find subnet %s from clusterSpec", subnet)
 }
 
 func (c *OpenstackModelContext) findSubnetNameByID(subnetID string, subnetName string) (string, error) {
@@ -126,5 +130,5 @@ func (c *OpenstackModelContext) LinkToPort(name *string) *openstacktasks.Port {
 }
 
 func (c *OpenstackModelContext) LinkToSecurityGroup(name string) *openstacktasks.SecurityGroup {
-	return &openstacktasks.SecurityGroup{Name: fi.String(name)}
+	return &openstacktasks.SecurityGroup{Name: new(name)}
 }

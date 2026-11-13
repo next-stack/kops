@@ -39,32 +39,32 @@ type Volume struct {
 	Tags   map[string]string
 }
 
-var _ fi.CompareWithID = &Volume{}
+var _ fi.CompareWithID = (*Volume)(nil)
 
 func (v *Volume) CompareWithID() *string {
 	return v.ID
 }
 
-func (v *Volume) Find(c *fi.Context) (*Volume, error) {
-	cloud := c.Cloud.(do.DOCloud)
+func (v *Volume) Find(c *fi.CloudupContext) (*Volume, error) {
+	cloud := c.T.Cloud.(do.DOCloud)
 	volService := cloud.VolumeService()
 
 	volumes, _, err := volService.ListVolumes(context.TODO(), &godo.ListVolumeParams{
 		Region: cloud.Region(),
-		Name:   fi.StringValue(v.Name),
+		Name:   fi.ValueOf(v.Name),
 	})
 	if err != nil {
 		return nil, err
 	}
 
 	for _, volume := range volumes {
-		if volume.Name == fi.StringValue(v.Name) {
+		if volume.Name == fi.ValueOf(v.Name) {
 			return &Volume{
-				Name:      fi.String(volume.Name),
-				ID:        fi.String(volume.ID),
+				Name:      new(volume.Name),
+				ID:        new(volume.ID),
 				Lifecycle: v.Lifecycle,
-				SizeGB:    fi.Int64(volume.SizeGigaBytes),
-				Region:    fi.String(volume.Region.Slug),
+				SizeGB:    new(volume.SizeGigaBytes),
+				Region:    new(volume.Region.Slug),
 			}, nil
 		}
 	}
@@ -73,8 +73,8 @@ func (v *Volume) Find(c *fi.Context) (*Volume, error) {
 	return nil, nil
 }
 
-func (v *Volume) Run(c *fi.Context) error {
-	return fi.DefaultDeltaRunMethod(v, c)
+func (v *Volume) Run(c *fi.CloudupContext) error {
+	return fi.CloudupDefaultDeltaRunMethod(v, c)
 }
 
 func (_ *Volume) CheckChanges(a, e, changes *Volume) error {
@@ -120,9 +120,9 @@ func (_ *Volume) RenderDO(t *do.DOAPITarget, a, e, changes *Volume) error {
 
 	volService := t.Cloud.VolumeService()
 	_, _, err := volService.CreateVolume(context.TODO(), &godo.VolumeCreateRequest{
-		Name:          fi.StringValue(e.Name),
-		Region:        fi.StringValue(e.Region),
-		SizeGigaBytes: fi.Int64Value(e.SizeGB),
+		Name:          fi.ValueOf(e.Name),
+		Region:        fi.ValueOf(e.Region),
+		SizeGigaBytes: fi.ValueOf(e.SizeGB),
 		Tags:          tagArray,
 	})
 
@@ -132,16 +132,26 @@ func (_ *Volume) RenderDO(t *do.DOAPITarget, a, e, changes *Volume) error {
 // terraformVolume represents the digitalocean_volume resource in terraform
 // https://www.terraform.io/docs/providers/do/r/volume.html
 type terraformVolume struct {
-	Name   *string `json:"name" cty:"name"`
-	SizeGB *int64  `json:"size" cty:"size"`
-	Region *string `json:"region" cty:"region"`
+	Name   *string  `cty:"name"`
+	SizeGB *int64   `cty:"size"`
+	Region *string  `cty:"region"`
+	Tags   []string `cty:"tags"`
 }
 
 func (_ *Volume) RenderTerraform(t *terraform.TerraformTarget, a, e, changes *Volume) error {
+	tagArray := []string{}
+
+	for k, v := range e.Tags {
+		// DO tags don't accept =. Separate the key and value with an ":"
+		klog.V(10).Infof("DO - Join the volume tag - %s", fmt.Sprintf("%s:%s", k, v))
+		tagArray = append(tagArray, fmt.Sprintf("%s:%s", k, v))
+	}
+
 	tf := &terraformVolume{
 		Name:   e.Name,
 		SizeGB: e.SizeGB,
 		Region: e.Region,
+		Tags:   tagArray,
 	}
 	return t.RenderResource("digitalocean_volume", *e.Name, tf)
 }

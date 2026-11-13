@@ -20,10 +20,9 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
+	"os"
 
 	"github.com/spf13/cobra"
-	"github.com/spf13/pflag"
 	"k8s.io/kops/cmd/kops/util"
 	"k8s.io/kops/pkg/commands/commandutils"
 	"k8s.io/kubectl/pkg/util/i18n"
@@ -59,22 +58,16 @@ func NewCmdCreateSSHPublicKey(f *util.Factory, out io.Writer) *cobra.Command {
 		Args:              rootCommand.clusterNameArgs(&options.ClusterName),
 		ValidArgsFunction: commandutils.CompleteClusterName(f, true, false),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return RunCreateSSHPublicKey(context.TODO(), f, out, options)
+			return RunCreateSSHPublicKey(cmd.Context(), f, out, options)
 		},
 	}
 
+	cmd.Flags().StringVar(&options.PublicKeyPath, "pubkey", "", "Path to SSH public key")
+	cmd.Flags().MarkDeprecated("pubkey", "use --ssh-public-key instead")
 	cmd.Flags().StringVarP(&options.PublicKeyPath, "ssh-public-key", "i", "", "Path to SSH public key")
 	cmd.MarkFlagRequired("ssh-public-key")
 	cmd.RegisterFlagCompletionFunc("ssh-public-key", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		return []string{"pub"}, cobra.ShellCompDirectiveFilterFileExt
-	})
-
-	cmd.Flags().SetNormalizeFunc(func(f *pflag.FlagSet, name string) pflag.NormalizedName {
-		switch name {
-		case "pubkey":
-			name = "ssh-public-key"
-		}
-		return pflag.NormalizedName(name)
 	})
 
 	return cmd
@@ -86,7 +79,7 @@ func RunCreateSSHPublicKey(ctx context.Context, f *util.Factory, out io.Writer, 
 		return err
 	}
 
-	clientset, err := f.Clientset()
+	clientset, err := f.KopsClient()
 	if err != nil {
 		return err
 	}
@@ -96,12 +89,12 @@ func RunCreateSSHPublicKey(ctx context.Context, f *util.Factory, out io.Writer, 
 		return err
 	}
 
-	data, err := ioutil.ReadFile(options.PublicKeyPath)
+	data, err := os.ReadFile(options.PublicKeyPath)
 	if err != nil {
 		return fmt.Errorf("error reading SSH public key %v: %v", options.PublicKeyPath, err)
 	}
 
-	err = sshCredentialStore.AddSSHPublicKey(data)
+	err = sshCredentialStore.AddSSHPublicKey(ctx, data)
 	if err != nil {
 		return fmt.Errorf("error adding SSH public key: %v", err)
 	}

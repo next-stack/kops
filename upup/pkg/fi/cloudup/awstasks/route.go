@@ -17,14 +17,15 @@ limitations under the License.
 package awstasks
 
 import (
+	"context"
 	"fmt"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"k8s.io/klog/v2"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
-	"k8s.io/kops/upup/pkg/fi/cloudup/cloudformation"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraform"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraformWriter"
 )
@@ -41,13 +42,16 @@ type Route struct {
 
 	// Exactly one of the below fields
 	// MUST be provided.
-	InternetGateway  *InternetGateway
-	NatGateway       *NatGateway
-	TransitGatewayID *string
+	EgressOnlyInternetGateway *EgressOnlyInternetGateway
+	InternetGateway           *InternetGateway
+	NatGateway                *NatGateway
+	TransitGatewayID          *string
+	VPCPeeringConnectionID    *string
 }
 
-func (e *Route) Find(c *fi.Context) (*Route, error) {
-	cloud := c.Cloud.(awsup.AWSCloud)
+func (e *Route) Find(c *fi.CloudupContext) (*Route, error) {
+	ctx := c.Context()
+	cloud := awsup.GetCloud(c)
 
 	if e.RouteTable == nil || (e.CIDR == nil && e.IPv6CIDR == nil) {
 		// TODO: Move to validate?
@@ -59,10 +63,10 @@ func (e *Route) Find(c *fi.Context) (*Route, error) {
 	}
 
 	request := &ec2.DescribeRouteTablesInput{
-		RouteTableIds: []*string{e.RouteTable.ID},
+		RouteTableIds: []string{fi.ValueOf(e.RouteTable.ID)},
 	}
 
-	response, err := cloud.EC2().DescribeRouteTables(request)
+	response, err := cloud.EC2().DescribeRouteTables(ctx, request)
 	if err != nil {
 		return nil, fmt.Errorf("error listing RouteTables: %v", err)
 	}
@@ -74,8 +78,8 @@ func (e *Route) Find(c *fi.Context) (*Route, error) {
 		}
 		rt := response.RouteTables[0]
 		for _, r := range rt.Routes {
-			if (r.DestinationCidrBlock == nil || aws.StringValue(r.DestinationCidrBlock) != aws.StringValue(e.CIDR)) &&
-				(r.DestinationIpv6CidrBlock == nil || aws.StringValue(r.DestinationIpv6CidrBlock) != aws.StringValue(e.IPv6CIDR)) {
+			if (r.DestinationCidrBlock == nil || aws.ToString(r.DestinationCidrBlock) != aws.ToString(e.CIDR)) &&
+				(r.DestinationIpv6CidrBlock == nil || aws.ToString(r.DestinationIpv6CidrBlock) != aws.ToString(e.IPv6CIDR)) {
 				continue
 			}
 			actual := &Route{
@@ -84,20 +88,26 @@ func (e *Route) Find(c *fi.Context) (*Route, error) {
 				CIDR:       r.DestinationCidrBlock,
 				IPv6CIDR:   r.DestinationIpv6CidrBlock,
 			}
+			if r.EgressOnlyInternetGatewayId != nil {
+				actual.EgressOnlyInternetGateway = &EgressOnlyInternetGateway{ID: r.EgressOnlyInternetGatewayId}
+			}
 			if r.GatewayId != nil {
 				actual.InternetGateway = &InternetGateway{ID: r.GatewayId}
-			}
-			if r.NatGatewayId != nil {
-				actual.NatGateway = &NatGateway{ID: r.NatGatewayId}
 			}
 			if r.InstanceId != nil {
 				actual.Instance = &Instance{ID: r.InstanceId}
 			}
+			if r.NatGatewayId != nil {
+				actual.NatGateway = &NatGateway{ID: r.NatGatewayId}
+			}
 			if r.TransitGatewayId != nil {
 				actual.TransitGatewayID = r.TransitGatewayId
 			}
+			if r.VpcPeeringConnectionId != nil {
+				actual.VPCPeeringConnectionID = r.VpcPeeringConnectionId
+			}
 
-			if aws.StringValue(r.State) == "blackhole" {
+			if r.State == ec2types.RouteStateBlackhole {
 				klog.V(2).Infof("found route is a blackhole route")
 				// These should be nil anyway, but just in case...
 				actual.Instance = nil
@@ -108,7 +118,7 @@ func (e *Route) Find(c *fi.Context) (*Route, error) {
 			// Prevent spurious changes
 			actual.Lifecycle = e.Lifecycle
 
-			klog.V(2).Infof("found route matching CIDR=%q IPv6CIDR=%q", aws.StringValue(e.CIDR), aws.StringValue(e.IPv6CIDR))
+			klog.V(2).Infof("found route matching CIDR=%q IPv6CIDR=%q", aws.ToString(e.CIDR), aws.ToString(e.IPv6CIDR))
 			return actual, nil
 		}
 	}
@@ -116,8 +126,8 @@ func (e *Route) Find(c *fi.Context) (*Route, error) {
 	return nil, nil
 }
 
-func (e *Route) Run(c *fi.Context) error {
-	return fi.DefaultDeltaRunMethod(e, c)
+func (e *Route) Run(c *fi.CloudupContext) error {
+	return fi.CloudupDefaultDeltaRunMethod(e, c)
 }
 
 func (s *Route) CheckChanges(a, e, changes *Route) error {
@@ -130,9 +140,15 @@ func (s *Route) CheckChanges(a, e, changes *Route) error {
 			return fi.RequiredField("CIDR/IPv6CIDR")
 		}
 		if e.CIDR != nil && e.IPv6CIDR != nil {
-			return fmt.Errorf("cannot set more than 1 CIDR or IPv6CIDR")
+			return fmt.Errorf("cannot set more than one CIDR or IPv6CIDR")
 		}
 		targetCount := 0
+		if e.EgressOnlyInternetGateway != nil {
+			targetCount++
+			if e.CIDR != nil {
+				return fmt.Errorf("cannot route IPv4 to an EgressOnlyInternetGateway")
+			}
+		}
 		if e.InternetGateway != nil {
 			targetCount++
 		}
@@ -145,11 +161,14 @@ func (s *Route) CheckChanges(a, e, changes *Route) error {
 		if e.TransitGatewayID != nil {
 			targetCount++
 		}
+		if e.VPCPeeringConnectionID != nil {
+			targetCount++
+		}
 		if targetCount == 0 {
-			return fmt.Errorf("InternetGateway, Instance, NatGateway, or TransitGateway is required")
+			return fmt.Errorf("EgressOnlyInternetGateway, InternetGateway, Instance, NatGateway, TransitGateway, or VpcPeeringConnection is required")
 		}
 		if targetCount != 1 {
-			return fmt.Errorf("cannot set more than 1 InternetGateway, Instance, NatGateway, or TransitGateway")
+			return fmt.Errorf("cannot set more than one EgressOnlyInternetGateway, InternetGateway, Instance, NatGateway, TransitGateway, or VpcPeeringConnection")
 		}
 	}
 
@@ -168,6 +187,7 @@ func (s *Route) CheckChanges(a, e, changes *Route) error {
 }
 
 func (_ *Route) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *Route) error {
+	ctx := context.TODO()
 	if a == nil {
 		request := &ec2.CreateRouteInput{}
 		request.RouteTableId = checkNotNil(e.RouteTable.ID)
@@ -179,14 +199,18 @@ func (_ *Route) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *Route) error {
 			klog.Fatal("both CIDR and IPv6CIDR were unexpectedly nil")
 		}
 
-		if e.InternetGateway == nil && e.NatGateway == nil && e.TransitGatewayID == nil {
+		if e.EgressOnlyInternetGateway == nil && e.InternetGateway == nil && e.NatGateway == nil && e.TransitGatewayID == nil && e.VPCPeeringConnectionID == nil {
 			return fmt.Errorf("missing target for route")
+		} else if e.EgressOnlyInternetGateway != nil {
+			request.EgressOnlyInternetGatewayId = checkNotNil(e.EgressOnlyInternetGateway.ID)
 		} else if e.InternetGateway != nil {
 			request.GatewayId = checkNotNil(e.InternetGateway.ID)
 		} else if e.NatGateway != nil {
 			request.NatGatewayId = checkNotNil(e.NatGateway.ID)
 		} else if e.TransitGatewayID != nil {
 			request.TransitGatewayId = e.TransitGatewayID
+		} else if e.VPCPeeringConnectionID != nil {
+			request.VpcPeeringConnectionId = e.VPCPeeringConnectionID
 		}
 
 		if e.Instance != nil {
@@ -194,9 +218,9 @@ func (_ *Route) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *Route) error {
 		}
 
 		klog.V(2).Infof("Creating Route with RouteTable:%q CIDR:%q IPv6CIDR:%q",
-			aws.StringValue(e.RouteTable.ID), aws.StringValue(e.CIDR), aws.StringValue(e.IPv6CIDR))
+			aws.ToString(e.RouteTable.ID), aws.ToString(e.CIDR), aws.ToString(e.IPv6CIDR))
 
-		response, err := t.Cloud.EC2().CreateRoute(request)
+		response, err := t.Cloud.EC2().CreateRoute(ctx, request)
 		if err != nil {
 			code := awsup.AWSErrorCode(err)
 			message := awsup.AWSErrorMessage(err)
@@ -207,7 +231,7 @@ func (_ *Route) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *Route) error {
 			return fmt.Errorf("error creating Route: %s", message)
 		}
 
-		if !aws.BoolValue(response.Return) {
+		if !aws.ToBool(response.Return) {
 			return fmt.Errorf("create Route request failed: %v", response)
 		}
 	} else {
@@ -221,7 +245,7 @@ func (_ *Route) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *Route) error {
 			klog.Fatal("both CIDR and IPv6CIDR were unexpectedly nil")
 		}
 
-		if e.InternetGateway == nil && e.NatGateway == nil && e.TransitGatewayID == nil {
+		if e.InternetGateway == nil && e.NatGateway == nil && e.TransitGatewayID == nil && e.VPCPeeringConnectionID == nil {
 			return fmt.Errorf("missing target for route")
 		} else if e.InternetGateway != nil {
 			request.GatewayId = checkNotNil(e.InternetGateway.ID)
@@ -229,6 +253,8 @@ func (_ *Route) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *Route) error {
 			request.NatGatewayId = checkNotNil(e.NatGateway.ID)
 		} else if e.TransitGatewayID != nil {
 			request.TransitGatewayId = e.TransitGatewayID
+		} else if e.VPCPeeringConnectionID != nil {
+			request.VpcPeeringConnectionId = e.VPCPeeringConnectionID
 		}
 
 		if e.Instance != nil {
@@ -237,7 +263,7 @@ func (_ *Route) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *Route) error {
 
 		klog.V(2).Infof("Updating Route with RouteTable:%q CIDR:%q", *e.RouteTable.ID, *e.CIDR)
 
-		if _, err := t.Cloud.EC2().ReplaceRoute(request); err != nil {
+		if _, err := t.Cloud.EC2().ReplaceRoute(ctx, request); err != nil {
 			code := awsup.AWSErrorCode(err)
 			message := awsup.AWSErrorMessage(err)
 			if code == "InvalidNatGatewayID.NotFound" {
@@ -259,13 +285,15 @@ func checkNotNil(s *string) *string {
 }
 
 type terraformRoute struct {
-	RouteTableID      *terraformWriter.Literal `json:"route_table_id" cty:"route_table_id"`
-	CIDR              *string                  `json:"destination_cidr_block,omitempty" cty:"destination_cidr_block"`
-	IPv6CIDR          *string                  `json:"destination_ipv6_cidr_block,omitempty" cty:"destination_ipv6_cidr_block"`
-	InternetGatewayID *terraformWriter.Literal `json:"gateway_id,omitempty" cty:"gateway_id"`
-	NATGatewayID      *terraformWriter.Literal `json:"nat_gateway_id,omitempty" cty:"nat_gateway_id"`
-	TransitGatewayID  *string                  `json:"transit_gateway_id,omitempty" cty:"transit_gateway_id"`
-	InstanceID        *terraformWriter.Literal `json:"instance_id,omitempty" cty:"instance_id"`
+	RouteTableID                *terraformWriter.Literal `cty:"route_table_id"`
+	CIDR                        *string                  `cty:"destination_cidr_block"`
+	IPv6CIDR                    *string                  `cty:"destination_ipv6_cidr_block"`
+	EgressOnlyInternetGatewayID *terraformWriter.Literal `cty:"egress_only_gateway_id"`
+	InternetGatewayID           *terraformWriter.Literal `cty:"gateway_id"`
+	NATGatewayID                *terraformWriter.Literal `cty:"nat_gateway_id"`
+	TransitGatewayID            *string                  `cty:"transit_gateway_id"`
+	InstanceID                  *terraformWriter.Literal `cty:"instance_id"`
+	VPCPeeringConnectionID      *string                  `cty:"vpc_peering_connection_id"`
 }
 
 func (_ *Route) RenderTerraform(t *terraform.TerraformTarget, a, e, changes *Route) error {
@@ -275,14 +303,18 @@ func (_ *Route) RenderTerraform(t *terraform.TerraformTarget, a, e, changes *Rou
 		IPv6CIDR:     e.IPv6CIDR,
 	}
 
-	if e.InternetGateway == nil && e.NatGateway == nil && e.TransitGatewayID == nil {
+	if e.EgressOnlyInternetGateway == nil && e.InternetGateway == nil && e.NatGateway == nil && e.TransitGatewayID == nil && e.VPCPeeringConnectionID == nil {
 		return fmt.Errorf("missing target for route")
+	} else if e.EgressOnlyInternetGateway != nil {
+		tf.EgressOnlyInternetGatewayID = e.EgressOnlyInternetGateway.TerraformLink()
 	} else if e.InternetGateway != nil {
 		tf.InternetGatewayID = e.InternetGateway.TerraformLink()
 	} else if e.NatGateway != nil {
 		tf.NATGatewayID = e.NatGateway.TerraformLink()
 	} else if e.TransitGatewayID != nil {
 		tf.TransitGatewayID = e.TransitGatewayID
+	} else if e.VPCPeeringConnectionID != nil {
+		tf.VPCPeeringConnectionID = e.VPCPeeringConnectionID
 	}
 
 	if e.Instance != nil {
@@ -293,39 +325,4 @@ func (_ *Route) RenderTerraform(t *terraform.TerraformTarget, a, e, changes *Rou
 	// and https://www.terraform.io/upgrade-guides/0-12.html#pre-upgrade-checklist
 	name := fmt.Sprintf("route-%v", *e.Name)
 	return t.RenderResource("aws_route", name, tf)
-}
-
-type cloudformationRoute struct {
-	RouteTableID      *cloudformation.Literal `json:"RouteTableId"`
-	CIDR              *string                 `json:"DestinationCidrBlock,omitempty"`
-	IPv6CIDR          *string                 `json:"DestinationIpv6CidrBlock,omitempty"`
-	InternetGatewayID *cloudformation.Literal `json:"GatewayId,omitempty"`
-	NATGatewayID      *cloudformation.Literal `json:"NatGatewayId,omitempty"`
-	TransitGatewayID  *string                 `json:"TransitGatewayId,omitempty"`
-	InstanceID        *cloudformation.Literal `json:"InstanceId,omitempty"`
-}
-
-func (_ *Route) RenderCloudformation(t *cloudformation.CloudformationTarget, a, e, changes *Route) error {
-	tf := &cloudformationRoute{
-		RouteTableID: e.RouteTable.CloudformationLink(),
-		CIDR:         e.CIDR,
-		IPv6CIDR:     e.IPv6CIDR,
-	}
-
-	if e.InternetGateway == nil && e.NatGateway == nil && e.TransitGatewayID == nil {
-		return fmt.Errorf("missing target for route")
-	} else if e.InternetGateway != nil {
-		tf.InternetGatewayID = e.InternetGateway.CloudformationLink()
-	} else if e.NatGateway != nil {
-		tf.NATGatewayID = e.NatGateway.CloudformationLink()
-	} else if e.TransitGatewayID != nil {
-		tf.TransitGatewayID = e.TransitGatewayID
-	}
-
-	if e.Instance != nil {
-		return fmt.Errorf("instance cloudformation routes not yet implemented")
-		//tf.InstanceID = e.Instance.CloudformationLink()
-	}
-
-	return t.RenderResource("AWS::EC2::Route", *e.Name, tf)
 }

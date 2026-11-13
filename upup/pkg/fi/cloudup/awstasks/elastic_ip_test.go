@@ -18,12 +18,14 @@ package awstasks
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"reflect"
 	"testing"
 	"time"
 
-	"github.com/aws/aws-sdk-go/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"k8s.io/kops/util/pkg/vfs"
 
 	"k8s.io/kops/cloudmock/aws/mockec2"
 	"k8s.io/kops/pkg/apis/kops"
@@ -38,11 +40,13 @@ var testRunTasksOptions = fi.RunTasksOptions{
 }
 
 func TestElasticIPCreate(t *testing.T) {
+	ctx := context.TODO()
+
 	cloud := awsup.BuildMockAWSCloud("us-east-1", "abc")
 	c := &mockec2.MockEC2{}
 	cloud.MockEC2 = c
 	// We define a function so we can rebuild the tasks, because we modify in-place when running
-	buildTasks := func() map[string]fi.Task {
+	buildTasks := func() map[string]fi.CloudupTask {
 		vpc1 := &VPC{
 			Name:      s("vpc1"),
 			Lifecycle: fi.LifecycleSync,
@@ -63,7 +67,7 @@ func TestElasticIPCreate(t *testing.T) {
 			Tags:        map[string]string{"Name": "eip1"},
 		}
 
-		return map[string]fi.Task{
+		return map[string]fi.CloudupTask{
 			"eip1":    eip1,
 			"subnet1": subnet1,
 			"vpc1":    vpc1,
@@ -74,21 +78,9 @@ func TestElasticIPCreate(t *testing.T) {
 		allTasks := buildTasks()
 		eip1 := allTasks["eip1"].(*ElasticIP)
 
-		target := &awsup.AWSAPITarget{
-			Cloud: cloud,
-		}
+		runTasks(t, cloud, allTasks)
 
-		context, err := fi.NewContext(target, nil, cloud, nil, nil, nil, true, allTasks)
-		if err != nil {
-			t.Fatalf("error building context: %v", err)
-		}
-		defer context.Close()
-
-		if err := context.RunTasks(testRunTasksOptions); err != nil {
-			t.Fatalf("unexpected error during Run: %v", err)
-		}
-
-		if fi.StringValue(eip1.ID) == "" {
+		if fi.ValueOf(eip1.ID) == "" {
 			t.Fatalf("ID not set after create")
 		}
 
@@ -96,11 +88,11 @@ func TestElasticIPCreate(t *testing.T) {
 			t.Fatalf("Expected exactly one ElasticIP; found %v", c.Addresses)
 		}
 
-		expected := &ec2.Address{
+		expected := &ec2types.Address{
 			AllocationId: eip1.ID,
-			Domain:       s("vpc"),
+			Domain:       ec2types.DomainTypeVpc,
 			PublicIp:     s("192.0.2.1"),
-			Tags: []*ec2.Tag{
+			Tags: []ec2types.Tag{
 				{
 					Key:   s("Name"),
 					Value: s("eip1"),
@@ -115,23 +107,23 @@ func TestElasticIPCreate(t *testing.T) {
 
 	{
 		allTasks := buildTasks()
-		checkNoChanges(t, cloud, allTasks)
+		checkNoChanges(t, ctx, cloud, allTasks)
 	}
 }
 
-func checkNoChanges(t *testing.T, cloud fi.Cloud, allTasks map[string]fi.Task) {
+func checkNoChanges(t *testing.T, ctx context.Context, cloud fi.Cloud, allTasks map[string]fi.CloudupTask) {
 	cluster := &kops.Cluster{
 		Spec: kops.ClusterSpec{
 			KubernetesVersion: "v1.9.0",
 		},
 	}
-	assetBuilder := assets.NewAssetBuilder(cluster, false)
-	target := fi.NewDryRunTarget(assetBuilder, os.Stderr)
-	context, err := fi.NewContext(target, nil, cloud, nil, nil, nil, true, allTasks)
+	assetBuilder := assets.NewAssetBuilder(vfs.Context, cluster.Spec.Assets, false)
+	checkExisting := true
+	target := fi.NewCloudupDryRunTarget(assetBuilder, checkExisting, os.Stderr)
+	context, err := fi.NewCloudupContext(ctx, fi.DeletionProcessingModeDeleteIncludingDeferred, target, nil, cloud, nil, nil, nil, allTasks)
 	if err != nil {
 		t.Fatalf("error building context: %v", err)
 	}
-	defer context.Close()
 
 	if err := context.RunTasks(testRunTasksOptions); err != nil {
 		t.Fatalf("unexpected error during Run: %v", err)
@@ -144,5 +136,4 @@ func checkNoChanges(t *testing.T, cloud fi.Cloud, allTasks map[string]fi.Task) {
 		}
 		t.Fatalf("Target had changes after executing: %v", b.String())
 	}
-
 }

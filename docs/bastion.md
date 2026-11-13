@@ -37,7 +37,7 @@ metadata:
   name: bastions
 spec:
   associatePublicIp: true
-  image: kope.io/k8s-1.4-debian-jessie-amd64-hvm-ebs-2016-10-21
+  image: ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-20260714
   machineType: t2.micro
   maxSize: 1
   minSize: 1
@@ -73,7 +73,7 @@ spec:
 ```
 
 ### Using an internal (VPC only) load balancer 
-{{ kops_feature_table(kops_added_default='1.22') }}
+{{ kops_feature_table(kops_added_default='1.23') }}
 
 When configuring a LoadBalancer, you can also choose to have a public load balancer or an internal (VPC only) load balancer. The `type` field should be `Public` or `Internal` (defaults to `Public` if omitted).
 
@@ -100,9 +100,9 @@ spec:
         - "sg-***"
 ```
 
-### Access when using gossip
+### Access when using None-DNS
 
-When using [gossip mode](gossip.md), there is no DNS zone where we can configure a
+When using a None-DNS cluster (`--dns=none`), there is no DNS zone where we can configure a
 CNAME for the bastion. Because bastions are fronted with a load
 balancer, you can instead use the endpoint of the load balancer to
 reach your bastion.
@@ -111,30 +111,6 @@ On AWS, an easy way to find this DNS name is with kops toolbox:
 
 ```
 kops toolbox dump -ojson | grep 'bastion.*elb.amazonaws.com'
-```
-
-### Using SSH agent to access your bastion
-
-Verify your local agent is configured correctly
-
-```
-$ ssh-add -L
-ssh-rsa <PUBLIC_RSA_HASH> /Users/kris/.ssh/id_rsa
-```
-
-If that command returns no results, add the key to `ssh-agent`
-
-```
-ssh-add ~/.ssh/id_rsa
-```
-
-Check if the key is now added using `ssh-add -L`
-
-SSH into the bastion, then into a master
-
-```
-ssh -A admin@<bastion_elb_a_record>
-ssh admin@<master_ip>
 ```
 
 ### Changing your ELB idle timeout
@@ -162,10 +138,11 @@ ssh-add -l
 # If you need to add the key to your agent:
 ssh-add path/to/private/key
 
-# Now you can SSH into the bastion
-ssh -A admin@<bastion-ELB-address>
+# Now you can SSH into the bastion. Substitute the administrative username of the instance's OS for <username> (`ubuntu` for  Ubuntu,  `admin` for Debian, etc.) and the bastion domain for <bastion-domain>. If the bastion doesn't have a public CNAME alias, use the domain of the assigned load balancer as the bastion domain.
+ssh -A <username>@<bastion-domain>
 
-# Where <bastion-ELB-address> is usually bastion.$clustername (bastion.example.kubernetes.cluster) unless otherwise specified
+# then you can use the fowarded authentication to SSH into control-plane or worker nodes in the cluster.
+ssh <username>@<node-address>
 
 ```
 

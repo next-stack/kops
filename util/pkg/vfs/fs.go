@@ -17,12 +17,12 @@ limitations under the License.
 package vfs
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
-	"path"
+	"path/filepath"
 	"sync"
 	"syscall"
 
@@ -35,8 +35,10 @@ type FSPath struct {
 	location string
 }
 
-var _ Path = &FSPath{}
-var _ HasHash = &FSPath{}
+var (
+	_ Path    = &FSPath{}
+	_ HasHash = &FSPath{}
+)
 
 func NewFSPath(location string) *FSPath {
 	return &FSPath{location: location}
@@ -45,18 +47,18 @@ func NewFSPath(location string) *FSPath {
 func (p *FSPath) Join(relativePath ...string) Path {
 	args := []string{p.location}
 	args = append(args, relativePath...)
-	joined := path.Join(args...)
+	joined := filepath.Join(args...)
 	return &FSPath{location: joined}
 }
 
-func (p *FSPath) WriteFile(data io.ReadSeeker, acl ACL) error {
-	dir := path.Dir(p.location)
-	err := os.MkdirAll(dir, 0755)
+func (p *FSPath) WriteFile(ctx context.Context, data io.ReadSeeker, acl ACL) error {
+	dir := filepath.Dir(p.location)
+	err := os.MkdirAll(dir, 0o755)
 	if err != nil {
 		return fmt.Errorf("error creating directories %q: %v", dir, err)
 	}
 
-	f, err := ioutil.TempFile(dir, "tmp")
+	f, err := os.CreateTemp(dir, "tmp")
 	if err != nil {
 		return fmt.Errorf("error creating temp file in %q: %v", dir, err)
 	}
@@ -95,7 +97,7 @@ func (p *FSPath) WriteFile(data io.ReadSeeker, acl ACL) error {
 // TODO: should we take a file lock or equivalent here?  Can we use RENAME_NOREPLACE ?
 var createFileLock sync.Mutex
 
-func (p *FSPath) CreateFile(data io.ReadSeeker, acl ACL) error {
+func (p *FSPath) CreateFile(ctx context.Context, data io.ReadSeeker, acl ACL) error {
 	createFileLock.Lock()
 	defer createFileLock.Unlock()
 
@@ -109,12 +111,12 @@ func (p *FSPath) CreateFile(data io.ReadSeeker, acl ACL) error {
 		return err
 	}
 
-	return p.WriteFile(data, acl)
+	return p.WriteFile(ctx, data, acl)
 }
 
 // ReadFile implements Path::ReadFile
-func (p *FSPath) ReadFile() ([]byte, error) {
-	file, err := ioutil.ReadFile(p.location)
+func (p *FSPath) ReadFile(ctx context.Context) ([]byte, error) {
+	file, err := os.ReadFile(p.location)
 	if errors.Is(err, syscall.ENOENT) {
 		err = os.ErrNotExist
 	}
@@ -133,7 +135,7 @@ func (p *FSPath) WriteTo(out io.Writer) (int64, error) {
 }
 
 func (p *FSPath) ReadDir() ([]Path, error) {
-	files, err := ioutil.ReadDir(p.location)
+	files, err := os.ReadDir(p.location)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, err
@@ -142,12 +144,12 @@ func (p *FSPath) ReadDir() ([]Path, error) {
 	}
 	var paths []Path
 	for _, f := range files {
-		paths = append(paths, NewFSPath(path.Join(p.location, f.Name())))
+		paths = append(paths, NewFSPath(filepath.Join(p.location, f.Name())))
 	}
 	return paths, nil
 }
 
-func (p *FSPath) ReadTree() ([]Path, error) {
+func (p *FSPath) ReadTree(ctx context.Context) ([]Path, error) {
 	var paths []Path
 	err := readTree(p.location, &paths)
 	if err != nil {
@@ -159,12 +161,12 @@ func (p *FSPath) ReadTree() ([]Path, error) {
 // readTree recursively finds files and adds them to dest
 // It excludes directories.
 func readTree(base string, dest *[]Path) error {
-	files, err := ioutil.ReadDir(base)
+	files, err := os.ReadDir(base)
 	if err != nil {
 		return err
 	}
 	for _, f := range files {
-		p := path.Join(base, f.Name())
+		p := filepath.Join(base, f.Name())
 		if f.IsDir() {
 			err = readTree(p, dest)
 			if err != nil {
@@ -178,7 +180,7 @@ func readTree(base string, dest *[]Path) error {
 }
 
 func (p *FSPath) Base() string {
-	return path.Base(p.location)
+	return filepath.Base(p.location)
 }
 
 func (p *FSPath) Path() string {
@@ -189,12 +191,28 @@ func (p *FSPath) String() string {
 	return p.Path()
 }
 
-func (p *FSPath) Remove() error {
+func (p *FSPath) Remove(ctx context.Context) error {
 	return os.Remove(p.location)
 }
 
-func (p *FSPath) RemoveAllVersions() error {
-	return p.Remove()
+func (p *FSPath) RemoveAll(ctx context.Context) error {
+	tree, err := p.ReadTree(ctx)
+	if err != nil {
+		return err
+	}
+
+	for _, filePath := range tree {
+		err := filePath.Remove(ctx)
+		if err != nil {
+			return fmt.Errorf("error removing file %s: %w", filePath, err)
+		}
+	}
+
+	return nil
+}
+
+func (p *FSPath) RemoveAllVersions(ctx context.Context) error {
+	return p.Remove(ctx)
 }
 
 func (p *FSPath) PreferredHash() (*hashing.Hash, error) {

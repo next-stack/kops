@@ -18,6 +18,7 @@ package model
 
 import (
 	"bytes"
+	"context"
 	"crypto"
 	"crypto/x509"
 	"encoding/base64"
@@ -26,10 +27,12 @@ import (
 	"io"
 	"sort"
 
-	"gopkg.in/square/go-jose.v2"
+	"github.com/go-jose/go-jose/v4"
+	"k8s.io/klog/v2"
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/fitasks"
+	"k8s.io/kops/util/pkg/vfs"
 )
 
 // IssuerDiscoveryModelBuilder publish OIDC issuer discovery metadata
@@ -50,9 +53,11 @@ type oidcDiscovery struct {
 	ClaimsSupported       []string `json:"claims_supported"`
 }
 
-func (b *IssuerDiscoveryModelBuilder) Build(c *fi.ModelBuilderContext) error {
-	said := b.Cluster.Spec.ServiceAccountIssuerDiscovery
-	if said == nil || said.DiscoveryStore == "" {
+func (b *IssuerDiscoveryModelBuilder) Build(c *fi.CloudupModelBuilderContext) error {
+	ctx := context.TODO()
+
+	serviceAccountIssuerDiscovery := b.Cluster.Spec.ServiceAccountIssuerDiscovery
+	if serviceAccountIssuerDiscovery == nil || serviceAccountIssuerDiscovery.DiscoveryStore == "" {
 		return nil
 	}
 
@@ -71,23 +76,77 @@ func (b *IssuerDiscoveryModelBuilder) Build(c *fi.ModelBuilderContext) error {
 	if err != nil {
 		return err
 	}
+
+	var publicFileACL *bool
+
+	discoveryStorePath := b.Cluster.Spec.ServiceAccountIssuerDiscovery.DiscoveryStore
+	discoveryStore, err := vfs.Context.BuildVfsPath(discoveryStorePath)
+	if err != nil {
+		return fmt.Errorf("building VFS path for %q: %w", discoveryStorePath, err)
+	}
+
+	switch discoveryStore := discoveryStore.(type) {
+	case *vfs.S3Path:
+		discoveryStoreURL, err := discoveryStore.GetHTTPsUrl(b.Cluster.Spec.IsIPv6Only())
+		if err != nil {
+			return err
+		}
+		if discoveryStoreURL == fi.ValueOf(b.Cluster.Spec.KubeAPIServer.ServiceAccountIssuer) {
+			// Using Amazon S3 static website hosting requires public access
+			isPublic, err := discoveryStore.IsBucketPublic(ctx)
+			if err != nil {
+				return fmt.Errorf("checking if bucket was public: %w", err)
+			}
+			if !isPublic {
+				klog.Infof("serviceAccountIssuers bucket %q is not public; will use object ACL", discoveryStore.Bucket())
+				publicFileACL = new(true)
+			}
+		} else {
+			klog.Infof("using user managed serviceAccountIssuers")
+		}
+	case *vfs.GSPath:
+		discoveryStoreURL, err := discoveryStore.GetHTTPsUrl()
+		if err != nil {
+			return err
+		}
+		if discoveryStoreURL == fi.ValueOf(b.Cluster.Spec.KubeAPIServer.ServiceAccountIssuer) {
+			// Using Google Cloud Storage requires public access
+			isPublic, err := discoveryStore.IsBucketPublic(ctx)
+			if err != nil {
+				return fmt.Errorf("checking if bucket was public: %w", err)
+			}
+			if !isPublic {
+				klog.Infof("serviceAccountIssuers bucket %q is not public; will use object ACL", discoveryStore.Bucket())
+				publicFileACL = new(true)
+			}
+		} else {
+			klog.Infof("using user managed serviceAccountIssuers")
+		}
+
+	case *vfs.MemFSPath:
+		// ok
+
+	default:
+		return fmt.Errorf("unhandled type %T", discoveryStore)
+	}
+
 	keysFile := &fitasks.ManagedFile{
 		Contents:  keys,
 		Lifecycle: b.Lifecycle,
-		Location:  fi.String("openid/v1/jwks"),
-		Name:      fi.String("keys.json"),
-		Base:      fi.String(b.Cluster.Spec.ServiceAccountIssuerDiscovery.DiscoveryStore),
-		Public:    fi.Bool(true),
+		Location:  new("openid/v1/jwks"),
+		Name:      new("keys.json"),
+		Base:      new(discoveryStorePath),
+		PublicACL: publicFileACL,
 	}
 	c.AddTask(keysFile)
 
 	discoveryFile := &fitasks.ManagedFile{
 		Contents:  fi.NewBytesResource(discovery),
 		Lifecycle: b.Lifecycle,
-		Location:  fi.String(".well-known/openid-configuration"),
-		Name:      fi.String("discovery.json"),
-		Base:      fi.String(b.Cluster.Spec.ServiceAccountIssuerDiscovery.DiscoveryStore),
-		Public:    fi.Bool(true),
+		Location:  new(".well-known/openid-configuration"),
+		Name:      new("discovery.json"),
+		Base:      new(discoveryStorePath),
+		PublicACL: publicFileACL,
 	}
 	c.AddTask(discoveryFile)
 
@@ -116,17 +175,21 @@ type OIDCKeys struct {
 }
 
 // GetDependencies adds CA to the list of dependencies
-func (o *OIDCKeys) GetDependencies(tasks map[string]fi.Task) []fi.Task {
-	return []fi.Task{
+func (o *OIDCKeys) GetDependencies(tasks map[string]fi.CloudupTask) []fi.CloudupTask {
+	return []fi.CloudupTask{
 		o.SigningKey,
 	}
 }
+
 func (o *OIDCKeys) Open() (io.Reader, error) {
 	keyset := o.SigningKey.Keyset()
 	var keys []jose.JSONWebKey
 
 	for _, item := range keyset.Items {
 		if item.DistrustTimestamp != nil {
+			continue
+		}
+		if item.Certificate == nil || item.Certificate.Subject.CommonName != "service-account" {
 			continue
 		}
 

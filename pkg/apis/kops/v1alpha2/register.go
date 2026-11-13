@@ -42,7 +42,7 @@ const GroupName = "kops.k8s.io"
 var SchemeGroupVersion = schema.GroupVersion{Group: GroupName, Version: "v1alpha2"}
 
 //// Kind takes an unqualified kind and returns a Group qualified GroupKind
-//func Kind(kind string) schema.GroupKind {
+// func Kind(kind string) schema.GroupKind {
 //	return SchemeGroupVersion.WithKind(kind).GroupKind()
 //}
 //
@@ -61,6 +61,8 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&KeysetList{},
 		&SSHCredential{},
 		&SSHCredentialList{},
+		&Host{},
+		&HostList{},
 	)
 
 	metav1.AddToGroupVersion(scheme, SchemeGroupVersion)
@@ -71,12 +73,15 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 func (obj *Cluster) GetObjectKind() schema.ObjectKind {
 	return &obj.TypeMeta
 }
+
 func (obj *InstanceGroup) GetObjectKind() schema.ObjectKind {
 	return &obj.TypeMeta
 }
+
 func (obj *Keyset) GetObjectKind() schema.ObjectKind {
 	return &obj.TypeMeta
 }
+
 func (obj *SSHCredential) GetObjectKind() schema.ObjectKind {
 	return &obj.TypeMeta
 }

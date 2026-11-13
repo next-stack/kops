@@ -24,7 +24,6 @@ import (
 
 	"k8s.io/klog/v2"
 	"k8s.io/kops/upup/pkg/fi"
-	"k8s.io/kops/upup/pkg/fi/nodeup/cloudinit"
 	"k8s.io/kops/upup/pkg/fi/nodeup/local"
 )
 
@@ -37,19 +36,19 @@ type UserTask struct {
 	Home  string `json:"home"`
 }
 
-var _ fi.Task = &UserTask{}
+var _ fi.NodeupTask = (*UserTask)(nil)
 
 func (e *UserTask) String() string {
 	return fmt.Sprintf("User: %s", e.Name)
 }
 
-var _ fi.HasName = &File{}
+var _ fi.HasName = (*File)(nil)
 
 func (f *UserTask) GetName() *string {
 	return &f.Name
 }
 
-func (e *UserTask) Find(c *fi.Context) (*UserTask, error) {
+func (e *UserTask) Find(c *fi.NodeupContext) (*UserTask, error) {
 	info, err := fi.LookupUser(e.Name)
 	if err != nil {
 		return nil, err
@@ -68,8 +67,8 @@ func (e *UserTask) Find(c *fi.Context) (*UserTask, error) {
 	return actual, nil
 }
 
-func (e *UserTask) Run(c *fi.Context) error {
-	return fi.DefaultDeltaRunMethod(e, c)
+func (e *UserTask) Run(c *fi.NodeupContext) error {
+	return fi.NodeupDefaultDeltaRunMethod(e, c)
 }
 
 func (_ *UserTask) CheckChanges(a, e, changes *UserTask) error {
@@ -125,16 +124,6 @@ func (_ *UserTask) RenderLocal(t *local.LocalTarget, a, e, changes *UserTask) er
 			}
 		}
 	}
-
-	return nil
-}
-
-func (_ *UserTask) RenderCloudInit(t *cloudinit.CloudInitTarget, a, e, changes *UserTask) error {
-	args := buildUseraddArgs(e)
-	cmd := []string{"useradd"}
-	cmd = append(cmd, args...)
-	klog.Infof("Creating user %q", e.Name)
-	t.AddCommand(cloudinit.Once, cmd...)
 
 	return nil
 }

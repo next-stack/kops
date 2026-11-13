@@ -1,0 +1,148 @@
+apiVersion: kops.k8s.io/v1alpha3
+kind: Cluster
+metadata:
+  creationTimestamp: "2016-12-10T22:42:27Z"
+  name: minimal.example.com
+spec:
+  additionalPolicies:
+    control-plane: '[ { "Action": [ "s3:GetObject" ], "Resource": [ "*" ], "Effect":
+      "Allow" } ]'
+  addons:
+  - manifest: s3://somebucket/example.yaml
+  api:
+    access:
+    - 0.0.0.0/0
+    additionalSANs:
+    - proxy.api.minimal.example.com
+    dns: {}
+    loadBalancer:
+      class: Network
+      type: Public
+    publicName: api.minimal.example.com
+  authorization:
+    alwaysAllow: {}
+  channel: stable
+  cloudConfig: {}
+  cloudProvider:
+    aws:
+      disableSecurityGroupIngress: true
+      ebsCSIDriver:
+        volumeAttachLimit: 65
+      elbSecurityGroup: sg-elb
+      loadBalancerController:
+        enableWAF: true
+      nlbSecurityGroupMode: Managed
+      nodeIPFamilies:
+      - ipv6
+      nodeTerminationHandler:
+        enableSpotInterruptionDraining: true
+      podIdentityWebhook:
+        replicas: 14
+      spotinstOrientation: spot-orientation
+      spotinstProduct: spot-product
+      useIPBasedNodeNames: true
+      warmPool:
+        enableLifecycleHook: true
+  configStore:
+    base: memfs://clusters.example.com/minimal.example.com
+    keypairs: memfs://clusters.example.com/keypairs.example.com
+    secrets: memfs://clusters.example.com/secrets.example.com
+  controlPlaneKubelet:
+    cpuCFSQuota: true
+  etcdClusters:
+  - cpuRequest: 200m
+    etcdMembers:
+    - instanceGroup: master-us-test-1a
+      name: us-test-1a
+    memoryRequest: 100Mi
+    name: main
+  - cpuRequest: 200m
+    etcdMembers:
+    - instanceGroup: master-us-test-1a
+      name: us-test-1a
+    memoryRequest: 100Mi
+    name: events
+  externalDNS:
+    provider: none
+  externalPolicies:
+    control-plane:
+    - arn:aws-test:iam::123456789000:policy/test-policy
+  hooks:
+  - enabled: false
+    name: hookDisabled
+  - name: hookDefault
+  - enabled: true
+    name: hookEnabled
+    roles:
+    - ControlPlane
+  iam: {}
+  kubernetesVersion: v1.35.0
+  networking:
+    additionalNetworkCIDRs:
+    - 172.21.0.0/16
+    amazonVPC: {}
+    egressProxy:
+      httpProxy:
+        host: egress-proxy.invalid
+    isolateControlPlane: true
+    networkCIDR: 172.20.0.0/16
+    networkID: vpc-123456
+    nonMasqueradeCIDR: 100.64.0.0/10
+    podCIDR: 100.64.0.0/16
+    serviceClusterIPRange: 100.65.0.0/16
+    subnets:
+    - cidr: 172.20.32.0/19
+      name: us-test-1a
+      type: Public
+      zone: us-test-1a
+    tagSubnets: false
+    topology:
+      dns: None
+  sshAccess:
+  - 0.0.0.0/0
+
+---
+
+apiVersion: kops.k8s.io/v1alpha3
+kind: InstanceGroup
+metadata:
+  creationTimestamp: "2016-12-10T22:42:28Z"
+  labels:
+    kops.k8s.io/cluster: minimal.example.com
+  name: nodes
+spec:
+  associatePublicIP: true
+  image: ubuntu/images/hvm-ssd-gp3/ubuntu-resolute-26.04-amd64-server-20220404
+  machineType: t2.medium
+  maxSize: 2
+  minSize: 2
+  role: Node
+  rootVolume:
+    encryption: true
+    encryptionKey: 1234abcd-12ab-34cd-56ef-1234567890ab
+    iops: 300
+    optimization: true
+    size: 33
+    throughput: 421
+    type: gp3
+  subnets:
+  - us-test-1a
+
+---
+
+apiVersion: kops.k8s.io/v1alpha3
+kind: InstanceGroup
+metadata:
+  creationTimestamp: "2016-12-10T22:42:28Z"
+  labels:
+    kops.k8s.io/cluster: minimal.example.com
+  name: master-us-test-1a
+spec:
+  associatePublicIP: true
+  image: ubuntu/images/hvm-ssd-gp3/ubuntu-resolute-26.04-amd64-server-20220404
+  machineType: m3.medium
+  maxSize: 1
+  minSize: 1
+  role: ControlPlane
+  subnets:
+  - us-test-1a

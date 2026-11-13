@@ -21,7 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
+	"os"
 
 	"github.com/spf13/cobra"
 	"k8s.io/kops/cmd/kops/util"
@@ -76,7 +76,7 @@ func NewCmdCreateSecretDockerConfig(f *util.Factory, out io.Writer) *cobra.Comma
 		Args:              rootCommand.clusterNameArgs(&options.ClusterName),
 		ValidArgsFunction: commandutils.CompleteClusterName(f, true, false),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return RunCreateSecretDockerConfig(context.TODO(), f, out, options)
+			return RunCreateSecretDockerConfig(cmd.Context(), f, out, options)
 		},
 	}
 
@@ -90,13 +90,13 @@ func NewCmdCreateSecretDockerConfig(f *util.Factory, out io.Writer) *cobra.Comma
 	return cmd
 }
 
-func RunCreateSecretDockerConfig(ctx context.Context, f *util.Factory, out io.Writer, options *CreateSecretDockerConfigOptions) error {
+func RunCreateSecretDockerConfig(ctx context.Context, f commandutils.Factory, out io.Writer, options *CreateSecretDockerConfigOptions) error {
 	cluster, err := GetCluster(ctx, f, options.ClusterName)
 	if err != nil {
 		return err
 	}
 
-	clientset, err := f.Clientset()
+	clientset, err := f.KopsClient()
 	if err != nil {
 		return err
 	}
@@ -113,7 +113,7 @@ func RunCreateSecretDockerConfig(ctx context.Context, f *util.Factory, out io.Wr
 			return fmt.Errorf("reading Docker config from stdin: %v", err)
 		}
 	} else {
-		data, err = ioutil.ReadFile(options.DockerConfigPath)
+		data, err = os.ReadFile(options.DockerConfigPath)
 		if err != nil {
 			return fmt.Errorf("reading Docker config %v: %v", options.DockerConfigPath, err)
 		}
@@ -130,7 +130,7 @@ func RunCreateSecretDockerConfig(ctx context.Context, f *util.Factory, out io.Wr
 	}
 
 	if !options.Force {
-		_, created, err := secretStore.GetOrCreateSecret("dockerconfig", secret)
+		_, created, err := secretStore.GetOrCreateSecret(ctx, "dockerconfig", secret)
 		if err != nil {
 			return fmt.Errorf("adding dockerconfig secret: %v", err)
 		}

@@ -17,8 +17,8 @@ limitations under the License.
 package nodetasks
 
 import (
+	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path"
@@ -36,7 +36,7 @@ type AptSource struct {
 	Sources []string
 }
 
-func (e *AptSource) Find(c *fi.Context) (*AptSource, error) {
+func (e *AptSource) Find(c *fi.NodeupContext) (*AptSource, error) {
 	return nil, nil
 }
 
@@ -48,8 +48,8 @@ func (f *AptSource) String() string {
 	return f.Name
 }
 
-func (f *AptSource) Run(c *fi.Context) error {
-	return fi.DefaultDeltaRunMethod(f, c)
+func (f *AptSource) Run(c *fi.NodeupContext) error {
+	return fi.NodeupDefaultDeltaRunMethod(f, c)
 }
 
 func (*AptSource) CheckChanges(a, e, changes *AptSource) error {
@@ -57,8 +57,9 @@ func (*AptSource) CheckChanges(a, e, changes *AptSource) error {
 }
 
 func (f *AptSource) RenderLocal(t *local.LocalTarget, a, e, changes *AptSource) error {
-
-	tmpDir, err := ioutil.TempDir("", "aptsource")
+	// Not adding ctx to signature as RenderLocal seems to be part of a common interface
+	ctx := context.TODO()
+	tmpDir, err := os.MkdirTemp("", "aptsource")
 	if err != nil {
 		return fmt.Errorf("error creating temp dir: %v", err)
 	}
@@ -69,7 +70,7 @@ func (f *AptSource) RenderLocal(t *local.LocalTarget, a, e, changes *AptSource) 
 	}()
 	filename := path.Join(tmpDir, f.Name+".gpg")
 
-	if _, err := fi.DownloadURL(f.Keyring, filename, nil); err != nil {
+	if _, err := fi.DownloadURL(ctx, f.Keyring, filename, nil); err != nil {
 		return err
 	}
 

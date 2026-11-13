@@ -20,23 +20,26 @@ import (
 	"io"
 
 	"github.com/spf13/cobra"
-	"k8s.io/kops/cmd/kops/util"
+	"k8s.io/kops/pkg/commands/commandutils"
+	"k8s.io/kops/pkg/commands/toolbox"
 	"k8s.io/kubectl/pkg/util/i18n"
 )
 
-var (
-	toolboxShort = i18n.T(`Miscellaneous, infrequently used commands.`)
-)
+var toolboxShort = i18n.T(`Miscellaneous, experimental, or infrequently used commands.`)
 
-func NewCmdToolbox(f *util.Factory, out io.Writer) *cobra.Command {
+func NewCmdToolbox(f commandutils.Factory, out io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "toolbox",
 		Short: toolboxShort,
 	}
 
 	cmd.AddCommand(NewCmdToolboxDump(f, out))
+	cmd.AddCommand(NewCmdToolboxEnroll(f, out))
 	cmd.AddCommand(NewCmdToolboxTemplate(f, out))
 	cmd.AddCommand(NewCmdToolboxInstanceSelector(f, out))
+	cmd.AddCommand(NewCmdToolboxAddons(out))
+
+	cmd.AddCommand(toolbox.BuildClusterAPICommand(f, out))
 
 	return cmd
 }

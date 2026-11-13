@@ -17,20 +17,24 @@ limitations under the License.
 package gce
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
 	"google.golang.org/api/googleapi"
+	"k8s.io/klog/v2"
+	"k8s.io/kops/pkg/truncate"
+	"k8s.io/kops/upup/pkg/fi"
+	"k8s.io/kops/upup/pkg/fi/cloudup/gce/gcenames"
 )
 
 func IsNotFound(err error) bool {
-	apiErr, ok := err.(*googleapi.Error)
-	if !ok {
+	var apiErr *googleapi.Error
+	if !errors.As(err, &apiErr) {
 		return false
 	}
 
 	// We could also check for Errors[].Resource == "notFound"
-	//klog.Info("apiErr: %v", apiErr)
 
 	return apiErr.Code == 404
 }
@@ -48,10 +52,62 @@ func IsNotReady(err error) bool {
 	return false
 }
 
-func SafeClusterName(clusterName string) string {
+// ClusterPrefixedName returns a cluster-prefixed name, with a maxLength
+func ClusterPrefixedName(objectName string, clusterName string, maxLength int) string {
+	return gcenames.ClusterPrefixedName(objectName, clusterName, maxLength)
+}
+
+// ClusterSuffixedName returns a cluster-suffixed name, with a maxLength
+func ClusterSuffixedName(objectName string, clusterName string, maxLength int) string {
+	prefix := objectName + "-"
+	suffixLength := maxLength - len(prefix)
+	if suffixLength < 10 {
+		klog.Fatalf("cannot construct a reasonable object name of length %d with a prefix of length %d (%q)", maxLength, len(prefix), prefix)
+	}
+
 	// GCE does not support . in tags / names
-	safeClusterName := strings.Replace(clusterName, ".", "-", -1)
-	return safeClusterName
+	safeClusterName := strings.ReplaceAll(clusterName, ".", "-")
+
+	opt := truncate.TruncateStringOptions{
+		MaxLength:     suffixLength,
+		AlwaysAddHash: false,
+		HashLength:    6,
+	}
+	suffix := truncate.TruncateString(safeClusterName, opt)
+
+	return prefix + suffix
+}
+
+// SafeClusterName returns a safe cluster name
+// Deprecated: prefer ClusterSuffixedName
+func SafeClusterName(clusterName string) string {
+	return gcenames.SafeClusterName(clusterName)
+}
+
+type Label struct {
+	Key   string
+	Value string
+}
+
+// LabelForCluster returns the GCE label we use for resources for this cluster.
+func LabelForCluster(clusterName string) Label {
+	v := SafeClusterName(clusterName)
+	return Label{Key: gceLabelNameKubernetesCluster, Value: v}
+}
+
+// SafeTruncatedClusterName returns a safe and truncated cluster name
+func SafeTruncatedClusterName(clusterName string, maxLength int) string {
+	// GCE does not support . in tags / names
+	safeClusterName := strings.ReplaceAll(clusterName, ".", "-")
+
+	opt := truncate.TruncateStringOptions{
+		MaxLength:     maxLength,
+		AlwaysAddHash: false,
+		HashLength:    6,
+	}
+	truncatedClusterName := truncate.TruncateString(safeClusterName, opt)
+
+	return truncatedClusterName
 }
 
 // SafeObjectName returns the object name and cluster name escaped for GCE
@@ -62,6 +118,11 @@ func SafeObjectName(name string, clusterName string) string {
 	return SafeClusterName(gceName)
 }
 
+// ServiceAccountName returns the cluster-suffixed service-account name
+func ServiceAccountName(name string, clusterName string) string {
+	return ClusterSuffixedName(name, clusterName, 30)
+}
+
 // LastComponent returns the last component of a URL, i.e. anything after the last slash
 // If there is no slash, returns the whole string
 func LastComponent(s string) string {
@@ -70,6 +131,21 @@ func LastComponent(s string) string {
 		s = s[lastSlash+1:]
 	}
 	return s
+}
+
+// SSHUsernameForImage returns the username under which SSH public keys are registered in the
+// instance's "ssh-keys" metadata; the GCE guest agent creates this user on first boot. kOps
+// historically used fi.SecretNameSSHPrimary ("admin"), but on Ubuntu images the guest agent fails
+// to create that user because those images ship with an "admin" group
+// (https://github.com/kubernetes/kops/issues/16175), so the key was never installed. For Ubuntu
+// images we use the image's built-in "ubuntu" user instead. Other images keep "admin" so that SSH
+// access to existing non-Ubuntu clusters is unchanged.
+func SSHUsernameForImage(image string) string {
+	name := LastComponent(image)
+	if strings.HasPrefix(strings.ToLower(name), "ubuntu") {
+		return "ubuntu"
+	}
+	return fi.SecretNameSSHPrimary
 }
 
 // ZoneToRegion maps a GCE zone name to a GCE region name, returning an error if it cannot be mapped

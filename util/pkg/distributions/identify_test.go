@@ -30,23 +30,28 @@ func TestFindDistribution(t *testing.T) {
 		expected Distribution
 	}{
 		{
-			rootfs:   "amazonlinux2",
+			rootfs:   "amazonlinux2023",
 			err:      nil,
-			expected: DistributionAmazonLinux2,
+			expected: DistributionAmazonLinux2023,
+		},
+		{
+			rootfs:   "amazonlinux2027",
+			err:      nil,
+			expected: DistributionAmazonLinux2027,
 		},
 		{
 			rootfs:   "centos7",
-			err:      nil,
-			expected: DistributionCentos7,
+			err:      fmt.Errorf("unsupported distro %q", "centos-7"),
+			expected: Distribution{},
 		},
 		{
 			rootfs:   "centos8",
-			err:      nil,
-			expected: DistributionCentos8,
+			err:      fmt.Errorf("unsupported distro %q", "centos-8"),
+			expected: Distribution{},
 		},
 		{
 			rootfs:   "coreos",
-			err:      fmt.Errorf("unsupported distro: coreos-2247.7.0"),
+			err:      fmt.Errorf("unsupported distro %q", "coreos-2247.7.0"),
 			expected: Distribution{},
 		},
 		{
@@ -56,18 +61,13 @@ func TestFindDistribution(t *testing.T) {
 		},
 		{
 			rootfs:   "debian8",
-			err:      fmt.Errorf("unsupported distro: debian-8"),
+			err:      fmt.Errorf("unsupported distro %q", "debian-8"),
 			expected: Distribution{},
 		},
 		{
 			rootfs:   "debian9",
-			err:      nil,
-			expected: DistributionDebian9,
-		},
-		{
-			rootfs:   "debian10",
-			err:      nil,
-			expected: DistributionDebian10,
+			err:      fmt.Errorf("unsupported distro %q", "debian-9"),
+			expected: Distribution{},
 		},
 		{
 			rootfs:   "debian11",
@@ -75,14 +75,23 @@ func TestFindDistribution(t *testing.T) {
 			expected: DistributionDebian11,
 		},
 		{
+			rootfs:   "debian12",
+			err:      nil,
+			expected: DistributionDebian12,
+		},
+		{
+			rootfs:   "debian13",
+			err:      nil,
+			expected: DistributionDebian13,
+		}, {
 			rootfs:   "flatcar",
 			err:      nil,
 			expected: DistributionFlatcar,
 		},
 		{
 			rootfs:   "rhel7",
-			err:      nil,
-			expected: DistributionRhel7,
+			err:      fmt.Errorf("unsupported distro %q", "rhel-7.8"),
+			expected: Distribution{},
 		},
 		{
 			rootfs:   "rhel8",
@@ -90,34 +99,49 @@ func TestFindDistribution(t *testing.T) {
 			expected: DistributionRhel8,
 		},
 		{
+			rootfs:   "rhel9",
+			err:      nil,
+			expected: DistributionRhel9,
+		},
+		{
+			rootfs:   "rocky8",
+			err:      nil,
+			expected: DistributionRocky8,
+		},
+		{
+			rootfs:   "rocky9",
+			err:      nil,
+			expected: DistributionRocky9,
+		},
+		{
 			rootfs:   "ubuntu1604",
-			err:      nil,
-			expected: DistributionUbuntu1604,
+			err:      fmt.Errorf("unsupported distro %q", "ubuntu-16.04"),
+			expected: Distribution{},
 		},
 		{
-			rootfs:   "ubuntu1804",
+			rootfs:   "ubuntu2204",
 			err:      nil,
-			expected: DistributionUbuntu1804,
+			expected: DistributionUbuntu2204,
 		},
 		{
-			rootfs:   "ubuntu2004",
+			rootfs:   "ubuntu2404",
 			err:      nil,
-			expected: DistributionUbuntu2004,
+			expected: DistributionUbuntu2404,
 		},
 		{
-			rootfs:   "ubuntu2010",
+			rootfs:   "ubuntu2510",
 			err:      nil,
-			expected: DistributionUbuntu2010,
+			expected: DistributionUbuntu2510,
 		},
 		{
-			rootfs:   "ubuntu2104",
+			rootfs:   "ubuntu2604",
 			err:      nil,
-			expected: DistributionUbuntu2104,
+			expected: DistributionUbuntu2604,
 		},
 		{
-			rootfs:   "ubuntu2110",
+			rootfs:   "ubuntu2610",
 			err:      nil,
-			expected: DistributionUbuntu2110,
+			expected: DistributionUbuntu2610,
 		},
 		{
 			rootfs:   "notfound",

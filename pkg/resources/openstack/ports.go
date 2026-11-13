@@ -17,8 +17,8 @@ limitations under the License.
 package openstack
 
 import (
-	"github.com/gophercloud/gophercloud/openstack/networking/v2/networks"
-	"github.com/gophercloud/gophercloud/openstack/networking/v2/ports"
+	"github.com/gophercloud/gophercloud/v2/openstack/networking/v2/networks"
+	"github.com/gophercloud/gophercloud/v2/openstack/networking/v2/ports"
 	"k8s.io/kops/pkg/resources"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/openstack"
@@ -39,10 +39,7 @@ func (os *clusterDiscoveryOS) ListPorts(network networks.Network) ([]*resources.
 		return nil, err
 	}
 
-	preExistingNet := true
-	if os.clusterName == network.Name {
-		preExistingNet = false
-	}
+	preExistingNet := os.clusterName != network.Name
 
 	filteredPorts := []ports.Port{}
 	if preExistingNet {

@@ -18,7 +18,6 @@ package components
 
 import (
 	"k8s.io/kops/pkg/apis/kops"
-	"k8s.io/kops/pkg/apis/kops/util"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/loader"
 )
@@ -28,65 +27,72 @@ type ClusterAutoscalerOptionsBuilder struct {
 	*OptionsContext
 }
 
-var _ loader.OptionsBuilder = &ClusterAutoscalerOptionsBuilder{}
+var _ loader.ClusterOptionsBuilder = &ClusterAutoscalerOptionsBuilder{}
 
-func (b *ClusterAutoscalerOptionsBuilder) BuildOptions(o interface{}) error {
-	clusterSpec := o.(*kops.ClusterSpec)
+func (b *ClusterAutoscalerOptionsBuilder) BuildOptions(o *kops.Cluster) error {
+	clusterSpec := &o.Spec
 	cas := clusterSpec.ClusterAutoscaler
-	if cas == nil || !fi.BoolValue(cas.Enabled) {
+	if cas == nil || !fi.ValueOf(cas.Enabled) {
 		return nil
 	}
 
 	if cas.Image == nil {
-
-		image := "k8s.gcr.io/autoscaling/cluster-autoscaler:latest"
-		v, err := util.ParseKubernetesVersion(clusterSpec.KubernetesVersion)
-		if err == nil {
-			switch v.Minor {
-			case 23:
-				image = "k8s.gcr.io/autoscaling/cluster-autoscaler:v1.23.0"
-			case 22:
-				image = "k8s.gcr.io/autoscaling/cluster-autoscaler:v1.22.1"
-			case 21:
-				image = "k8s.gcr.io/autoscaling/cluster-autoscaler:v1.21.1"
-			case 20:
-				image = "k8s.gcr.io/autoscaling/cluster-autoscaler:v1.20.1"
-			case 19:
-				image = "k8s.gcr.io/autoscaling/cluster-autoscaler:v1.19.2"
-			case 18:
-				image = "k8s.gcr.io/autoscaling/cluster-autoscaler:v1.18.3"
-			}
+		// cluster-autoscaler v1.35+ always watches DRA objects through resource.k8s.io/v1,
+		// which the API server serves only from Kubernetes 1.34. On older control planes
+		// those informers never sync and the autoscaler never starts its main loop.
+		// v1.34 handles DRA only when --enable-dynamic-resource-allocation is set, which
+		// kOps does not set.
+		if b.ControlPlaneKubernetesVersion().IsLT("1.34.0") {
+			cas.Image = new("registry.k8s.io/autoscaling/cluster-autoscaler:v1.34.6")
+		} else {
+			cas.Image = new("registry.k8s.io/autoscaling/cluster-autoscaler:v1.37.0")
 		}
-		cas.Image = fi.String(image)
-
 	}
 
-	if cas.Expander == nil {
-		cas.Expander = fi.String("random")
+	if cas.Expander == "" {
+		cas.Expander = "random"
+	}
+	if cas.IgnoreDaemonSetsUtilization == nil {
+		cas.IgnoreDaemonSetsUtilization = new(false)
 	}
 	if cas.ScaleDownUtilizationThreshold == nil {
-		cas.ScaleDownUtilizationThreshold = fi.String("0.5")
+		cas.ScaleDownUtilizationThreshold = new("0.5")
+	}
+	if cas.SkipNodesWithCustomControllerPods == nil {
+		cas.SkipNodesWithCustomControllerPods = new(true)
 	}
 	if cas.SkipNodesWithLocalStorage == nil {
-		cas.SkipNodesWithLocalStorage = fi.Bool(true)
+		cas.SkipNodesWithLocalStorage = new(true)
 	}
 	if cas.SkipNodesWithSystemPods == nil {
-		cas.SkipNodesWithSystemPods = fi.Bool(true)
+		cas.SkipNodesWithSystemPods = new(true)
 	}
 	if cas.BalanceSimilarNodeGroups == nil {
-		cas.BalanceSimilarNodeGroups = fi.Bool(false)
+		cas.BalanceSimilarNodeGroups = new(false)
+	}
+	if cas.EmitPerNodegroupMetrics == nil {
+		cas.EmitPerNodegroupMetrics = new(false)
 	}
 	if cas.AWSUseStaticInstanceList == nil {
-		cas.AWSUseStaticInstanceList = fi.Bool(false)
+		cas.AWSUseStaticInstanceList = new(false)
 	}
 	if cas.NewPodScaleUpDelay == nil {
-		cas.NewPodScaleUpDelay = fi.String("0s")
+		cas.NewPodScaleUpDelay = new("0s")
 	}
 	if cas.ScaleDownDelayAfterAdd == nil {
-		cas.ScaleDownDelayAfterAdd = fi.String("10m0s")
+		cas.ScaleDownDelayAfterAdd = new("10m0s")
+	}
+	if cas.ScaleDownUnneededTime == nil {
+		cas.ScaleDownUnneededTime = new("10m0s")
+	}
+	if cas.ScaleDownUnreadyTime == nil {
+		cas.ScaleDownUnreadyTime = new("20m0s")
 	}
 	if cas.MaxNodeProvisionTime == "" {
 		cas.MaxNodeProvisionTime = "15m0s"
+	}
+	if cas.Expander == "priority" {
+		cas.CreatePriorityExpenderConfig = new(true)
 	}
 
 	return nil

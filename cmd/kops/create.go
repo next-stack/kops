@@ -25,13 +25,14 @@ import (
 	"github.com/spf13/cobra"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/klog/v2"
 	"k8s.io/kops/cmd/kops/util"
 	kopsapi "k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/kopscodecs"
+	"k8s.io/kops/pkg/kubemanifest"
 	"k8s.io/kops/upup/pkg/fi/cloudup"
 	"k8s.io/kops/util/pkg/text"
-	"k8s.io/kops/util/pkg/vfs"
 	"k8s.io/kubectl/pkg/util/i18n"
 	"k8s.io/kubectl/pkg/util/templates"
 )
@@ -54,9 +55,6 @@ var (
 	# Create a cluster from the configuration specification in a YAML file.
 	kops create -f my-cluster.yaml
 
-	# Create secret from secret spec file.
-	kops create -f secret.yaml
-
 	# Create an instancegroup based on the YAML passed into stdin.
 	cat instancegroup.yaml | kops create -f -
 	`))
@@ -74,7 +72,7 @@ func NewCmdCreate(f *util.Factory, out io.Writer) *cobra.Command {
 		Example: createExample,
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return RunCreate(context.TODO(), f, out, options)
+			return RunCreate(cmd.Context(), f, out, options)
 		},
 	}
 
@@ -95,15 +93,21 @@ func NewCmdCreate(f *util.Factory, out io.Writer) *cobra.Command {
 }
 
 func RunCreate(ctx context.Context, f *util.Factory, out io.Writer, c *CreateOptions) error {
-	clientset, err := f.Clientset()
+	clientset, err := f.KopsClient()
 	if err != nil {
 		return err
 	}
 
-	var clusterName = ""
-	//var cSpec = false
+	vfsContext := f.VFSContext()
+
+	clusterName := ""
+	// var cSpec = false
 	var sb bytes.Buffer
 	fmt.Fprintf(&sb, "\n")
+
+	var addons kubemanifest.ObjectList
+	var clusters []*kopsapi.Cluster
+
 	for _, f := range c.Filenames {
 		var contents []byte
 		if f == "-" {
@@ -112,7 +116,7 @@ func RunCreate(ctx context.Context, f *util.Factory, out io.Writer, c *CreateOpt
 				return err
 			}
 		} else {
-			contents, err = vfs.Context.ReadFile(f)
+			contents, err = vfsContext.ReadFile(f)
 			if err != nil {
 				return fmt.Errorf("error reading file %q: %v", f, err)
 			}
@@ -134,7 +138,7 @@ func RunCreate(ctx context.Context, f *util.Factory, out io.Writer, c *CreateOpt
 
 				// Adding a PerformAssignments() call here as the user might be trying to use
 				// the new `-f` feature, with an old cluster definition.
-				err = cloudup.PerformAssignments(v, cloud)
+				err = cloudup.PerformAssignments(v, vfsContext, cloud)
 				if err != nil {
 					return fmt.Errorf("error populating configuration: %v", err)
 				}
@@ -146,7 +150,8 @@ func RunCreate(ctx context.Context, f *util.Factory, out io.Writer, c *CreateOpt
 					return fmt.Errorf("error creating cluster: %v", err)
 				}
 				fmt.Fprintf(&sb, "Created cluster/%s\n", v.ObjectMeta.Name)
-				//cSpec = true
+				clusters = append(clusters, v)
+				// cSpec = true
 
 			case *kopsapi.InstanceGroup:
 				clusterName = v.ObjectMeta.Labels[kopsapi.LabelClusterName]
@@ -191,19 +196,40 @@ func RunCreate(ctx context.Context, f *util.Factory, out io.Writer, c *CreateOpt
 				}
 
 				sshKeyArr := []byte(v.Spec.PublicKey)
-				err = sshCredentialStore.AddSSHPublicKey(sshKeyArr)
+				err = sshCredentialStore.AddSSHPublicKey(ctx, sshKeyArr)
 				if err != nil {
 					return err
 				}
 				fmt.Fprintf(&sb, "Added ssh credential\n")
 
+			case *unstructured.Unstructured:
+				addons = append(addons, kubemanifest.NewObject(v.Object))
+
 			default:
 				klog.V(2).Infof("Type of object was %T", v)
-				return fmt.Errorf("Unhandled kind %q in %s", gvk, f)
+				return fmt.Errorf("unhandled kind %q in %s", gvk, f)
 			}
 		}
-
 	}
+
+	// Because not all addons support labels, we can only support one cluster here.
+	// A single cluster per create is probably a good idea anyway.
+	if len(addons) != 0 {
+		if len(clusters) > 1 {
+			return fmt.Errorf("cannot specify additional objects when multiple clusters are created")
+		}
+		if len(clusters) == 0 {
+			return fmt.Errorf("must specify a cluster when creating additional objects")
+		}
+		cluster := clusters[0]
+
+		addonsClient := clientset.AddonsFor(cluster)
+
+		if err := addonsClient.Replace(addons); err != nil {
+			return fmt.Errorf("error writing additional objects: %v", err)
+		}
+	}
+
 	{
 		// If there is a value in this sb, this should mean that we have something to deploy
 		// so let's advise the user how to engage the cloud provider and deploy

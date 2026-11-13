@@ -14,6 +14,8 @@ locals {
   subnet_us-test-1a_id         = aws_subnet.us-test-1a-compress-example-com.id
   vpc_cidr_block               = aws_vpc.compress-example-com.cidr_block
   vpc_id                       = aws_vpc.compress-example-com.id
+  vpc_ipv6_cidr_block          = aws_vpc.compress-example-com.ipv6_cidr_block
+  vpc_ipv6_cidr_length         = local.vpc_ipv6_cidr_block == "" ? null : tonumber(regex(".*/(\\d+)", local.vpc_ipv6_cidr_block)[0])
 }
 
 output "cluster_name" {
@@ -76,6 +78,14 @@ output "vpc_id" {
   value = aws_vpc.compress-example-com.id
 }
 
+output "vpc_ipv6_cidr_block" {
+  value = aws_vpc.compress-example-com.ipv6_cidr_block
+}
+
+output "vpc_ipv6_cidr_length" {
+  value = local.vpc_ipv6_cidr_block == "" ? null : tonumber(regex(".*/(\\d+)", local.vpc_ipv6_cidr_block)[0])
+}
+
 provider "aws" {
   region = "us-test-1"
 }
@@ -91,6 +101,7 @@ resource "aws_autoscaling_group" "master-us-test-1a-masters-compress-example-com
     id      = aws_launch_template.master-us-test-1a-masters-compress-example-com.id
     version = aws_launch_template.master-us-test-1a-masters-compress-example-com.latest_version
   }
+  max_instance_lifetime = 0
   max_size              = 1
   metrics_granularity   = "1Minute"
   min_size              = 1
@@ -107,14 +118,14 @@ resource "aws_autoscaling_group" "master-us-test-1a-masters-compress-example-com
     value               = "master-us-test-1a.masters.compress.example.com"
   }
   tag {
-    key                 = "k8s.io/cluster-autoscaler/node-template/label/kops.k8s.io/kops-controller-pki"
+    key                 = "aws-node-termination-handler/managed"
     propagate_at_launch = true
     value               = ""
   }
   tag {
-    key                 = "k8s.io/cluster-autoscaler/node-template/label/kubernetes.io/role"
+    key                 = "k8s.io/cluster-autoscaler/node-template/label/kops.k8s.io/kops-controller-pki"
     propagate_at_launch = true
-    value               = "master"
+    value               = ""
   }
   tag {
     key                 = "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/control-plane"
@@ -122,14 +133,14 @@ resource "aws_autoscaling_group" "master-us-test-1a-masters-compress-example-com
     value               = ""
   }
   tag {
-    key                 = "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/master"
+    key                 = "k8s.io/cluster-autoscaler/node-template/label/node.kubernetes.io/exclude-from-external-load-balancers"
     propagate_at_launch = true
     value               = ""
   }
   tag {
-    key                 = "k8s.io/cluster-autoscaler/node-template/label/node.kubernetes.io/exclude-from-external-load-balancers"
+    key                 = "k8s.io/role/control-plane"
     propagate_at_launch = true
-    value               = ""
+    value               = "1"
   }
   tag {
     key                 = "k8s.io/role/master"
@@ -155,6 +166,7 @@ resource "aws_autoscaling_group" "nodes-compress-example-com" {
     id      = aws_launch_template.nodes-compress-example-com.id
     version = aws_launch_template.nodes-compress-example-com.latest_version
   }
+  max_instance_lifetime = 0
   max_size              = 2
   metrics_granularity   = "1Minute"
   min_size              = 2
@@ -171,9 +183,9 @@ resource "aws_autoscaling_group" "nodes-compress-example-com" {
     value               = "nodes.compress.example.com"
   }
   tag {
-    key                 = "k8s.io/cluster-autoscaler/node-template/label/kubernetes.io/role"
+    key                 = "aws-node-termination-handler/managed"
     propagate_at_launch = true
-    value               = "node"
+    value               = ""
   }
   tag {
     key                 = "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/node"
@@ -198,6 +210,82 @@ resource "aws_autoscaling_group" "nodes-compress-example-com" {
   vpc_zone_identifier = [aws_subnet.us-test-1a-compress-example-com.id]
 }
 
+resource "aws_autoscaling_lifecycle_hook" "master-us-test-1a-NTHLifecycleHook" {
+  autoscaling_group_name = aws_autoscaling_group.master-us-test-1a-masters-compress-example-com.id
+  default_result         = "CONTINUE"
+  heartbeat_timeout      = 300
+  lifecycle_transition   = "autoscaling:EC2_INSTANCE_TERMINATING"
+  name                   = "master-us-test-1a-NTHLifecycleHook"
+}
+
+resource "aws_autoscaling_lifecycle_hook" "nodes-NTHLifecycleHook" {
+  autoscaling_group_name = aws_autoscaling_group.nodes-compress-example-com.id
+  default_result         = "CONTINUE"
+  heartbeat_timeout      = 300
+  lifecycle_transition   = "autoscaling:EC2_INSTANCE_TERMINATING"
+  name                   = "nodes-NTHLifecycleHook"
+}
+
+resource "aws_cloudwatch_event_rule" "compress-example-com-ASGLifecycle" {
+  event_pattern = file("${path.module}/data/aws_cloudwatch_event_rule_compress.example.com-ASGLifecycle_event_pattern")
+  name          = "compress.example.com-ASGLifecycle"
+  tags = {
+    "KubernetesCluster"                          = "compress.example.com"
+    "Name"                                       = "compress.example.com-ASGLifecycle"
+    "kubernetes.io/cluster/compress.example.com" = "owned"
+  }
+}
+
+resource "aws_cloudwatch_event_rule" "compress-example-com-InstanceScheduledChange" {
+  event_pattern = file("${path.module}/data/aws_cloudwatch_event_rule_compress.example.com-InstanceScheduledChange_event_pattern")
+  name          = "compress.example.com-InstanceScheduledChange"
+  tags = {
+    "KubernetesCluster"                          = "compress.example.com"
+    "Name"                                       = "compress.example.com-InstanceScheduledChange"
+    "kubernetes.io/cluster/compress.example.com" = "owned"
+  }
+}
+
+resource "aws_cloudwatch_event_rule" "compress-example-com-InstanceStateChange" {
+  event_pattern = file("${path.module}/data/aws_cloudwatch_event_rule_compress.example.com-InstanceStateChange_event_pattern")
+  name          = "compress.example.com-InstanceStateChange"
+  tags = {
+    "KubernetesCluster"                          = "compress.example.com"
+    "Name"                                       = "compress.example.com-InstanceStateChange"
+    "kubernetes.io/cluster/compress.example.com" = "owned"
+  }
+}
+
+resource "aws_cloudwatch_event_rule" "compress-example-com-SpotInterruption" {
+  event_pattern = file("${path.module}/data/aws_cloudwatch_event_rule_compress.example.com-SpotInterruption_event_pattern")
+  name          = "compress.example.com-SpotInterruption"
+  tags = {
+    "KubernetesCluster"                          = "compress.example.com"
+    "Name"                                       = "compress.example.com-SpotInterruption"
+    "kubernetes.io/cluster/compress.example.com" = "owned"
+  }
+}
+
+resource "aws_cloudwatch_event_target" "compress-example-com-ASGLifecycle-Target" {
+  arn  = aws_sqs_queue.compress-example-com-nth.arn
+  rule = aws_cloudwatch_event_rule.compress-example-com-ASGLifecycle.id
+}
+
+resource "aws_cloudwatch_event_target" "compress-example-com-InstanceScheduledChange-Target" {
+  arn  = aws_sqs_queue.compress-example-com-nth.arn
+  rule = aws_cloudwatch_event_rule.compress-example-com-InstanceScheduledChange.id
+}
+
+resource "aws_cloudwatch_event_target" "compress-example-com-InstanceStateChange-Target" {
+  arn  = aws_sqs_queue.compress-example-com-nth.arn
+  rule = aws_cloudwatch_event_rule.compress-example-com-InstanceStateChange.id
+}
+
+resource "aws_cloudwatch_event_target" "compress-example-com-SpotInterruption-Target" {
+  arn  = aws_sqs_queue.compress-example-com-nth.arn
+  rule = aws_cloudwatch_event_rule.compress-example-com-SpotInterruption.id
+}
+
 resource "aws_ebs_volume" "us-test-1a-etcd-events-compress-example-com" {
   availability_zone = "us-test-1a"
   encrypted         = false
@@ -207,6 +295,7 @@ resource "aws_ebs_volume" "us-test-1a-etcd-events-compress-example-com" {
     "KubernetesCluster"                          = "compress.example.com"
     "Name"                                       = "us-test-1a.etcd-events.compress.example.com"
     "k8s.io/etcd/events"                         = "us-test-1a/us-test-1a"
+    "k8s.io/role/control-plane"                  = "1"
     "k8s.io/role/master"                         = "1"
     "kubernetes.io/cluster/compress.example.com" = "owned"
   }
@@ -223,6 +312,7 @@ resource "aws_ebs_volume" "us-test-1a-etcd-main-compress-example-com" {
     "KubernetesCluster"                          = "compress.example.com"
     "Name"                                       = "us-test-1a.etcd-main.compress.example.com"
     "k8s.io/etcd/main"                           = "us-test-1a/us-test-1a"
+    "k8s.io/role/control-plane"                  = "1"
     "k8s.io/role/master"                         = "1"
     "kubernetes.io/cluster/compress.example.com" = "owned"
   }
@@ -276,12 +366,6 @@ resource "aws_iam_role_policy" "masters-compress-example-com" {
   role   = aws_iam_role.masters-compress-example-com.name
 }
 
-resource "aws_iam_role_policy" "nodes-compress-example-com" {
-  name   = "nodes.compress.example.com"
-  policy = file("${path.module}/data/aws_iam_role_policy_nodes.compress.example.com_policy")
-  role   = aws_iam_role.nodes-compress-example-com.name
-}
-
 resource "aws_internet_gateway" "compress-example-com" {
   tags = {
     "KubernetesCluster"                          = "compress.example.com"
@@ -319,7 +403,7 @@ resource "aws_launch_template" "master-us-test-1a-masters-compress-example-com" 
     http_endpoint               = "enabled"
     http_protocol_ipv6          = "disabled"
     http_put_response_hop_limit = 1
-    http_tokens                 = "optional"
+    http_tokens                 = "required"
   }
   monitoring {
     enabled = false
@@ -336,11 +420,11 @@ resource "aws_launch_template" "master-us-test-1a-masters-compress-example-com" 
     tags = {
       "KubernetesCluster"                                                                                     = "compress.example.com"
       "Name"                                                                                                  = "master-us-test-1a.masters.compress.example.com"
+      "aws-node-termination-handler/managed"                                                                  = ""
       "k8s.io/cluster-autoscaler/node-template/label/kops.k8s.io/kops-controller-pki"                         = ""
-      "k8s.io/cluster-autoscaler/node-template/label/kubernetes.io/role"                                      = "master"
       "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/control-plane"                   = ""
-      "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/master"                          = ""
       "k8s.io/cluster-autoscaler/node-template/label/node.kubernetes.io/exclude-from-external-load-balancers" = ""
+      "k8s.io/role/control-plane"                                                                             = "1"
       "k8s.io/role/master"                                                                                    = "1"
       "kops.k8s.io/instancegroup"                                                                             = "master-us-test-1a"
       "kubernetes.io/cluster/compress.example.com"                                                            = "owned"
@@ -351,11 +435,26 @@ resource "aws_launch_template" "master-us-test-1a-masters-compress-example-com" 
     tags = {
       "KubernetesCluster"                                                                                     = "compress.example.com"
       "Name"                                                                                                  = "master-us-test-1a.masters.compress.example.com"
+      "aws-node-termination-handler/managed"                                                                  = ""
       "k8s.io/cluster-autoscaler/node-template/label/kops.k8s.io/kops-controller-pki"                         = ""
-      "k8s.io/cluster-autoscaler/node-template/label/kubernetes.io/role"                                      = "master"
       "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/control-plane"                   = ""
-      "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/master"                          = ""
       "k8s.io/cluster-autoscaler/node-template/label/node.kubernetes.io/exclude-from-external-load-balancers" = ""
+      "k8s.io/role/control-plane"                                                                             = "1"
+      "k8s.io/role/master"                                                                                    = "1"
+      "kops.k8s.io/instancegroup"                                                                             = "master-us-test-1a"
+      "kubernetes.io/cluster/compress.example.com"                                                            = "owned"
+    }
+  }
+  tag_specifications {
+    resource_type = "network-interface"
+    tags = {
+      "KubernetesCluster"                                                                                     = "compress.example.com"
+      "Name"                                                                                                  = "master-us-test-1a.masters.compress.example.com"
+      "aws-node-termination-handler/managed"                                                                  = ""
+      "k8s.io/cluster-autoscaler/node-template/label/kops.k8s.io/kops-controller-pki"                         = ""
+      "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/control-plane"                   = ""
+      "k8s.io/cluster-autoscaler/node-template/label/node.kubernetes.io/exclude-from-external-load-balancers" = ""
+      "k8s.io/role/control-plane"                                                                             = "1"
       "k8s.io/role/master"                                                                                    = "1"
       "kops.k8s.io/instancegroup"                                                                             = "master-us-test-1a"
       "kubernetes.io/cluster/compress.example.com"                                                            = "owned"
@@ -364,11 +463,11 @@ resource "aws_launch_template" "master-us-test-1a-masters-compress-example-com" 
   tags = {
     "KubernetesCluster"                                                                                     = "compress.example.com"
     "Name"                                                                                                  = "master-us-test-1a.masters.compress.example.com"
+    "aws-node-termination-handler/managed"                                                                  = ""
     "k8s.io/cluster-autoscaler/node-template/label/kops.k8s.io/kops-controller-pki"                         = ""
-    "k8s.io/cluster-autoscaler/node-template/label/kubernetes.io/role"                                      = "master"
     "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/control-plane"                   = ""
-    "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/master"                          = ""
     "k8s.io/cluster-autoscaler/node-template/label/node.kubernetes.io/exclude-from-external-load-balancers" = ""
+    "k8s.io/role/control-plane"                                                                             = "1"
     "k8s.io/role/master"                                                                                    = "1"
     "kops.k8s.io/instancegroup"                                                                             = "master-us-test-1a"
     "kubernetes.io/cluster/compress.example.com"                                                            = "owned"
@@ -400,7 +499,7 @@ resource "aws_launch_template" "nodes-compress-example-com" {
     http_endpoint               = "enabled"
     http_protocol_ipv6          = "disabled"
     http_put_response_hop_limit = 1
-    http_tokens                 = "optional"
+    http_tokens                 = "required"
   }
   monitoring {
     enabled = false
@@ -417,7 +516,7 @@ resource "aws_launch_template" "nodes-compress-example-com" {
     tags = {
       "KubernetesCluster"                                                          = "compress.example.com"
       "Name"                                                                       = "nodes.compress.example.com"
-      "k8s.io/cluster-autoscaler/node-template/label/kubernetes.io/role"           = "node"
+      "aws-node-termination-handler/managed"                                       = ""
       "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/node" = ""
       "k8s.io/role/node"                                                           = "1"
       "kops.k8s.io/instancegroup"                                                  = "nodes"
@@ -429,7 +528,19 @@ resource "aws_launch_template" "nodes-compress-example-com" {
     tags = {
       "KubernetesCluster"                                                          = "compress.example.com"
       "Name"                                                                       = "nodes.compress.example.com"
-      "k8s.io/cluster-autoscaler/node-template/label/kubernetes.io/role"           = "node"
+      "aws-node-termination-handler/managed"                                       = ""
+      "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/node" = ""
+      "k8s.io/role/node"                                                           = "1"
+      "kops.k8s.io/instancegroup"                                                  = "nodes"
+      "kubernetes.io/cluster/compress.example.com"                                 = "owned"
+    }
+  }
+  tag_specifications {
+    resource_type = "network-interface"
+    tags = {
+      "KubernetesCluster"                                                          = "compress.example.com"
+      "Name"                                                                       = "nodes.compress.example.com"
+      "aws-node-termination-handler/managed"                                       = ""
       "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/node" = ""
       "k8s.io/role/node"                                                           = "1"
       "kops.k8s.io/instancegroup"                                                  = "nodes"
@@ -439,7 +550,7 @@ resource "aws_launch_template" "nodes-compress-example-com" {
   tags = {
     "KubernetesCluster"                                                          = "compress.example.com"
     "Name"                                                                       = "nodes.compress.example.com"
-    "k8s.io/cluster-autoscaler/node-template/label/kubernetes.io/role"           = "node"
+    "aws-node-termination-handler/managed"                                       = ""
     "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/node" = ""
     "k8s.io/role/node"                                                           = "1"
     "kops.k8s.io/instancegroup"                                                  = "nodes"
@@ -475,137 +586,161 @@ resource "aws_route_table_association" "us-test-1a-compress-example-com" {
   subnet_id      = aws_subnet.us-test-1a-compress-example-com.id
 }
 
-resource "aws_s3_bucket_object" "cluster-completed-spec" {
+resource "aws_s3_object" "cluster-completed-spec" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_cluster-completed.spec_content")
+  content                = file("${path.module}/data/aws_s3_object_cluster-completed.spec_content")
   key                    = "clusters.example.com/compress.example.com/cluster-completed.spec"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "compress-example-com-addons-bootstrap" {
+resource "aws_s3_object" "compress-example-com-addons-aws-cloud-controller-addons-k8s-io-k8s-1-18" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_compress.example.com-addons-bootstrap_content")
+  content                = file("${path.module}/data/aws_s3_object_compress.example.com-addons-aws-cloud-controller.addons.k8s.io-k8s-1.18_content")
+  key                    = "clusters.example.com/compress.example.com/addons/aws-cloud-controller.addons.k8s.io/k8s-1.18.yaml"
+  provider               = aws.files
+  server_side_encryption = "AES256"
+}
+
+resource "aws_s3_object" "compress-example-com-addons-aws-ebs-csi-driver-addons-k8s-io-k8s-1-17" {
+  bucket                 = "testingBucket"
+  content                = file("${path.module}/data/aws_s3_object_compress.example.com-addons-aws-ebs-csi-driver.addons.k8s.io-k8s-1.17_content")
+  key                    = "clusters.example.com/compress.example.com/addons/aws-ebs-csi-driver.addons.k8s.io/k8s-1.17.yaml"
+  provider               = aws.files
+  server_side_encryption = "AES256"
+}
+
+resource "aws_s3_object" "compress-example-com-addons-bootstrap" {
+  bucket                 = "testingBucket"
+  content                = file("${path.module}/data/aws_s3_object_compress.example.com-addons-bootstrap_content")
   key                    = "clusters.example.com/compress.example.com/addons/bootstrap-channel.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "compress-example-com-addons-core-addons-k8s-io" {
+resource "aws_s3_object" "compress-example-com-addons-coredns-addons-k8s-io-k8s-1-12" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_compress.example.com-addons-core.addons.k8s.io_content")
-  key                    = "clusters.example.com/compress.example.com/addons/core.addons.k8s.io/v1.4.0.yaml"
-  provider               = aws.files
-  server_side_encryption = "AES256"
-}
-
-resource "aws_s3_bucket_object" "compress-example-com-addons-coredns-addons-k8s-io-k8s-1-12" {
-  bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_compress.example.com-addons-coredns.addons.k8s.io-k8s-1.12_content")
+  content                = file("${path.module}/data/aws_s3_object_compress.example.com-addons-coredns.addons.k8s.io-k8s-1.12_content")
   key                    = "clusters.example.com/compress.example.com/addons/coredns.addons.k8s.io/k8s-1.12.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "compress-example-com-addons-dns-controller-addons-k8s-io-k8s-1-12" {
+resource "aws_s3_object" "compress-example-com-addons-dns-controller-addons-k8s-io-k8s-1-12" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_compress.example.com-addons-dns-controller.addons.k8s.io-k8s-1.12_content")
+  content                = file("${path.module}/data/aws_s3_object_compress.example.com-addons-dns-controller.addons.k8s.io-k8s-1.12_content")
   key                    = "clusters.example.com/compress.example.com/addons/dns-controller.addons.k8s.io/k8s-1.12.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "compress-example-com-addons-kops-controller-addons-k8s-io-k8s-1-16" {
+resource "aws_s3_object" "compress-example-com-addons-kops-controller-addons-k8s-io-k8s-1-16" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_compress.example.com-addons-kops-controller.addons.k8s.io-k8s-1.16_content")
+  content                = file("${path.module}/data/aws_s3_object_compress.example.com-addons-kops-controller.addons.k8s.io-k8s-1.16_content")
   key                    = "clusters.example.com/compress.example.com/addons/kops-controller.addons.k8s.io/k8s-1.16.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "compress-example-com-addons-kubelet-api-rbac-addons-k8s-io-k8s-1-9" {
+resource "aws_s3_object" "compress-example-com-addons-kubelet-api-rbac-addons-k8s-io-k8s-1-9" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_compress.example.com-addons-kubelet-api.rbac.addons.k8s.io-k8s-1.9_content")
+  content                = file("${path.module}/data/aws_s3_object_compress.example.com-addons-kubelet-api.rbac.addons.k8s.io-k8s-1.9_content")
   key                    = "clusters.example.com/compress.example.com/addons/kubelet-api.rbac.addons.k8s.io/k8s-1.9.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "compress-example-com-addons-limit-range-addons-k8s-io" {
+resource "aws_s3_object" "compress-example-com-addons-limit-range-addons-k8s-io" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_compress.example.com-addons-limit-range.addons.k8s.io_content")
+  content                = file("${path.module}/data/aws_s3_object_compress.example.com-addons-limit-range.addons.k8s.io_content")
   key                    = "clusters.example.com/compress.example.com/addons/limit-range.addons.k8s.io/v1.5.0.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "compress-example-com-addons-storage-aws-addons-k8s-io-v1-15-0" {
+resource "aws_s3_object" "compress-example-com-addons-node-termination-handler-aws-k8s-1-11" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_compress.example.com-addons-storage-aws.addons.k8s.io-v1.15.0_content")
+  content                = file("${path.module}/data/aws_s3_object_compress.example.com-addons-node-termination-handler.aws-k8s-1.11_content")
+  key                    = "clusters.example.com/compress.example.com/addons/node-termination-handler.aws/k8s-1.11.yaml"
+  provider               = aws.files
+  server_side_encryption = "AES256"
+}
+
+resource "aws_s3_object" "compress-example-com-addons-storage-aws-addons-k8s-io-v1-15-0" {
+  bucket                 = "testingBucket"
+  content                = file("${path.module}/data/aws_s3_object_compress.example.com-addons-storage-aws.addons.k8s.io-v1.15.0_content")
   key                    = "clusters.example.com/compress.example.com/addons/storage-aws.addons.k8s.io/v1.15.0.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "etcd-cluster-spec-events" {
+resource "aws_s3_object" "etcd-cluster-spec-events" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_etcd-cluster-spec-events_content")
+  content                = file("${path.module}/data/aws_s3_object_etcd-cluster-spec-events_content")
   key                    = "clusters.example.com/compress.example.com/backups/etcd/events/control/etcd-cluster-spec"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "etcd-cluster-spec-main" {
+resource "aws_s3_object" "etcd-cluster-spec-main" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_etcd-cluster-spec-main_content")
+  content                = file("${path.module}/data/aws_s3_object_etcd-cluster-spec-main_content")
   key                    = "clusters.example.com/compress.example.com/backups/etcd/main/control/etcd-cluster-spec"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "kops-version-txt" {
+resource "aws_s3_object" "kops-version-txt" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_kops-version.txt_content")
+  content                = file("${path.module}/data/aws_s3_object_kops-version.txt_content")
   key                    = "clusters.example.com/compress.example.com/kops-version.txt"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "manifests-etcdmanager-events" {
+resource "aws_s3_object" "manifests-channels-kops-channels" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_manifests-etcdmanager-events_content")
-  key                    = "clusters.example.com/compress.example.com/manifests/etcd/events.yaml"
+  content                = file("${path.module}/data/aws_s3_object_manifests-channels-kops-channels_content")
+  key                    = "clusters.example.com/compress.example.com/manifests/channels/kops-channels.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "manifests-etcdmanager-main" {
+resource "aws_s3_object" "manifests-etcdmanager-events-master-us-test-1a" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_manifests-etcdmanager-main_content")
-  key                    = "clusters.example.com/compress.example.com/manifests/etcd/main.yaml"
+  content                = file("${path.module}/data/aws_s3_object_manifests-etcdmanager-events-master-us-test-1a_content")
+  key                    = "clusters.example.com/compress.example.com/manifests/etcd/events-master-us-test-1a.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "manifests-static-kube-apiserver-healthcheck" {
+resource "aws_s3_object" "manifests-etcdmanager-main-master-us-test-1a" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_manifests-static-kube-apiserver-healthcheck_content")
+  content                = file("${path.module}/data/aws_s3_object_manifests-etcdmanager-main-master-us-test-1a_content")
+  key                    = "clusters.example.com/compress.example.com/manifests/etcd/main-master-us-test-1a.yaml"
+  provider               = aws.files
+  server_side_encryption = "AES256"
+}
+
+resource "aws_s3_object" "manifests-static-kube-apiserver-healthcheck" {
+  bucket                 = "testingBucket"
+  content                = file("${path.module}/data/aws_s3_object_manifests-static-kube-apiserver-healthcheck_content")
   key                    = "clusters.example.com/compress.example.com/manifests/static/kube-apiserver-healthcheck.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "nodeupconfig-master-us-test-1a" {
+resource "aws_s3_object" "nodeupconfig-master-us-test-1a" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_nodeupconfig-master-us-test-1a_content")
-  key                    = "clusters.example.com/compress.example.com/igconfig/master/master-us-test-1a/nodeupconfig.yaml"
+  content                = file("${path.module}/data/aws_s3_object_nodeupconfig-master-us-test-1a_content")
+  key                    = "clusters.example.com/compress.example.com/igconfig/control-plane/master-us-test-1a/nodeupconfig.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "nodeupconfig-nodes" {
+resource "aws_s3_object" "nodeupconfig-nodes" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_nodeupconfig-nodes_content")
+  content                = file("${path.module}/data/aws_s3_object_nodeupconfig-nodes_content")
   key                    = "clusters.example.com/compress.example.com/igconfig/node/nodes/nodeupconfig.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
@@ -759,9 +894,22 @@ resource "aws_security_group_rule" "from-nodes-compress-example-com-ingress-udp-
   type                     = "ingress"
 }
 
+resource "aws_sqs_queue" "compress-example-com-nth" {
+  message_retention_seconds = 300
+  name                      = "compress-example-com-nth"
+  policy                    = file("${path.module}/data/aws_sqs_queue_compress-example-com-nth_policy")
+  tags = {
+    "KubernetesCluster"                          = "compress.example.com"
+    "Name"                                       = "compress-example-com-nth"
+    "kubernetes.io/cluster/compress.example.com" = "owned"
+  }
+}
+
 resource "aws_subnet" "us-test-1a-compress-example-com" {
-  availability_zone = "us-test-1a"
-  cidr_block        = "172.20.32.0/19"
+  availability_zone                           = "us-test-1a"
+  cidr_block                                  = "172.20.32.0/19"
+  enable_resource_name_dns_a_record_on_launch = true
+  private_dns_hostname_type_on_launch         = "resource-name"
   tags = {
     "KubernetesCluster"                          = "compress.example.com"
     "Name"                                       = "us-test-1a.compress.example.com"
@@ -806,7 +954,7 @@ terraform {
     aws = {
       "configuration_aliases" = [aws.files]
       "source"                = "hashicorp/aws"
-      "version"               = ">= 3.59.0"
+      "version"               = ">= 6.57.1"
     }
   }
 }

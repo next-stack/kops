@@ -17,13 +17,14 @@ limitations under the License.
 package awstasks
 
 import (
-	"fmt"
-
+	"context"
 	"encoding/base64"
+	"fmt"
 	"strings"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"k8s.io/klog/v2"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
@@ -50,26 +51,27 @@ type Instance struct {
 	Shared *bool
 
 	ImageID            *string
-	InstanceType       *string
+	InstanceType       ec2types.InstanceType
 	SSHKey             *SSHKey
 	SecurityGroups     []*SecurityGroup
 	AssociatePublicIP  *bool
 	IAMInstanceProfile *IAMInstanceProfile
 }
 
-var _ fi.CompareWithID = &Instance{}
+var _ fi.CompareWithID = (*Instance)(nil)
 
 func (s *Instance) CompareWithID() *string {
 	return s.ID
 }
 
-func (e *Instance) Find(c *fi.Context) (*Instance, error) {
-	cloud := c.Cloud.(awsup.AWSCloud)
+func (e *Instance) Find(c *fi.CloudupContext) (*Instance, error) {
+	ctx := c.Context()
+	cloud := awsup.GetCloud(c)
 	var request *ec2.DescribeInstancesInput
 
-	if fi.BoolValue(e.Shared) {
-		var instanceIds []*string
-		instanceIds = append(instanceIds, e.ID)
+	if fi.ValueOf(e.Shared) {
+		var instanceIds []string
+		instanceIds = append(instanceIds, aws.ToString(e.ID))
 		request = &ec2.DescribeInstancesInput{
 			InstanceIds: instanceIds,
 		}
@@ -81,12 +83,12 @@ func (e *Instance) Find(c *fi.Context) (*Instance, error) {
 		}
 	}
 
-	response, err := cloud.EC2().DescribeInstances(request)
+	response, err := cloud.EC2().DescribeInstances(ctx, request)
 	if err != nil {
 		return nil, fmt.Errorf("error listing instances: %v", err)
 	}
 
-	instances := []*ec2.Instance{}
+	instances := []ec2types.Instance{}
 	if response != nil {
 		for _, reservation := range response.Reservations {
 			instances = append(instances, reservation.Instances...)
@@ -120,13 +122,13 @@ func (e *Instance) Find(c *fi.Context) (*Instance, error) {
 	{
 		request := &ec2.DescribeInstanceAttributeInput{}
 		request.InstanceId = i.InstanceId
-		request.Attribute = aws.String("userData")
-		response, err := cloud.EC2().DescribeInstanceAttribute(request)
+		request.Attribute = ec2types.InstanceAttributeNameUserData
+		response, err := cloud.EC2().DescribeInstanceAttribute(ctx, request)
 		if err != nil {
 			return nil, fmt.Errorf("error querying EC2 for user metadata for instance %q: %v", *i.InstanceId, err)
 		}
 		if response.UserData != nil {
-			b, err := base64.StdEncoding.DecodeString(aws.StringValue(response.UserData.Value))
+			b, err := base64.StdEncoding.DecodeString(aws.ToString(response.UserData.Value))
 			if err != nil {
 				return nil, fmt.Errorf("error decoding EC2 UserData: %v", err)
 			}
@@ -147,7 +149,7 @@ func (e *Instance) Find(c *fi.Context) (*Instance, error) {
 
 	associatePublicIpAddress := false
 	for _, ni := range i.NetworkInterfaces {
-		if aws.StringValue(ni.Association.PublicIp) != "" {
+		if aws.ToString(ni.Association.PublicIp) != "" {
 			associatePublicIpAddress = true
 		}
 	}
@@ -171,7 +173,7 @@ func (e *Instance) Find(c *fi.Context) (*Instance, error) {
 			klog.Warningf("unable to resolve image: %q: %v", *e.ImageID, err)
 		} else if image == nil {
 			klog.Warningf("unable to resolve image: %q: not found", *e.ImageID)
-		} else if aws.StringValue(image.ImageId) == *actual.ImageID {
+		} else if aws.ToString(image.ImageId) == *actual.ImageID {
 			klog.V(4).Infof("Returning matching ImageId as expected name: %q -> %q", *actual.ImageID, *e.ImageID)
 			actual.ImageID = e.ImageID
 		}
@@ -195,13 +197,13 @@ func nameFromIAMARN(arn *string) *string {
 	return &name
 }
 
-func (e *Instance) Run(c *fi.Context) error {
-	return fi.DefaultDeltaRunMethod(e, c)
+func (e *Instance) Run(c *fi.CloudupContext) error {
+	return fi.CloudupDefaultDeltaRunMethod(e, c)
 }
 
 func (_ *Instance) CheckChanges(a, e, changes *Instance) error {
 	if a != nil {
-		if !fi.BoolValue(e.Shared) && e.Name == nil {
+		if !fi.ValueOf(e.Shared) && e.Name == nil {
 			return fi.RequiredField("Name")
 		}
 	}
@@ -209,39 +211,40 @@ func (_ *Instance) CheckChanges(a, e, changes *Instance) error {
 }
 
 func (_ *Instance) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *Instance) error {
+	ctx := context.TODO()
 	if a == nil {
 
-		if fi.BoolValue(e.Shared) {
-			return fmt.Errorf("NAT EC2 Instance %q not found", fi.StringValue(e.ID))
+		if fi.ValueOf(e.Shared) {
+			return fmt.Errorf("NAT EC2 Instance %q not found", fi.ValueOf(e.ID))
 		}
 
 		if e.ImageID == nil {
 			return fi.RequiredField("ImageID")
 		}
-		image, err := t.Cloud.ResolveImage(fi.StringValue(e.ImageID))
+		image, err := t.Cloud.ResolveImage(fi.ValueOf(e.ImageID))
 		if err != nil {
 			return err
 		}
 
-		klog.V(2).Infof("Creating Instance with Name:%q", fi.StringValue(e.Name))
+		klog.V(2).Infof("Creating Instance with Name:%q", fi.ValueOf(e.Name))
 		request := &ec2.RunInstancesInput{
 			ImageId:      image.ImageId,
 			InstanceType: e.InstanceType,
-			MinCount:     aws.Int64(1),
-			MaxCount:     aws.Int64(1),
+			MinCount:     aws.Int32(1),
+			MaxCount:     aws.Int32(1),
 		}
 
 		if e.SSHKey != nil {
 			request.KeyName = e.SSHKey.Name
 		}
 
-		securityGroupIDs := []*string{}
+		securityGroupIDs := []string{}
 		for _, sg := range e.SecurityGroups {
-			securityGroupIDs = append(securityGroupIDs, sg.ID)
+			securityGroupIDs = append(securityGroupIDs, fi.ValueOf(sg.ID))
 		}
-		request.NetworkInterfaces = []*ec2.InstanceNetworkInterfaceSpecification{
+		request.NetworkInterfaces = []ec2types.InstanceNetworkInterfaceSpecification{
 			{
-				DeviceIndex:              aws.Int64(0),
+				DeviceIndex:              aws.Int32(0),
 				AssociatePublicIpAddress: e.AssociatePublicIP,
 				SubnetId:                 e.Subnet.ID,
 				PrivateIpAddress:         e.PrivateIPAddress,
@@ -251,13 +254,13 @@ func (_ *Instance) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *Instance) err
 
 		// Build up the actual block device mappings
 		// TODO: Support RootVolumeType & RootVolumeSize (see launchconfiguration)
-		blockDeviceMappings, err := buildEphemeralDevices(t.Cloud, fi.StringValue(e.InstanceType))
+		blockDeviceMappings, err := buildEphemeralDevices(t.Cloud, e.InstanceType)
 		if err != nil {
 			return err
 		}
 
 		if len(blockDeviceMappings) != 0 {
-			request.BlockDeviceMappings = []*ec2.BlockDeviceMapping{}
+			request.BlockDeviceMappings = []ec2types.BlockDeviceMapping{}
 			for deviceName, bdm := range blockDeviceMappings {
 				request.BlockDeviceMappings = append(request.BlockDeviceMappings, bdm.ToEC2(deviceName))
 			}
@@ -281,12 +284,12 @@ func (_ *Instance) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *Instance) err
 		}
 
 		if e.IAMInstanceProfile != nil {
-			request.IamInstanceProfile = &ec2.IamInstanceProfileSpecification{
+			request.IamInstanceProfile = &ec2types.IamInstanceProfileSpecification{
 				Name: e.IAMInstanceProfile.Name,
 			}
 		}
 
-		response, err := t.Cloud.EC2().RunInstances(request)
+		response, err := t.Cloud.EC2().RunInstances(ctx, request)
 		if err != nil {
 			return fmt.Errorf("error creating Instance: %v", err)
 		}
@@ -298,7 +301,7 @@ func (_ *Instance) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *Instance) err
 }
 
 func (e *Instance) TerraformLink() *terraformWriter.Literal {
-	if fi.BoolValue(e.Shared) {
+	if fi.ValueOf(e.Shared) {
 		if e.ID == nil {
 			klog.Fatalf("ID must be set, if NAT Instance is shared: %s", e)
 		}

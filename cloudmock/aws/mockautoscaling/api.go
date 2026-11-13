@@ -19,18 +19,37 @@ package mockautoscaling
 import (
 	"sync"
 
-	"github.com/aws/aws-sdk-go/service/autoscaling"
-	"github.com/aws/aws-sdk-go/service/autoscaling/autoscalingiface"
+	autoscalingtypes "github.com/aws/aws-sdk-go-v2/service/autoscaling/types"
+	"k8s.io/kops/util/pkg/awsinterfaces"
 )
 
 type MockAutoscaling struct {
 	// Mock out interface
-	autoscalingiface.AutoScalingAPI
+	awsinterfaces.AutoScalingAPI
 
 	mutex             sync.Mutex
-	Groups            map[string]*autoscaling.Group
-	WarmPoolInstances map[string][]*autoscaling.Instance
-	LifecycleHooks    map[string]*autoscaling.LifecycleHook
+	Groups            map[string]*autoscalingtypes.AutoScalingGroup
+	WarmPoolInstances map[string][]autoscalingtypes.Instance
+	LifecycleHooks    map[string]*autoscalingtypes.LifecycleHook
+	// ScalingActivities is the canned response for DescribeScalingActivities,
+	// keyed by Auto Scaling group name.
+	ScalingActivities map[string][]autoscalingtypes.Activity
+	// ScalingActivityPageSize, when positive, makes DescribeScalingActivities
+	// paginate at this size regardless of the caller's MaxRecords. Callers that
+	// do not set MaxRecords are otherwise served in a single page, which leaves
+	// their pagination behaviour untestable.
+	ScalingActivityPageSize int
+
+	describeScalingActivitiesCalls int
 }
 
-var _ autoscalingiface.AutoScalingAPI = &MockAutoscaling{}
+// ScalingActivityCalls returns how many DescribeScalingActivities requests the
+// mock has served, including paginated continuations. Safe to call while other
+// goroutines are driving the mock.
+func (m *MockAutoscaling) ScalingActivityCalls() int {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	return m.describeScalingActivitiesCalls
+}
+
+var _ awsinterfaces.AutoScalingAPI = &MockAutoscaling{}

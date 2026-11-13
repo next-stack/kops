@@ -1,68 +1,10 @@
-# Vendored from https://raw.githubusercontent.com/aws/amazon-vpc-cni-k8s/master/config/v1.9/aws-k8s-cni.yaml
-
+# Vendored from https://raw.githubusercontent.com/aws/amazon-vpc-cni-k8s/v1.23.3/config/master/aws-k8s-cni.yaml
 ---
-# Source: aws-vpc-cni/templates/clusterrolebinding.yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: aws-node
-  labels:
-    app.kubernetes.io/name: aws-node
-    app.kubernetes.io/instance: aws-vpc-cni
-    k8s-app: aws-node
-    app.kubernetes.io/version: "v1.9.3"
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: aws-node
-subjects:
-  - kind: ServiceAccount
-    name: aws-node
-    namespace: kube-system
----
-# Source: aws-vpc-cni/templates/clusterrole.yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: aws-node
-  labels:
-    app.kubernetes.io/name: aws-node
-    app.kubernetes.io/instance: aws-vpc-cni
-    k8s-app: aws-node
-    app.kubernetes.io/version: "v1.9.3"
-rules:
-  - apiGroups:
-      - crd.k8s.amazonaws.com
-    resources:
-      - eniconfigs
-    verbs: ["list", "watch", "get"]
-  - apiGroups: [""]
-    resources:
-      - namespaces
-    verbs: ["list", "watch", "get"]
-  - apiGroups: [""]
-    resources:
-      - pods
-    verbs: ["list", "watch", "get"]
-  - apiGroups: [""]
-    resources:
-      - nodes
-    verbs: ["list", "watch", "get", "update"]
-  - apiGroups: ["extensions", "apps"]
-    resources:
-      - '*'
-    verbs: ["list", "watch"]
----
-# Source: aws-vpc-cni/templates/customresourcedefinition.yaml
+# Source: aws-vpc-cni/crds/customresourcedefinition.yaml
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   name: eniconfigs.crd.k8s.amazonaws.com
-  labels:
-    app.kubernetes.io/name: aws-node
-    app.kubernetes.io/instance: aws-vpc-cni
-    k8s-app: aws-node
-    app.kubernetes.io/version: "v1.9.3"
 spec:
   scope: Cluster
   group: crd.k8s.amazonaws.com
@@ -75,10 +17,153 @@ spec:
         openAPIV3Schema:
           type: object
           x-kubernetes-preserve-unknown-fields: true
+          description: ENIConfig is the Schema for the eniconfigs API
+          properties:
+            apiVersion:
+              description: |-
+                APIVersion defines the versioned schema of this representation of an object.
+                Servers should convert recognized schemas to the latest internal value, and
+                may reject unrecognized values.
+                More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+              type: string
+            kind:
+              description: |-
+                Kind is a string value representing the REST resource this object represents.
+                Servers may infer this from the endpoint the client submits requests to.
+                Cannot be updated.
+                In CamelCase.
+                More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+              type: string
+            metadata:
+              type: object
+            spec:
+              description: ENIConfigSpec defines the desired state of ENIConfig
+              properties:
+                securityGroups:
+                  items:
+                    type: string
+                  type: array
+                subnet:
+                  type: string
+              required:
+              - subnet
+              type: object
+            status:
+              description: ENIConfigStatus defines the observed state of ENIConfig
+              type: object
   names:
     plural: eniconfigs
     singular: eniconfig
     kind: ENIConfig
+
+---
+# Source: aws-vpc-cni/templates/serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aws-node
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: aws-node
+    app.kubernetes.io/instance: aws-vpc-cni
+    k8s-app: aws-node
+    app.kubernetes.io/version: "v1.23.3"
+---
+# Source: aws-vpc-cni/templates/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: amazon-vpc-cni
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: aws-node
+    app.kubernetes.io/instance: aws-vpc-cni
+    k8s-app: aws-node
+    app.kubernetes.io/version: "v1.23.3"
+data:
+  enable-windows-ipam: "false"
+  enable-network-policy-controller: "{{ .Networking.AmazonVPC.EnableNetworkPolicy }}"
+  enable-windows-prefix-delegation: "false"
+  warm-prefix-target: "0"
+  warm-ip-target: "1"
+  minimum-ip-target: "3"
+  branch-eni-cooldown: "60"
+---
+# Source: aws-vpc-cni/templates/clusterrole.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: aws-node
+  labels:
+    app.kubernetes.io/name: aws-node
+    app.kubernetes.io/instance: aws-vpc-cni
+    k8s-app: aws-node
+    app.kubernetes.io/version: "v1.23.3"
+rules:
+  - apiGroups:
+      - crd.k8s.amazonaws.com
+    resources:
+      - eniconfigs
+    verbs: ["list", "watch", "get"]
+  - apiGroups: [""]
+    resources:
+      - namespaces
+    verbs: ["list", "watch", "get"]
+{{- if AmazonVpcEnvVars.ANNOTATE_POD_IP }}
+  - apiGroups: [""]
+    resources:
+      - pods
+    verbs: ["list", "watch", "get", "patch"]
+{{- else }}
+  - apiGroups: [""]
+    resources:
+      - pods
+    verbs: ["list", "watch", "get"]
+{{- end }}
+  - apiGroups: [""]
+    resources:
+      - nodes
+    verbs: ["list", "watch", "get"]
+  - apiGroups: ["", "events.k8s.io"]
+    resources:
+      - events
+    verbs: ["create", "patch", "list"]
+  - apiGroups: ["networking.k8s.aws"]
+    resources:
+      - policyendpoints
+      - clusterpolicyendpoints
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.aws"]
+    resources:
+      - policyendpoints/status
+      - clusterpolicyendpoints/status
+    verbs: ["get"]
+  - apiGroups:
+      - vpcresources.k8s.aws
+    resources:
+      - cninodes
+    verbs: ["get", "list", "watch", "patch"]
+  - nonResourceURLs: ["/apis/networking.k8s.aws", "/apis/networking.k8s.aws/*"]
+    verbs: ["get"]
+---
+# Source: aws-vpc-cni/templates/clusterrolebinding.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: aws-node
+  labels:
+    app.kubernetes.io/name: aws-node
+    app.kubernetes.io/instance: aws-vpc-cni
+    k8s-app: aws-node
+    app.kubernetes.io/version: "v1.23.3"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: aws-node
+subjects:
+  - kind: ServiceAccount
+    name: aws-node
+    namespace: kube-system
 ---
 # Source: aws-vpc-cni/templates/daemonset.yaml
 kind: DaemonSet
@@ -90,10 +175,12 @@ metadata:
     app.kubernetes.io/name: aws-node
     app.kubernetes.io/instance: aws-vpc-cni
     k8s-app: aws-node
-    app.kubernetes.io/version: "v1.9.3"
+    app.kubernetes.io/version: "v1.23.3"
 spec:
   updateStrategy:
-    type: OnDelete
+    rollingUpdate:
+      maxUnavailable: 10%
+    type: RollingUpdate
   selector:
     matchLabels:
       k8s-app: aws-node
@@ -109,26 +196,34 @@ spec:
       hostNetwork: true
       initContainers:
       - name: aws-vpc-cni-init
-        image: "{{- or .Networking.AmazonVPC.InitImageName "602401143452.dkr.ecr.us-west-2.amazonaws.com/amazon-k8s-cni-init:v1.9.3" }}"
-        imagePullPolicy: Always
+        image: "{{- or .Networking.AmazonVPC.InitImage "602401143452.dkr.ecr.us-west-2.amazonaws.com/amazon-k8s-cni-init:v1.23.3" }}"
+        imagePullPolicy: IfNotPresent
         env:
           - name: DISABLE_TCP_EARLY_DEMUX
             value: "false"
+          - name: ENABLE_IPv6
+            value: "{{ IsIPv6Only }}"
         securityContext:
             privileged: true
+        resources:
+            requests:
+              cpu: 25m
         volumeMounts:
           - mountPath: /host/opt/cni/bin
             name: cni-bin-dir
-
       terminationGracePeriodSeconds: 10
       tolerations:
         - operator: Exists
+{{ if ContainerdSELinuxEnabled }}
       securityContext:
-        {}
+        seLinuxOptions:
+          type: spc_t
+          level: s0
+{{ end }}
       containers:
         - name: aws-node
-          image: "{{- or .Networking.AmazonVPC.ImageName "602401143452.dkr.ecr.us-west-2.amazonaws.com/amazon-k8s-cni:v1.9.3" }}"
-          imagePullPolicy: Always
+          image: "{{- or .Networking.AmazonVPC.Image "602401143452.dkr.ecr.us-west-2.amazonaws.com/amazon-k8s-cni:v1.23.3" }}"
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 61678
               name: metrics
@@ -136,20 +231,20 @@ spec:
             exec:
               command:
               - /app/grpc-health-probe
-              - -addr=:50051
-              - -connect-timeout=2s
-              - -rpc-timeout=2s
+              - -addr=unix:///var/run/aws-node/ipamd.sock
+              - -connect-timeout=5s
+              - -rpc-timeout=5s
             initialDelaySeconds: 60
-            timeoutSeconds: 5
+            timeoutSeconds: 10
           readinessProbe:
             exec:
               command:
               - /app/grpc-health-probe
-              - -addr=:50051
-              - -connect-timeout=2s
-              - -rpc-timeout=2s
+              - -addr=unix:///var/run/aws-node/ipamd.sock
+              - -connect-timeout=5s
+              - -rpc-timeout=5s
             initialDelaySeconds: 1
-            timeoutSeconds: 5
+            timeoutSeconds: 10
           env:
             {{- range $name, $value := AmazonVpcEnvVars }}
             - "name": "{{ $name }}"
@@ -163,8 +258,6 @@ spec:
             #   value: "true"
             # - name: AWS_VPC_ENI_MTU
             #   value: "9001"
-            # - name: AWS_VPC_K8S_CNI_CONFIGURE_RPFILTER
-            #   value: "false"
             # - name: AWS_VPC_K8S_CNI_CUSTOM_NETWORK_CFG
             #   value: "false"
             # - name: AWS_VPC_K8S_CNI_EXTERNALSNAT
@@ -187,14 +280,24 @@ spec:
             #   value: "false"
             # - name: DISABLE_NETWORK_RESOURCE_PROVISIONING
             #   value: "false"
+            #  - name: ENABLE_IMDS_ONLY_MODE
+            #  value: "false"
             # - name: ENABLE_IPv4
             #   value: "true"
             # - name: ENABLE_IPv6
+            #   value: "false"
+            # - name: ENABLE_MULTI_NIC
             #   value: "false"
             # - name: ENABLE_POD_ENI
             #   value: "false"
             # - name: ENABLE_PREFIX_DELEGATION
             #   value: "false"
+            # - name: ENABLE_SUBNET_DISCOVERY
+            #   value: "true"
+            # - name: NETWORK_POLICY_ENFORCING_MODE
+            #   value: "standard"
+            - name: VPC_CNI_VERSION
+              value: "v1.23.3"
             # - name: WARM_ENI_TARGET
             #   value: "1"
             # - name: WARM_PREFIX_TARGET
@@ -202,16 +305,23 @@ spec:
             - name: MY_NODE_NAME
               valueFrom:
                 fieldRef:
+                  apiVersion: v1
                   fieldPath: spec.nodeName
+            - name: MY_POD_NAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: metadata.name
             - name: "CLUSTER_NAME"
               value: "{{ ClusterName }}"
           resources:
             requests:
-              cpu: 10m
+              cpu: 25m
           securityContext:
             capabilities:
               add:
               - NET_ADMIN
+              - NET_RAW
           volumeMounts:
           - mountPath: /host/opt/cni/bin
             name: cni-bin-dir
@@ -221,23 +331,58 @@ spec:
             name: log-dir
           - mountPath: /var/run/aws-node
             name: run-dir
-          - mountPath: /var/run/dockershim.sock
-            name: dockershim
           - mountPath: /run/xtables.lock
             name: xtables-lock
+        - name: aws-eks-nodeagent
+          image: "{{- or .Networking.AmazonVPC.NetworkPolicyAgentImage "602401143452.dkr.ecr.us-west-2.amazonaws.com/amazon/aws-network-policy-agent:v1.5.0" }}"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8162
+              name: agentmetrics
+          env:
+            - name: MY_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: spec.nodeName
+          args:
+            - --enable-ipv6=false
+            - --enable-network-policy={{ .Networking.AmazonVPC.EnableNetworkPolicy }}
+            - --enable-cloudwatch-logs=false
+            - --enable-policy-event-logs=false
+            - --log-file=/var/log/aws-routed-eni/network-policy-agent.log
+            - --metrics-bind-addr=:8162
+            - --health-probe-bind-addr=:8163
+            - --conntrack-cache-cleanup-period=300
+            - --conntrack-cache-table-size=524288
+            - --log-level=debug
+          resources:
+            requests:
+              cpu: 25m
+          securityContext:
+            capabilities:
+              add:
+              - NET_ADMIN
+            privileged: true
+          volumeMounts:
+          - mountPath: /host/opt/cni/bin
+            name: cni-bin-dir
+          - mountPath: /sys/fs/bpf
+            name: bpf-pin-path
+          - mountPath: /var/log/aws-routed-eni
+            name: log-dir
+          - mountPath: /var/run/aws-node
+            name: run-dir
       volumes:
+      - name: bpf-pin-path
+        hostPath:
+          path: /sys/fs/bpf
       - name: cni-bin-dir
         hostPath:
           path: /opt/cni/bin
       - name: cni-net-dir
         hostPath:
           path: /etc/cni/net.d
-      - name: dockershim
-        hostPath:
-          path: "{{ if eq .ContainerRuntime "containerd" }}/run/containerd/containerd.sock{{ else }}/var/run/dockershim.sock{{ end }}"
-      - name: xtables-lock
-        hostPath:
-          path: /run/xtables.lock
       - name: log-dir
         hostPath:
           path: /var/log/aws-routed-eni
@@ -246,6 +391,10 @@ spec:
         hostPath:
           path: /var/run/aws-node
           type: DirectoryOrCreate
+      - name: xtables-lock
+        hostPath:
+          path: /run/xtables.lock
+          type: FileOrCreate
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -264,15 +413,5 @@ spec:
                 operator: NotIn
                 values:
                 - fargate
----
-# Source: aws-vpc-cni/templates/serviceaccount.yaml
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: aws-node
-  namespace: kube-system
-  labels:
-    app.kubernetes.io/name: aws-node
-    app.kubernetes.io/instance: aws-vpc-cni
-    k8s-app: aws-node
-    app.kubernetes.io/version: "v1.9.3"
+                - hybrid
+                - auto

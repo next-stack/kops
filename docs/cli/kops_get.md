@@ -5,29 +5,8 @@
 
 Get one or many resources.
 
-### Synopsis
-
-Display one or many resources.
-
-  *  cluster
-  *  instancegroup
-  *  secret
-
 ```
 kops get [flags]
-```
-
-### Examples
-
-```
-  # Get a cluster and its instance groups
-  kops get k8s-cluster.example.com
-  
-  # Get a cluster and its instancegroups' YAML desired configuration
-  kops get k8s-cluster.example.com -o yaml
-  
-  # Save a cluster and its instancegroups' desired configuration to YAML file
-  kops get k8s-cluster.example.com -o yaml > cluster-desired-config.yaml
 ```
 
 ### Options
@@ -40,27 +19,18 @@ kops get [flags]
 ### Options inherited from parent commands
 
 ```
-      --add_dir_header                   If true, adds the file directory to the header of the log messages
-      --alsologtostderr                  log to standard error as well as files
-      --config string                    yaml config file (default is $HOME/.kops.yaml)
-      --log_backtrace_at traceLocation   when logging hits line file:N, emit a stack trace (default :0)
-      --log_dir string                   If non-empty, write log files in this directory
-      --log_file string                  If non-empty, use this log file
-      --log_file_max_size uint           Defines the maximum size a log file can grow to. Unit is megabytes. If the value is 0, the maximum file size is unlimited. (default 1800)
-      --logtostderr                      log to standard error instead of files (default true)
-      --name string                      Name of cluster. Overrides KOPS_CLUSTER_NAME environment variable
-      --one_output                       If true, only write logs to their native severity level (vs also writing to each lower severity level)
-      --skip_headers                     If true, avoid header prefixes in the log messages
-      --skip_log_headers                 If true, avoid headers when opening log files
-      --state string                     Location of state storage (kops 'config' file). Overrides KOPS_STATE_STORE environment variable
-      --stderrthreshold severity         logs at or above this threshold go to stderr (default 2)
-  -v, --v Level                          number for the log level verbosity
-      --vmodule moduleSpec               comma-separated list of pattern=N settings for file-filtered logging
+      --alsologtostderrthreshold severity   logs at or above this threshold go to stderr when -alsologtostderr=true (no effect when -logtostderr=true)
+      --config string                       yaml config file (default is $HOME/.kops.yaml)
+      --legacy_stderr_threshold_behavior    If true, stderrthreshold is ignored when logtostderr=true (legacy behavior). If false, stderrthreshold is honored even when logtostderr=true
+      --name string                         Name of cluster. Overrides KOPS_CLUSTER_NAME environment variable
+      --state string                        Location of state storage (kops 'config' file). Overrides KOPS_STATE_STORE environment variable
+  -v, --v Level                             number for the log level verbosity
 ```
 
 ### SEE ALSO
 
 * [kops](kops.md)	 - kOps is Kubernetes Operations.
+* [kops get all](kops_get_all.md)	 - Display all resources for a cluster.
 * [kops get assets](kops_get_assets.md)	 - Display assets for cluster.
 * [kops get clusters](kops_get_clusters.md)	 - Get one or many clusters.
 * [kops get instancegroups](kops_get_instancegroups.md)	 - Get one or many instance groups.

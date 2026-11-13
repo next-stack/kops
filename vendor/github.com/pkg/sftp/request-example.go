@@ -20,7 +20,7 @@ const maxSymlinkFollows = 5
 
 var errTooManySymlinks = errors.New("too many symbolic links")
 
-// InMemHandler returns a Hanlders object with the test handlers.
+// InMemHandler returns a Handlers object with the test handlers.
 func InMemHandler() Handlers {
 	root := &root{
 		rootFile: &memFile{name: "/", modtime: time.Now(), isdir: true},
@@ -391,21 +391,6 @@ func (fs *root) Filelist(r *Request) (ListerAt, error) {
 			return nil, err
 		}
 		return listerat{file}, nil
-
-	case "Readlink":
-		symlink, err := fs.readlink(r.Filepath)
-		if err != nil {
-			return nil, err
-		}
-
-		// SFTP-v2: The server will respond with a SSH_FXP_NAME packet containing only
-		// one name and a dummy attributes value.
-		return listerat{
-			&memFile{
-				name: symlink,
-				err:  os.ErrNotExist, // prevent accidental use as a reader/writer.
-			},
-		}, nil
 	}
 
 	return nil, errors.New("unsupported")
@@ -434,7 +419,7 @@ func (fs *root) readdir(pathname string) ([]os.FileInfo, error) {
 	return files, nil
 }
 
-func (fs *root) readlink(pathname string) (string, error) {
+func (fs *root) Readlink(pathname string) (string, error) {
 	file, err := fs.lfetch(pathname)
 	if err != nil {
 		return "", err
@@ -464,7 +449,7 @@ func (fs *root) Lstat(r *Request) (ListerAt, error) {
 	return listerat{file}, nil
 }
 
-// In memory file-system-y thing that the Hanlders live on
+// In memory file-system-y thing that the Handlers live on
 type root struct {
 	rootFile *memFile
 	mockErr  error
@@ -525,8 +510,8 @@ func (fs *root) exists(path string) bool {
 	return err != os.ErrNotExist
 }
 
-func (fs *root) fetch(path string) (*memFile, error) {
-	file, err := fs.lfetch(path)
+func (fs *root) fetch(pathname string) (*memFile, error) {
+	file, err := fs.lfetch(pathname)
 	if err != nil {
 		return nil, err
 	}
@@ -537,7 +522,12 @@ func (fs *root) fetch(path string) (*memFile, error) {
 			return nil, errTooManySymlinks
 		}
 
-		file, err = fs.lfetch(file.symlink)
+		linkTarget := file.symlink
+		if !path.IsAbs(linkTarget) {
+			linkTarget = path.Join(path.Dir(file.name), linkTarget)
+		}
+
+		file, err = fs.lfetch(linkTarget)
 		if err != nil {
 			return nil, err
 		}
@@ -583,7 +573,7 @@ func (f *memFile) Mode() os.FileMode {
 }
 func (f *memFile) ModTime() time.Time { return f.modtime }
 func (f *memFile) IsDir() bool        { return f.isdir }
-func (f *memFile) Sys() interface{} {
+func (f *memFile) Sys() any {
 	return fakeFileInfoSys()
 }
 

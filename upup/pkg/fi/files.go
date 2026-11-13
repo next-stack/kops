@@ -19,7 +19,6 @@ package fi
 import (
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
@@ -65,7 +64,7 @@ func writeFileContents(destPath string, src Resource, fileMode os.FileMode) erro
 
 	dir := filepath.Dir(destPath)
 
-	tempFile, err := ioutil.TempFile(dir, ".writefile")
+	tempFile, err := os.CreateTemp(dir, ".writefile")
 	if err != nil {
 		return fmt.Errorf("error creating temp file in %q: %w", dir, err)
 	}
@@ -87,6 +86,10 @@ func writeFileContents(destPath string, src Resource, fileMode os.FileMode) erro
 
 	if _, err := io.Copy(tempFile, in); err != nil {
 		return fmt.Errorf("error writing file %q: %v", tempFile.Name(), err)
+	}
+
+	if err := tempFile.Chmod(fileMode); err != nil {
+		return fmt.Errorf("error setting mode on temp file %q: %w", tempFile.Name(), err)
 	}
 
 	if err := tempFile.Close(); err != nil {

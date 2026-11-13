@@ -17,14 +17,15 @@ limitations under the License.
 package awstasks
 
 import (
+	"context"
 	"fmt"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"k8s.io/klog/v2"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
-	"k8s.io/kops/upup/pkg/fi/cloudup/cloudformation"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraform"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraformWriter"
 )
@@ -43,20 +44,21 @@ type RouteTable struct {
 	Tags map[string]string
 }
 
-var _ fi.CompareWithID = &RouteTable{}
+var _ fi.CompareWithID = (*RouteTable)(nil)
 
 func (e *RouteTable) CompareWithID() *string {
 	return e.ID
 }
 
-func (e *RouteTable) Find(c *fi.Context) (*RouteTable, error) {
-	cloud := c.Cloud.(awsup.AWSCloud)
+func (e *RouteTable) Find(c *fi.CloudupContext) (*RouteTable, error) {
+	ctx := c.Context()
+	cloud := awsup.GetCloud(c)
 
-	var rt *ec2.RouteTable
+	var rt *ec2types.RouteTable
 	var err error
 
 	if e.ID != nil {
-		rt, err = findRouteTableByID(cloud, *e.ID)
+		rt, err = findRouteTableByID(ctx, cloud, *e.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -64,7 +66,7 @@ func (e *RouteTable) Find(c *fi.Context) (*RouteTable, error) {
 
 	// Try finding by name
 	if rt == nil && e.Tags["Name"] != "" {
-		rt, err = findRouteTableByFilters(cloud, cloud.BuildFilters(e.Name))
+		rt, err = findRouteTableByFilters(ctx, cloud, cloud.BuildFilters(e.Name))
 		if err != nil {
 			return nil, err
 		}
@@ -72,17 +74,17 @@ func (e *RouteTable) Find(c *fi.Context) (*RouteTable, error) {
 
 	// Try finding by shared cluster tag, along with role (so it isn't ambiguous)
 	if rt == nil && e.Tags[awsup.TagNameKopsRole] != "" {
-		var filters []*ec2.Filter
-		filters = append(filters, &ec2.Filter{
+		var filters []ec2types.Filter
+		filters = append(filters, ec2types.Filter{
 			Name:   aws.String("tag-key"),
-			Values: aws.StringSlice([]string{"kubernetes.io/cluster/" + c.Cluster.Name}),
+			Values: []string{"kubernetes.io/cluster/" + c.T.Cluster.Name},
 		})
-		filters = append(filters, &ec2.Filter{
+		filters = append(filters, ec2types.Filter{
 			Name:   aws.String("tag:" + awsup.TagNameKopsRole),
-			Values: aws.StringSlice([]string{e.Tags[awsup.TagNameKopsRole]}),
+			Values: []string{e.Tags[awsup.TagNameKopsRole]},
 		})
 
-		rt, err = findRouteTableByFilters(cloud, filters)
+		rt, err = findRouteTableByFilters(ctx, cloud, filters)
 		if err != nil {
 			return nil, err
 		}
@@ -108,11 +110,11 @@ func (e *RouteTable) Find(c *fi.Context) (*RouteTable, error) {
 	return actual, nil
 }
 
-func findRouteTableByID(cloud awsup.AWSCloud, id string) (*ec2.RouteTable, error) {
+func findRouteTableByID(ctx context.Context, cloud awsup.AWSCloud, id string) (*ec2types.RouteTable, error) {
 	request := &ec2.DescribeRouteTablesInput{}
-	request.RouteTableIds = []*string{&id}
+	request.RouteTableIds = []string{id}
 
-	response, err := cloud.EC2().DescribeRouteTables(request)
+	response, err := cloud.EC2().DescribeRouteTables(ctx, request)
 	if err != nil {
 		return nil, fmt.Errorf("error listing RouteTables: %v", err)
 	}
@@ -125,14 +127,14 @@ func findRouteTableByID(cloud awsup.AWSCloud, id string) (*ec2.RouteTable, error
 	}
 	rt := response.RouteTables[0]
 
-	return rt, nil
+	return &rt, nil
 }
 
-func findRouteTableByFilters(cloud awsup.AWSCloud, filters []*ec2.Filter) (*ec2.RouteTable, error) {
+func findRouteTableByFilters(ctx context.Context, cloud awsup.AWSCloud, filters []ec2types.Filter) (*ec2types.RouteTable, error) {
 	request := &ec2.DescribeRouteTablesInput{}
 	request.Filters = filters
 
-	response, err := cloud.EC2().DescribeRouteTables(request)
+	response, err := cloud.EC2().DescribeRouteTables(ctx, request)
 	if err != nil {
 		return nil, fmt.Errorf("error listing RouteTables: %v", err)
 	}
@@ -144,11 +146,11 @@ func findRouteTableByFilters(cloud awsup.AWSCloud, filters []*ec2.Filter) (*ec2.
 		return nil, fmt.Errorf("found multiple RouteTables matching tags")
 	}
 	rt := response.RouteTables[0]
-	return rt, nil
+	return &rt, nil
 }
 
-func (e *RouteTable) Run(c *fi.Context) error {
-	return fi.DefaultDeltaRunMethod(e, c)
+func (e *RouteTable) Run(c *fi.CloudupContext) error {
+	return fi.CloudupDefaultDeltaRunMethod(e, c)
 }
 
 func (s *RouteTable) CheckChanges(a, e, changes *RouteTable) error {
@@ -166,6 +168,7 @@ func (s *RouteTable) CheckChanges(a, e, changes *RouteTable) error {
 }
 
 func (_ *RouteTable) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *RouteTable) error {
+	ctx := context.TODO()
 	if a == nil {
 		vpcID := e.VPC.ID
 		if vpcID == nil {
@@ -176,10 +179,10 @@ func (_ *RouteTable) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *RouteTable)
 
 		request := &ec2.CreateRouteTableInput{
 			VpcId:             vpcID,
-			TagSpecifications: awsup.EC2TagSpecification(ec2.ResourceTypeRouteTable, e.Tags),
+			TagSpecifications: awsup.EC2TagSpecification(ec2types.ResourceTypeRouteTable, e.Tags),
 		}
 
-		response, err := t.Cloud.EC2().CreateRouteTable(request)
+		response, err := t.Cloud.EC2().CreateRouteTable(ctx, request)
 		if err != nil {
 			return fmt.Errorf("error creating RouteTable: %v", err)
 		}
@@ -192,8 +195,8 @@ func (_ *RouteTable) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *RouteTable)
 }
 
 type terraformRouteTable struct {
-	VPCID *terraformWriter.Literal `json:"vpc_id" cty:"vpc_id"`
-	Tags  map[string]string        `json:"tags,omitempty" cty:"tags"`
+	VPCID *terraformWriter.Literal `cty:"vpc_id"`
+	Tags  map[string]string        `cty:"tags"`
 }
 
 func (_ *RouteTable) RenderTerraform(t *terraform.TerraformTarget, a, e, changes *RouteTable) error {
@@ -215,22 +218,4 @@ func (_ *RouteTable) RenderTerraform(t *terraform.TerraformTarget, a, e, changes
 
 func (e *RouteTable) TerraformLink() *terraformWriter.Literal {
 	return terraformWriter.LiteralProperty("aws_route_table", *e.Name, "id")
-}
-
-type cloudformationRouteTable struct {
-	VPCID *cloudformation.Literal `json:"VpcId,omitempty"`
-	Tags  []cloudformationTag     `json:"Tags,omitempty"`
-}
-
-func (_ *RouteTable) RenderCloudformation(t *cloudformation.CloudformationTarget, a, e, changes *RouteTable) error {
-	cf := &cloudformationRouteTable{
-		VPCID: e.VPC.CloudformationLink(),
-		Tags:  buildCloudformationTags(e.Tags),
-	}
-
-	return t.RenderResource("AWS::EC2::RouteTable", *e.Name, cf)
-}
-
-func (e *RouteTable) CloudformationLink() *cloudformation.Literal {
-	return cloudformation.Ref("AWS::EC2::RouteTable", *e.Name)
 }

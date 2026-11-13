@@ -33,10 +33,10 @@ import (
 	"fmt"
 	"strings"
 
-	cinderv3 "github.com/gophercloud/gophercloud/openstack/blockstorage/v3/volumes"
+	cinderv3 "github.com/gophercloud/gophercloud/v2/openstack/blockstorage/v3/volumes"
 	"k8s.io/klog/v2"
 	"k8s.io/kops/pkg/apis/kops"
-	"k8s.io/kops/protokube/pkg/etcd"
+	"k8s.io/kops/pkg/etcd"
 	"k8s.io/kops/upup/pkg/fi"
 )
 
@@ -83,7 +83,7 @@ func findEtcdStatus(c OpenstackCloud, cluster *kops.Cluster) ([]kops.EtcdCluster
 				if err != nil {
 					return nil, fmt.Errorf("error parsing etcd cluster tag %q on volume %q: %v", v, volumeID, err)
 				}
-			} else if k == TagNameRolePrefix+TagRoleMaster {
+			} else if k == TagNameRolePrefix+TagRoleControlPlane || k == TagNameRolePrefix+TagRoleMaster {
 				master = true
 			}
 		}
@@ -103,7 +103,7 @@ func findEtcdStatus(c OpenstackCloud, cluster *kops.Cluster) ([]kops.EtcdCluster
 		memberName := etcdClusterSpec.NodeName
 		status.Members = append(status.Members, &kops.EtcdMemberStatus{
 			Name:     memberName,
-			VolumeId: volume.ID,
+			VolumeID: volume.ID,
 		})
 	}
 	var status []kops.EtcdClusterStatus

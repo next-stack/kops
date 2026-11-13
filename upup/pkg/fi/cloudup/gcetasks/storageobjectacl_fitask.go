@@ -27,7 +27,7 @@ import (
 
 // StorageObjectAcl
 
-var _ fi.HasLifecycle = &StorageObjectAcl{}
+var _ fi.HasLifecycle = (*StorageObjectAcl)(nil)
 
 // GetLifecycle returns the Lifecycle of the object, implementing fi.HasLifecycle
 func (o *StorageObjectAcl) GetLifecycle() fi.Lifecycle {
@@ -39,7 +39,7 @@ func (o *StorageObjectAcl) SetLifecycle(lifecycle fi.Lifecycle) {
 	o.Lifecycle = lifecycle
 }
 
-var _ fi.HasName = &StorageObjectAcl{}
+var _ fi.HasName = (*StorageObjectAcl)(nil)
 
 // GetName returns the Name of the object, implementing fi.HasName
 func (o *StorageObjectAcl) GetName() *string {
@@ -48,5 +48,5 @@ func (o *StorageObjectAcl) GetName() *string {
 
 // String is the stringer function for the task, producing readable output using fi.TaskAsString
 func (o *StorageObjectAcl) String() string {
-	return fi.TaskAsString(o)
+	return fi.CloudupTaskAsString(o)
 }

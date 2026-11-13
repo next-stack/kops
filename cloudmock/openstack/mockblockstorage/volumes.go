@@ -25,7 +25,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	"github.com/gophercloud/gophercloud/openstack/blockstorage/v3/volumes"
+	"github.com/gophercloud/gophercloud/v2/openstack/blockstorage/v3/volumes"
 )
 
 type volumeListResponse struct {
@@ -76,7 +76,6 @@ func (m *MockClient) mockVolumes() {
 }
 
 func (m *MockClient) listVolumes(w http.ResponseWriter, vals url.Values) {
-
 	w.WriteHeader(http.StatusOK)
 
 	vols := filterVolumes(m.volumes, vals)

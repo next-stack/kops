@@ -20,8 +20,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/Azure/azure-sdk-for-go/services/network/mgmt/2020-06-01/network"
-	"github.com/Azure/go-autorest/autorest/to"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
+	network "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork/v7"
 	"k8s.io/klog/v2"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/azure"
@@ -36,12 +36,14 @@ type VirtualNetwork struct {
 	ResourceGroup *ResourceGroup
 	CIDR          *string
 	Tags          map[string]*string
-	Subnets       *[]network.Subnet
 	Shared        *bool
 }
 
-var _ fi.Task = &VirtualNetwork{}
-var _ fi.CompareWithID = &VirtualNetwork{}
+var (
+	_ fi.CloudupTask          = &VirtualNetwork{}
+	_ fi.CompareWithID        = &VirtualNetwork{}
+	_ fi.CloudupTaskNormalize = &VirtualNetwork{}
+)
 
 // CompareWithID returns the Name of the VM Scale Set.
 func (n *VirtualNetwork) CompareWithID() *string {
@@ -49,8 +51,8 @@ func (n *VirtualNetwork) CompareWithID() *string {
 }
 
 // Find discovers the VirtualNetwork in the cloud provider.
-func (n *VirtualNetwork) Find(c *fi.Context) (*VirtualNetwork, error) {
-	cloud := c.Cloud.(azure.AzureCloud)
+func (n *VirtualNetwork) Find(c *fi.CloudupContext) (*VirtualNetwork, error) {
+	cloud := c.T.Cloud.(azure.AzureCloud)
 	l, err := cloud.VirtualNetwork().List(context.TODO(), *n.ResourceGroup.Name)
 	if err != nil {
 		return nil, err
@@ -58,7 +60,7 @@ func (n *VirtualNetwork) Find(c *fi.Context) (*VirtualNetwork, error) {
 	var found *network.VirtualNetwork
 	for _, v := range l {
 		if *v.Name == *n.Name {
-			found = &v
+			found = v
 			break
 		}
 	}
@@ -66,26 +68,44 @@ func (n *VirtualNetwork) Find(c *fi.Context) (*VirtualNetwork, error) {
 		return nil, nil
 	}
 
-	addrPrefixes := *found.AddressSpace.AddressPrefixes
+	if found.ID == nil {
+		return nil, fmt.Errorf("found virtual network without ID")
+	}
+	if found.Properties == nil {
+		return nil, fmt.Errorf("found virtual network without properties")
+	}
+	if found.Properties.ProvisioningState != nil && *found.Properties.ProvisioningState == network.ProvisioningStateFailed {
+		klog.Warningf("found virtual network %q in failed provisioning state", *n.Name)
+		return nil, nil
+	}
+	if found.Properties.AddressSpace == nil {
+		return nil, fmt.Errorf("found virtual network without address space")
+	}
+
+	addrPrefixes := found.Properties.AddressSpace.AddressPrefixes
 	if len(addrPrefixes) != 1 {
-		return nil, fmt.Errorf("expected exactly one address prefix, but got %+v", addrPrefixes)
+		return nil, fmt.Errorf("expecting exactly 1 address prefix for %q, found %d: %+v", *n.Name, len(addrPrefixes), addrPrefixes)
 	}
 	return &VirtualNetwork{
 		Name:      n.Name,
 		Lifecycle: n.Lifecycle,
+		Shared:    n.Shared,
 		ResourceGroup: &ResourceGroup{
 			Name: n.ResourceGroup.Name,
 		},
-		CIDR:    to.StringPtr(addrPrefixes[0]),
-		Tags:    found.Tags,
-		Subnets: found.Subnets,
+		CIDR: addrPrefixes[0],
+		Tags: found.Tags,
 	}, nil
 }
 
+func (n *VirtualNetwork) Normalize(c *fi.CloudupContext) error {
+	c.T.Cloud.(azure.AzureCloud).AddClusterTags(n.Tags)
+	return nil
+}
+
 // Run implements fi.Task.Run.
-func (n *VirtualNetwork) Run(c *fi.Context) error {
-	c.Cloud.(azure.AzureCloud).AddClusterTags(n.Tags)
-	return fi.DefaultDeltaRunMethod(n, c)
+func (n *VirtualNetwork) Run(c *fi.CloudupContext) error {
+	return fi.CloudupDefaultDeltaRunMethod(n, c)
 }
 
 // CheckChanges returns an error if a change is not allowed.
@@ -111,28 +131,29 @@ func (*VirtualNetwork) CheckChanges(a, e, changes *VirtualNetwork) error {
 // RenderAzure creates or updates a Virtual Network.
 func (*VirtualNetwork) RenderAzure(t *azure.AzureAPITarget, a, e, changes *VirtualNetwork) error {
 	if a == nil {
-		klog.Infof("Creating a new Virtual Network with name: %s", fi.StringValue(e.Name))
+		klog.Infof("Creating a new Virtual Network with name: %s", fi.ValueOf(e.Name))
 	} else {
 		// Only allow tags to be updated.
 		if changes.Tags == nil {
 			return nil
 		}
-		klog.Infof("Updating a Virtual Network with name: %s", fi.StringValue(e.Name))
+		klog.Infof("Updating a Virtual Network with name: %s", fi.ValueOf(e.Name))
 	}
 
 	vnet := network.VirtualNetwork{
-		Location: to.StringPtr(t.Cloud.Region()),
-		VirtualNetworkPropertiesFormat: &network.VirtualNetworkPropertiesFormat{
+		Location: to.Ptr(t.Cloud.Region()),
+		Properties: &network.VirtualNetworkPropertiesFormat{
 			AddressSpace: &network.AddressSpace{
-				AddressPrefixes: &[]string{*e.CIDR},
+				AddressPrefixes: []*string{e.CIDR},
 			},
-			Subnets: e.Subnets,
 		},
 		Tags: e.Tags,
 	}
-	return t.Cloud.VirtualNetwork().CreateOrUpdate(
+	_, err := t.Cloud.VirtualNetwork().CreateOrUpdate(
 		context.TODO(),
 		*e.ResourceGroup.Name,
 		*e.Name,
 		vnet)
+
+	return err
 }

@@ -17,21 +17,46 @@ limitations under the License.
 package config
 
 import (
-	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
+	"k8s.io/kops/pkg/bootstrap/awsbootstrap"
+	"k8s.io/kops/pkg/bootstrap/pkibootstrap"
+	"k8s.io/kops/upup/pkg/fi/cloudup/azure"
+	"k8s.io/kops/upup/pkg/fi/cloudup/do"
 	gcetpm "k8s.io/kops/upup/pkg/fi/cloudup/gce/tpm"
+	"k8s.io/kops/upup/pkg/fi/cloudup/hetzner"
+	"k8s.io/kops/upup/pkg/fi/cloudup/linode"
+	"k8s.io/kops/upup/pkg/fi/cloudup/openstack"
+	"k8s.io/kops/upup/pkg/fi/cloudup/scaleway"
 )
 
 type Options struct {
+	ClusterName           string         `json:"clusterName,omitempty"`
 	Cloud                 string         `json:"cloud,omitempty"`
 	ConfigBase            string         `json:"configBase,omitempty"`
+	SecretStore           string         `json:"secretStore,omitempty"`
 	Server                *ServerOptions `json:"server,omitempty"`
 	CacheNodeidentityInfo bool           `json:"cacheNodeidentityInfo,omitempty"`
 
 	// EnableCloudIPAM enables the cloud IPAM controller.
 	EnableCloudIPAM bool `json:"enableCloudIPAM,omitempty"`
+
+	// CAPI configures Cluster API (CAPI) support.
+	CAPI *CAPIOptions `json:"capi,omitempty"`
 }
 
 func (o *Options) PopulateDefaults() {
+}
+
+type CAPIOptions struct {
+	// Enabled specifies whether CAPI support is enabled.
+	Enabled *bool `json:"enabled,omitempty"`
+}
+
+// IsEnabled returns true if CAPI support is enabled.
+func (o *CAPIOptions) IsEnabled() bool {
+	if o == nil || o.Enabled == nil {
+		return false
+	}
+	return *o.Enabled
 }
 
 type ServerOptions struct {
@@ -40,6 +65,9 @@ type ServerOptions struct {
 
 	// Provider is the cloud provider.
 	Provider ServerProviderOptions `json:"provider"`
+
+	// PKI configures private/public key node authentication.
+	PKI *pkibootstrap.Options `json:"pki,omitempty"`
 
 	// ServerKeyPath is the path to our TLS serving private key.
 	ServerKeyPath string `json:"serverKeyPath,omitempty"`
@@ -55,6 +83,12 @@ type ServerOptions struct {
 }
 
 type ServerProviderOptions struct {
-	AWS *awsup.AWSVerifierOptions  `json:"aws,omitempty"`
-	GCE *gcetpm.TPMVerifierOptions `json:"gce,omitempty"`
+	AWS          *awsbootstrap.AWSVerifierOptions    `json:"aws,omitempty"`
+	GCE          *gcetpm.TPMVerifierOptions          `json:"gce,omitempty"`
+	Hetzner      *hetzner.HetznerVerifierOptions     `json:"hetzner,omitempty"`
+	OpenStack    *openstack.OpenStackVerifierOptions `json:"openstack,omitempty"`
+	DigitalOcean *do.DigitalOceanVerifierOptions     `json:"do,omitempty"`
+	Scaleway     *scaleway.ScalewayVerifierOptions   `json:"scaleway,omitempty"`
+	Azure        *azure.AzureVerifierOptions         `json:"azure,omitempty"`
+	Linode       *linode.LinodeVerifierOptions       `json:"linode,omitempty"`
 }

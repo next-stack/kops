@@ -21,69 +21,43 @@ import (
 
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/kops/pkg/apis/kops"
-	"k8s.io/kops/upup/pkg/fi"
 )
 
-// BuildMinimalCluster a generic minimal cluster
-func BuildMinimalCluster(clusterName string) *kops.Cluster {
-	c := &kops.Cluster{}
-	c.ObjectMeta.Name = clusterName
-	c.Spec.KubernetesVersion = "1.14.6"
-	c.Spec.Subnets = []kops.ClusterSubnetSpec{
-		{Name: "subnet-us-mock-1a", Zone: "us-mock-1a", CIDR: "172.20.1.0/24", Type: kops.SubnetTypePrivate},
+// BuildMinimalClusterAWS a generic minimal AWS cluster
+func BuildMinimalClusterAWS(clusterName string) *kops.Cluster {
+	c := buildMinimalCluster(clusterName)
+	c.Spec.CloudProvider.AWS = &kops.AWSSpec{}
+	c.Spec.Networking.NetworkCIDR = "172.20.0.0/16"
+
+	return c
+}
+
+// BuildMinimalClusterGCE a generic minimal GCE cluster
+func BuildMinimalClusterGCE(clusterName string, project string) *kops.Cluster {
+	c := buildMinimalCluster(clusterName)
+	c.Spec.CloudProvider.GCE = &kops.GCESpec{}
+	c.Spec.CloudProvider.GCE.Project = project
+	c.Spec.Networking.Subnets = []kops.ClusterSubnetSpec{
+		{Name: "us-test1-a", Region: "us-test1", CIDR: "172.20.1.0/24", Type: kops.SubnetTypePublic},
 	}
-
-	c.Spec.MasterPublicName = fmt.Sprintf("api.%v", clusterName)
-	c.Spec.MasterInternalName = fmt.Sprintf("internal.api.%v", clusterName)
-	c.Spec.KubernetesAPIAccess = []string{"0.0.0.0/0"}
-	c.Spec.SSHAccess = []string{"0.0.0.0/0"}
-
-	// Default to public topology
-	c.Spec.Topology = &kops.TopologySpec{
-		Masters: kops.TopologyPublic,
-		Nodes:   kops.TopologyPublic,
-		DNS: &kops.DNSSpec{
-			Type: kops.DNSTypePublic,
-		},
-	}
-
-	c.Spec.Networking = &kops.NetworkingSpec{}
-
-	c.Spec.NetworkCIDR = "172.20.0.0/16"
-	c.Spec.Subnets = []kops.ClusterSubnetSpec{
-		{Name: "subnet-us-mock-1a", Zone: "us-mock-1a", CIDR: "172.20.1.0/24"},
-		{Name: "subnet-us-mock-1b", Zone: "us-mock-1b", CIDR: "172.20.2.0/24"},
-		{Name: "subnet-us-mock-1c", Zone: "us-mock-1c", CIDR: "172.20.3.0/24"},
-	}
-
-	c.Spec.NonMasqueradeCIDR = "100.64.0.0/10"
-	c.Spec.CloudProvider = "aws"
-
-	c.Spec.ConfigBase = "memfs://unittest-bucket/" + clusterName
-
-	c.Spec.DNSZone = "test.com"
-
-	c.Spec.SSHKeyName = fi.String("test")
-
-	addEtcdClusters(c)
 
 	return c
 }
 
 func addEtcdClusters(c *kops.Cluster) {
 	subnetNames := sets.NewString()
-	for _, z := range c.Spec.Subnets {
+	for _, z := range c.Spec.Networking.Subnets {
 		subnetNames.Insert(z.Name)
 	}
 	etcdZones := subnetNames.List()
 
-	for _, etcdCluster := range []string{"main", "events"} {
+	for _, etcdCluster := range []string{"main", "events", "leases"} {
 		etcd := kops.EtcdClusterSpec{}
 		etcd.Name = etcdCluster
 		for _, zone := range etcdZones {
 			m := kops.EtcdMemberSpec{}
 			m.Name = zone
-			m.InstanceGroup = fi.String("master-" + zone)
+			m.InstanceGroup = new("master-" + zone)
 			etcd.Members = append(etcd.Members, m)
 		}
 		c.Spec.EtcdClusters = append(c.Spec.EtcdClusters, etcd)
@@ -94,6 +68,7 @@ func BuildMinimalNodeInstanceGroup(name string, subnets ...string) kops.Instance
 	g := kops.InstanceGroup{}
 	g.ObjectMeta.Name = name
 	g.Spec.Role = kops.InstanceGroupRoleNode
+	g.Spec.Image = "ubuntu/images/hvm-ssd-gp3/ubuntu-resolute-26.04-amd64-server-20220404"
 	g.Spec.Subnets = subnets
 
 	return g
@@ -103,6 +78,7 @@ func BuildMinimalBastionInstanceGroup(name string, subnets ...string) kops.Insta
 	g := kops.InstanceGroup{}
 	g.ObjectMeta.Name = name
 	g.Spec.Role = kops.InstanceGroupRoleNode
+	g.Spec.Image = "ubuntu/images/hvm-ssd-gp3/ubuntu-resolute-26.04-amd64-server-20220404"
 	g.Spec.Subnets = subnets
 
 	return g
@@ -111,8 +87,46 @@ func BuildMinimalBastionInstanceGroup(name string, subnets ...string) kops.Insta
 func BuildMinimalMasterInstanceGroup(subnet string) kops.InstanceGroup {
 	g := kops.InstanceGroup{}
 	g.ObjectMeta.Name = "master-" + subnet
-	g.Spec.Role = kops.InstanceGroupRoleMaster
+	g.Spec.Role = kops.InstanceGroupRoleControlPlane
 	g.Spec.Subnets = []string{subnet}
+	g.Spec.Image = "ami-1234abcd"
 
 	return g
+}
+
+func buildMinimalCluster(clusterName string) *kops.Cluster {
+	c := &kops.Cluster{}
+	c.ObjectMeta.Name = clusterName
+	c.Spec.KubernetesVersion = "1.23.2"
+
+	c.Spec.Containerd = &kops.ContainerdConfig{}
+
+	c.Spec.API.PublicName = fmt.Sprintf("api.%v", clusterName)
+	c.Spec.API.Access = []string{"0.0.0.0/0"}
+	c.Spec.SSHAccess = []string{"0.0.0.0/0"}
+
+	// Default to public topology
+	c.Spec.Networking.Topology = &kops.TopologySpec{
+		DNS: kops.DNSTypePublic,
+	}
+
+	c.Spec.Networking.Subnets = []kops.ClusterSubnetSpec{
+		{Name: "subnet-us-test-1a", Zone: "us-test-1a", CIDR: "172.20.1.0/24", Type: kops.SubnetTypePublic},
+		{Name: "subnet-us-test-1b", Zone: "us-test-1b", CIDR: "172.20.2.0/24", Type: kops.SubnetTypePublic},
+		{Name: "subnet-us-test-1c", Zone: "us-test-1c", CIDR: "172.20.3.0/24", Type: kops.SubnetTypePublic},
+	}
+
+	c.Spec.Networking.NonMasqueradeCIDR = "100.64.0.0/10"
+
+	c.Spec.ConfigStore = kops.ConfigStoreSpec{
+		Base: "memfs://unittest-bucket/" + clusterName,
+	}
+
+	c.Spec.DNSZone = "test.com"
+
+	c.Spec.SSHKeyName = new("test")
+
+	addEtcdClusters(c)
+
+	return c
 }

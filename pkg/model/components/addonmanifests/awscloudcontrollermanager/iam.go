@@ -18,22 +18,26 @@ package awscloudcontrollermanager
 
 import (
 	"k8s.io/apimachinery/pkg/types"
+
 	"k8s.io/kops/pkg/model/iam"
 )
 
 // ServiceAccount represents the service-account used by the AWS Cloud Controller Manager.
 // It implements iam.Subject to get AWS IAM permissions.
-type ServiceAccount struct {
-}
+type ServiceAccount struct{}
 
 var _ iam.Subject = &ServiceAccount{}
 
 // BuildAWSPolicy generates a custom policy for a ServiceAccount IAM role.
 func (r *ServiceAccount) BuildAWSPolicy(b *iam.PolicyBuilder) (*iam.Policy, error) {
 	clusterName := b.Cluster.ObjectMeta.Name
-	p := iam.NewPolicy(clusterName)
-	iam.AddCCMPermissions(p, b.Cluster.Spec.Networking.Kubenet != nil)
-	iam.AddLegacyCCMPermissions(p)
+	p := iam.NewPolicy(clusterName, b.Partition, b.Region)
+
+	// Only inject NLBSecurityMode=Managed specific IAM permissions if enabled
+	nlbSecurityGroupMode := b.Cluster.Spec.CloudProvider.AWS.NLBSecurityGroupMode
+	nlbSecurityGroupModeManaged := nlbSecurityGroupMode != nil && *nlbSecurityGroupMode == "Managed"
+
+	iam.AddCCMPermissions(p, b.Cluster.Spec.Networking.Kubenet != nil, nlbSecurityGroupModeManaged)
 	return p, nil
 }
 

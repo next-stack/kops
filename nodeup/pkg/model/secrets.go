@@ -29,7 +29,7 @@ type SecretBuilder struct {
 	*NodeupModelContext
 }
 
-var _ fi.ModelBuilder = &SecretBuilder{}
+var _ fi.NodeupModelBuilder = &SecretBuilder{}
 
 const (
 	adminUser  = "admin"
@@ -37,7 +37,7 @@ const (
 )
 
 // Build is responsible for pulling down the secrets
-func (b *SecretBuilder) Build(c *fi.ModelBuilderContext) error {
+func (b *SecretBuilder) Build(c *fi.NodeupModelBuilderContext) error {
 	// @step: write out the platform ca
 	c.AddTask(&nodetasks.File{
 		Path:     filepath.Join(b.PathSrvKubernetes(), "ca.crt"),
@@ -65,11 +65,9 @@ func (b *SecretBuilder) Build(c *fi.ModelBuilderContext) error {
 }
 
 func getInstanceAddress() (string, error) {
-
 	addrBytes, err := vfs.Context.ReadFile("metadata://openstack/local-ipv4")
 	if err != nil {
 		return "", nil
 	}
 	return string(addrBytes), nil
-
 }

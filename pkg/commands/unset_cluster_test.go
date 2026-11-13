@@ -21,7 +21,6 @@ import (
 	"testing"
 
 	"k8s.io/kops/pkg/apis/kops"
-	"k8s.io/kops/upup/pkg/fi"
 )
 
 func TestUnsetClusterBadInput(t *testing.T) {
@@ -52,7 +51,7 @@ func TestUnsetClusterFields(t *testing.T) {
 					KubernetesVersion: "1.8.2",
 					Kubelet: &kops.KubeletConfigSpec{
 						AuthorizationMode:          "Webhook",
-						AuthenticationTokenWebhook: fi.Bool(true),
+						AuthenticationTokenWebhook: new(true),
 					},
 				},
 			},
@@ -60,6 +59,21 @@ func TestUnsetClusterFields(t *testing.T) {
 				Spec: kops.ClusterSpec{
 					Kubelet: &kops.KubeletConfigSpec{},
 				},
+			},
+		},
+		{
+			Fields: []string{
+				"spec.api.dns",
+			},
+			Input: kops.Cluster{
+				Spec: kops.ClusterSpec{
+					API: kops.APISpec{
+						DNS: &kops.DNSAccessSpec{},
+					},
+				},
+			},
+			Output: kops.Cluster{
+				Spec: kops.ClusterSpec{},
 			},
 		},
 		{
@@ -82,28 +96,13 @@ func TestUnsetClusterFields(t *testing.T) {
 			Input: kops.Cluster{
 				Spec: kops.ClusterSpec{
 					Kubelet: &kops.KubeletConfigSpec{
-						AuthenticationTokenWebhook: fi.Bool(false),
+						AuthenticationTokenWebhook: new(false),
 					},
 				},
 			},
 			Output: kops.Cluster{
 				Spec: kops.ClusterSpec{
 					Kubelet: &kops.KubeletConfigSpec{},
-				},
-			},
-		},
-		{
-			Fields: []string{"spec.docker.selinuxEnabled"},
-			Input: kops.Cluster{
-				Spec: kops.ClusterSpec{
-					Docker: &kops.DockerConfig{
-						SelinuxEnabled: fi.Bool(true),
-					},
-				},
-			},
-			Output: kops.Cluster{
-				Spec: kops.ClusterSpec{
-					Docker: &kops.DockerConfig{},
 				},
 			},
 		},
@@ -119,10 +118,12 @@ func TestUnsetClusterFields(t *testing.T) {
 			},
 		},
 		{
-			Fields: []string{"spec.masterPublicName"},
+			Fields: []string{"spec.api.publicName"},
 			Input: kops.Cluster{
 				Spec: kops.ClusterSpec{
-					MasterPublicName: "api.example.com",
+					API: kops.APISpec{
+						PublicName: "api.example.com",
+					},
 				},
 			},
 			Output: kops.Cluster{
@@ -226,16 +227,16 @@ func TestUnsetClusterFields(t *testing.T) {
 			},
 			Input: kops.Cluster{
 				Spec: kops.ClusterSpec{
-					Networking: &kops.NetworkingSpec{
+					Networking: kops.NetworkingSpec{
 						Cilium: &kops.CiliumNetworkingSpec{
-							Ipam: "on",
+							IPAM: "on",
 						},
 					},
 				},
 			},
 			Output: kops.Cluster{
 				Spec: kops.ClusterSpec{
-					Networking: &kops.NetworkingSpec{
+					Networking: kops.NetworkingSpec{
 						Cilium: &kops.CiliumNetworkingSpec{},
 					},
 				},
@@ -247,7 +248,7 @@ func TestUnsetClusterFields(t *testing.T) {
 			},
 			Input: kops.Cluster{
 				Spec: kops.ClusterSpec{
-					Networking: &kops.NetworkingSpec{
+					Networking: kops.NetworkingSpec{
 						Cilium: &kops.CiliumNetworkingSpec{
 							EnableHostReachableServices: true,
 						},
@@ -256,7 +257,7 @@ func TestUnsetClusterFields(t *testing.T) {
 			},
 			Output: kops.Cluster{
 				Spec: kops.ClusterSpec{
-					Networking: &kops.NetworkingSpec{
+					Networking: kops.NetworkingSpec{
 						Cilium: &kops.CiliumNetworkingSpec{},
 					},
 				},
@@ -268,7 +269,7 @@ func TestUnsetClusterFields(t *testing.T) {
 			},
 			Input: kops.Cluster{
 				Spec: kops.ClusterSpec{
-					Networking: &kops.NetworkingSpec{
+					Networking: kops.NetworkingSpec{
 						Cilium: &kops.CiliumNetworkingSpec{
 							EnableNodePort: true,
 						},
@@ -277,7 +278,7 @@ func TestUnsetClusterFields(t *testing.T) {
 			},
 			Output: kops.Cluster{
 				Spec: kops.ClusterSpec{
-					Networking: &kops.NetworkingSpec{
+					Networking: kops.NetworkingSpec{
 						Cilium: &kops.CiliumNetworkingSpec{},
 					},
 				},
@@ -285,20 +286,20 @@ func TestUnsetClusterFields(t *testing.T) {
 		},
 		{
 			Fields: []string{
-				"cluster.spec.networking.cilium.disableMasquerade",
+				"cluster.spec.networking.cilium.masquerade",
 			},
 			Input: kops.Cluster{
 				Spec: kops.ClusterSpec{
-					Networking: &kops.NetworkingSpec{
+					Networking: kops.NetworkingSpec{
 						Cilium: &kops.CiliumNetworkingSpec{
-							DisableMasquerade: fi.Bool(true),
+							Masquerade: new(false),
 						},
 					},
 				},
 			},
 			Output: kops.Cluster{
 				Spec: kops.ClusterSpec{
-					Networking: &kops.NetworkingSpec{
+					Networking: kops.NetworkingSpec{
 						Cilium: &kops.CiliumNetworkingSpec{},
 					},
 				},
@@ -311,7 +312,7 @@ func TestUnsetClusterFields(t *testing.T) {
 			Input: kops.Cluster{
 				Spec: kops.ClusterSpec{
 					KubeProxy: &kops.KubeProxyConfig{
-						Enabled: fi.Bool(true),
+						Enabled: new(true),
 					},
 				},
 			},
@@ -327,7 +328,7 @@ func TestUnsetClusterFields(t *testing.T) {
 			},
 			Input: kops.Cluster{
 				Spec: kops.ClusterSpec{
-					Networking: &kops.NetworkingSpec{
+					Networking: kops.NetworkingSpec{
 						Cilium: &kops.CiliumNetworkingSpec{
 							AgentPrometheusPort: 1234,
 						},
@@ -336,7 +337,7 @@ func TestUnsetClusterFields(t *testing.T) {
 			},
 			Output: kops.Cluster{
 				Spec: kops.ClusterSpec{
-					Networking: &kops.NetworkingSpec{
+					Networking: kops.NetworkingSpec{
 						Cilium: &kops.CiliumNetworkingSpec{},
 					},
 				},
@@ -362,7 +363,6 @@ func TestUnsetClusterFields(t *testing.T) {
 }
 
 func TestUnsetCiliumFields(t *testing.T) {
-
 	grid := []struct {
 		Fields []string
 		Input  kops.Cluster
@@ -372,19 +372,19 @@ func TestUnsetCiliumFields(t *testing.T) {
 			Fields: []string{
 				"cluster.spec.networking.cilium.ipam",
 				"cluster.spec.networking.cilium.enableNodePort",
-				"cluster.spec.networking.cilium.disableMasquerade",
+				"cluster.spec.networking.cilium.masquerade",
 				"cluster.spec.kubeProxy.enabled",
 			},
 			Input: kops.Cluster{
 				Spec: kops.ClusterSpec{
 					KubeProxy: &kops.KubeProxyConfig{
-						Enabled: fi.Bool(false),
+						Enabled: new(false),
 					},
-					Networking: &kops.NetworkingSpec{
+					Networking: kops.NetworkingSpec{
 						Cilium: &kops.CiliumNetworkingSpec{
-							Ipam:              "eni",
-							EnableNodePort:    true,
-							DisableMasquerade: fi.Bool(true),
+							IPAM:           "eni",
+							EnableNodePort: true,
+							Masquerade:     new(false),
 						},
 					},
 				},
@@ -392,7 +392,7 @@ func TestUnsetCiliumFields(t *testing.T) {
 			Output: kops.Cluster{
 				Spec: kops.ClusterSpec{
 					KubeProxy: &kops.KubeProxyConfig{},
-					Networking: &kops.NetworkingSpec{
+					Networking: kops.NetworkingSpec{
 						Cilium: &kops.CiliumNetworkingSpec{},
 					},
 				},

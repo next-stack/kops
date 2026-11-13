@@ -19,45 +19,41 @@ kops update cluster [CLUSTER] [flags]
 
 ```
   # After the cluster has been edited or upgraded, update the cloud resources with:
-  kops update cluster k8s-cluster.example.com --yes --state=s3://my-state-store --yes
+  kops update cluster k8s-cluster.example.com --state=s3://my-state-store --yes
 ```
 
 ### Options
 
 ```
-      --admin duration[=18h0m0s]      Also export a cluster admin user credential with the specified lifetime and add it to the cluster context
-      --allow-kops-downgrade          Allow an older version of kOps to update the cluster than last used
-      --create-kube-config            Will control automatically creating the kube config file on your local filesystem (default true)
-  -h, --help                          help for cluster
-      --internal                      Use the cluster's internal DNS name. Implies --create-kube-config
-      --lifecycle-overrides strings   comma separated list of phase overrides, example: SecurityGroups=Ignore,InternetGateway=ExistsAndWarnIfChanges
-      --out string                    Path to write any local output
-      --phase string                  Subset of tasks to run: cluster, network, security
-      --ssh-public-key string         SSH public key to use (deprecated: use kops create secret instead)
-      --target string                 Target - direct, terraform, cloudformation (default "direct")
-      --user string                   Existing user in kubeconfig file to use.  Implies --create-kube-config
-  -y, --yes                           Create cloud resources, without --yes update is in dry run mode
+      --admin duration[=18h0m0s]       Also export a cluster admin user credential with the specified lifetime and add it to the cluster context
+      --allow-kops-downgrade           Allow an older version of kOps to update the cluster than last used
+      --api-server string              Override the API server URL without changing TLS or authentication settings
+      --create-kube-config             Automatically export kubeconfig after updating (defaults to false with --use-kubeconfig; --admin, --user and --internal imply export) (default true)
+  -h, --help                           help for cluster
+      --ignore-kubelet-version-skew    Setting this to true will force updating the kubernetes version on all instance groups, regardles of which control plane version is running
+      --instance-group strings         Instance groups to update (defaults to all if not specified)
+      --instance-group-roles strings   Instance group roles to update (control-plane,apiserver,node,bastion,etcd,scheduler,kubecontrollermanager)
+      --internal                       Use the cluster's internal DNS name. Implies --create-kube-config
+      --lifecycle-overrides strings    comma separated list of phase overrides, example: SecurityGroups=Ignore,InternetGateway=ExistsAndWarnIfChanges
+      --out string                     Path to write any local output
+      --phase string                   Subset of tasks to run: cluster, network, security
+      --prune                          Delete old revisions of cloud resources that were needed during an upgrade
+      --ssh-public-key string          SSH public key to use (deprecated: use kops create secret instead)
+      --target target                  Target - "direct", "terraform" (default direct)
+      --use-kubeconfig                 Use the cluster's local kubeconfig context, including TLS, proxy and authentication settings
+      --user string                    Existing user in kubeconfig file to use.  Implies --create-kube-config
+  -y, --yes                            Create cloud resources, without --yes update is in dry run mode
 ```
 
 ### Options inherited from parent commands
 
 ```
-      --add_dir_header                   If true, adds the file directory to the header of the log messages
-      --alsologtostderr                  log to standard error as well as files
-      --config string                    yaml config file (default is $HOME/.kops.yaml)
-      --log_backtrace_at traceLocation   when logging hits line file:N, emit a stack trace (default :0)
-      --log_dir string                   If non-empty, write log files in this directory
-      --log_file string                  If non-empty, use this log file
-      --log_file_max_size uint           Defines the maximum size a log file can grow to. Unit is megabytes. If the value is 0, the maximum file size is unlimited. (default 1800)
-      --logtostderr                      log to standard error instead of files (default true)
-      --name string                      Name of cluster. Overrides KOPS_CLUSTER_NAME environment variable
-      --one_output                       If true, only write logs to their native severity level (vs also writing to each lower severity level)
-      --skip_headers                     If true, avoid header prefixes in the log messages
-      --skip_log_headers                 If true, avoid headers when opening log files
-      --state string                     Location of state storage (kops 'config' file). Overrides KOPS_STATE_STORE environment variable
-      --stderrthreshold severity         logs at or above this threshold go to stderr (default 2)
-  -v, --v Level                          number for the log level verbosity
-      --vmodule moduleSpec               comma-separated list of pattern=N settings for file-filtered logging
+      --alsologtostderrthreshold severity   logs at or above this threshold go to stderr when -alsologtostderr=true (no effect when -logtostderr=true)
+      --config string                       yaml config file (default is $HOME/.kops.yaml)
+      --legacy_stderr_threshold_behavior    If true, stderrthreshold is ignored when logtostderr=true (legacy behavior). If false, stderrthreshold is honored even when logtostderr=true
+      --name string                         Name of cluster. Overrides KOPS_CLUSTER_NAME environment variable
+      --state string                        Location of state storage (kops 'config' file). Overrides KOPS_STATE_STORE environment variable
+  -v, --v Level                             number for the log level verbosity
 ```
 
 ### SEE ALSO

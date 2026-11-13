@@ -27,7 +27,7 @@ import (
 
 // VPCAmazonIPv6CIDRBlock
 
-var _ fi.HasLifecycle = &VPCAmazonIPv6CIDRBlock{}
+var _ fi.HasLifecycle = (*VPCAmazonIPv6CIDRBlock)(nil)
 
 // GetLifecycle returns the Lifecycle of the object, implementing fi.HasLifecycle
 func (o *VPCAmazonIPv6CIDRBlock) GetLifecycle() fi.Lifecycle {
@@ -39,7 +39,7 @@ func (o *VPCAmazonIPv6CIDRBlock) SetLifecycle(lifecycle fi.Lifecycle) {
 	o.Lifecycle = lifecycle
 }
 
-var _ fi.HasName = &VPCAmazonIPv6CIDRBlock{}
+var _ fi.HasName = (*VPCAmazonIPv6CIDRBlock)(nil)
 
 // GetName returns the Name of the object, implementing fi.HasName
 func (o *VPCAmazonIPv6CIDRBlock) GetName() *string {
@@ -48,5 +48,5 @@ func (o *VPCAmazonIPv6CIDRBlock) GetName() *string {
 
 // String is the stringer function for the task, producing readable output using fi.TaskAsString
 func (o *VPCAmazonIPv6CIDRBlock) String() string {
-	return fi.TaskAsString(o)
+	return fi.CloudupTaskAsString(o)
 }

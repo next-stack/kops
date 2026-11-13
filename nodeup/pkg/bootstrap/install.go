@@ -17,6 +17,7 @@ limitations under the License.
 package bootstrap
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -24,10 +25,10 @@ import (
 	"k8s.io/klog/v2"
 	"k8s.io/kops/pkg/systemd"
 	"k8s.io/kops/upup/pkg/fi"
-	"k8s.io/kops/upup/pkg/fi/nodeup/local"
+	"k8s.io/kops/upup/pkg/fi/nodeup/install"
 	"k8s.io/kops/upup/pkg/fi/nodeup/nodetasks"
 	"k8s.io/kops/util/pkg/distributions"
-	"k8s.io/kops/util/pkg/vfs"
+	"k8s.io/kops/util/pkg/vfs/openstackconfig"
 )
 
 type Installation struct {
@@ -37,46 +38,26 @@ type Installation struct {
 }
 
 func (i *Installation) Run() error {
+	ctx := context.TODO()
+
 	_, err := distributions.FindDistribution("/")
 	if err != nil {
 		return fmt.Errorf("error determining OS distribution: %v", err)
 	}
 
-	tasks := make(map[string]fi.Task)
+	tasks := make(map[string]fi.InstallTask)
 
-	buildContext := &fi.ModelBuilderContext{
+	buildContext := &fi.InstallModelBuilderContext{
 		Tasks: tasks,
 	}
 	i.Build(buildContext)
 
-	// If there is a package task, we need an update packages task
-	for _, t := range tasks {
-		if _, ok := t.(*nodetasks.Package); ok {
-			klog.Infof("Package task found; adding UpdatePackages task")
-			tasks["UpdatePackages"] = nodetasks.NewUpdatePackages()
-			break
-		}
-	}
+	target := &install.InstallTarget{}
 
-	if tasks["UpdatePackages"] == nil {
-		klog.Infof("No package task found; won't update packages")
-	}
-
-	var configBase vfs.Path
-	var cloud fi.Cloud
-	var keyStore fi.Keystore
-	var secretStore fi.SecretStore
-
-	target := &local.LocalTarget{
-		CacheDir: i.CacheDir,
-	}
-
-	checkExisting := true
-	context, err := fi.NewContext(target, nil, cloud, keyStore, secretStore, configBase, checkExisting, tasks)
+	context, err := fi.NewInstallContext(ctx, target, tasks)
 	if err != nil {
 		return fmt.Errorf("error building context: %v", err)
 	}
-	defer context.Close()
 
 	err = context.RunTasks(i.RunTasksOptions)
 	if err != nil {
@@ -91,20 +72,16 @@ func (i *Installation) Run() error {
 	return nil
 }
 
-func (i *Installation) Build(c *fi.ModelBuilderContext) {
+func (i *Installation) Build(c *fi.InstallModelBuilderContext) {
 	c.AddTask(i.buildEnvFile())
 	c.AddTask(i.buildSystemdJob())
 }
 
-func (i *Installation) buildEnvFile() *nodetasks.File {
-	var envVars = make(map[string]string)
+func (i *Installation) buildEnvFile() *nodetasks.InstallFile {
+	envVars := make(map[string]string)
 
 	if os.Getenv("AWS_REGION") != "" {
 		envVars["AWS_REGION"] = os.Getenv("AWS_REGION")
-	}
-
-	if os.Getenv("GOSSIP_DNS_CONN_LIMIT") != "" {
-		envVars["GOSSIP_DNS_CONN_LIMIT"] = os.Getenv("GOSSIP_DNS_CONN_LIMIT")
 	}
 
 	// Pass in required credentials when using user-defined s3 endpoint
@@ -127,43 +104,33 @@ func (i *Installation) buildEnvFile() *nodetasks.File {
 			"OS_REGION_NAME",
 			"OS_APPLICATION_CREDENTIAL_ID",
 			"OS_APPLICATION_CREDENTIAL_SECRET",
+			openstackconfig.EnvKeyOpenstackTLSInsecureSkipVerify,
 		} {
 			envVars[envVar] = os.Getenv(envVar)
 		}
-	}
-
-	if os.Getenv("DIGITALOCEAN_ACCESS_TOKEN") != "" {
-		envVars["DIGITALOCEAN_ACCESS_TOKEN"] = os.Getenv("DIGITALOCEAN_ACCESS_TOKEN")
 	}
 
 	if os.Getenv("OSS_REGION") != "" {
 		envVars["OSS_REGION"] = os.Getenv("OSS_REGION")
 	}
 
-	if os.Getenv("ALIYUN_ACCESS_KEY_ID") != "" {
-		envVars["ALIYUN_ACCESS_KEY_ID"] = os.Getenv("ALIYUN_ACCESS_KEY_ID")
-		envVars["ALIYUN_ACCESS_KEY_SECRET"] = os.Getenv("ALIYUN_ACCESS_KEY_SECRET")
-	}
-
-	if os.Getenv("AZURE_STORAGE_ACCOUNT") != "" {
-		envVars["AZURE_STORAGE_ACCOUNT"] = os.Getenv("AZURE_STORAGE_ACCOUNT")
-	}
-
-	var sysconfig = ""
+	sysconfig := ""
 	for key, value := range envVars {
 		sysconfig += key + "=" + value + "\n"
 	}
 
-	task := &nodetasks.File{
+	task := &nodetasks.InstallFile{File: nodetasks.File{
 		Path:     "/etc/sysconfig/kops-configuration",
 		Contents: fi.NewStringResource(sysconfig),
 		Type:     nodetasks.FileType_File,
-	}
+		// The file may contain state store and OpenStack credentials.
+		Mode: new("0600"),
+	}}
 
 	return task
 }
 
-func (i *Installation) buildSystemdJob() *nodetasks.Service {
+func (i *Installation) buildSystemdJob() *nodetasks.InstallService {
 	command := strings.Join(i.Command, " ")
 
 	serviceName := "kops-configuration.service"
@@ -182,10 +149,10 @@ func (i *Installation) buildSystemdJob() *nodetasks.Service {
 	manifestString := manifest.Render()
 	klog.V(8).Infof("Built service manifest %q\n%s", serviceName, manifestString)
 
-	service := &nodetasks.Service{
+	service := &nodetasks.InstallService{Service: nodetasks.Service{
 		Name:       serviceName,
-		Definition: fi.String(manifestString),
-	}
+		Definition: new(manifestString),
+	}}
 
 	service.InitDefaults()
 

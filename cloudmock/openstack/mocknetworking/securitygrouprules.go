@@ -25,7 +25,7 @@ import (
 	"strconv"
 
 	"github.com/google/uuid"
-	"github.com/gophercloud/gophercloud/openstack/networking/v2/extensions/security/rules"
+	"github.com/gophercloud/gophercloud/v2/openstack/networking/v2/extensions/security/rules"
 )
 
 type ruleListResponse struct {
@@ -71,7 +71,6 @@ func (m *MockClient) mockSecurityGroupRules() {
 }
 
 func (m *MockClient) listSecurityGroupRules(w http.ResponseWriter, vals url.Values) {
-
 	w.WriteHeader(http.StatusOK)
 
 	sgrs := filterRules(m.securityGroupRules, vals)

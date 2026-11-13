@@ -21,6 +21,7 @@ import (
 
 	compute "google.golang.org/api/compute/v1"
 	"k8s.io/klog/v2"
+	"k8s.io/kops/pkg/wellknownservices"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/gce"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraform"
@@ -32,18 +33,25 @@ type Address struct {
 	Name      *string
 	Lifecycle fi.Lifecycle
 
-	IPAddress    *string
-	ForAPIServer bool
+	IPAddress     *string
+	IPAddressType *string
+	Purpose       *string
+
+	Subnetwork *Subnet
+
+	// WellKnownServices indicates which services are supported by this resource.
+	// This field is internal and is not rendered to the cloud.
+	WellKnownServices []wellknownservices.WellKnownService
 }
 
-var _ fi.CompareWithID = &ForwardingRule{}
+var _ fi.CompareWithID = (*ForwardingRule)(nil)
 
 func (e *Address) CompareWithID() *string {
 	return e.Name
 }
 
-func (e *Address) Find(c *fi.Context) (*Address, error) {
-	actual, err := e.find(c.Cloud.(gce.GCECloud))
+func (e *Address) Find(c *fi.CloudupContext) (*Address, error) {
+	actual, err := e.find(c.T.Cloud.(gce.GCECloud))
 	if actual != nil && err == nil {
 		if e.IPAddress == nil {
 			e.IPAddress = actual.IPAddress
@@ -51,28 +59,48 @@ func (e *Address) Find(c *fi.Context) (*Address, error) {
 
 		// Ignore system fields
 		actual.Lifecycle = e.Lifecycle
-		actual.ForAPIServer = e.ForAPIServer
+		actual.WellKnownServices = e.WellKnownServices
 	}
 	return actual, err
 }
 
-func findAddressByIP(cloud gce.GCECloud, ip string) (*Address, error) {
-	// Technically this is a regex, but it doesn't matter...
+func findAddressByIP(cloud gce.GCECloud, ip string, subnet string) (*Address, error) {
+	// Technically this is a regex, but it doesn't matter, it's a prefilter
 	addrs, err := cloud.Compute().Addresses().ListWithFilter(cloud.Project(), cloud.Region(), "address eq "+ip)
 	if err != nil {
 		return nil, fmt.Errorf("error listing IP Addresses: %v", err)
 	}
 
-	if len(addrs) == 0 {
+	var matches []*compute.Address
+	for _, addr := range addrs {
+		if subnet != "" && addr.Subnetwork != subnet {
+			continue
+		}
+		if addr.Address == ip {
+			matches = append(matches, addr)
+		}
+	}
+
+	if len(matches) == 0 {
 		return nil, nil
 	}
-	if len(addrs) > 1 {
+
+	if len(matches) > 1 {
 		return nil, fmt.Errorf("found multiple Addresses matching %q", ip)
 	}
 
+	addr := matches[0]
+
 	actual := &Address{}
-	actual.IPAddress = &addrs[0].Address
-	actual.Name = &addrs[0].Name
+	actual.IPAddress = &addr.Address
+	actual.IPAddressType = &addr.AddressType
+	actual.Purpose = &addr.Purpose
+	actual.Name = &addr.Name
+	if addr.Subnetwork != "" {
+		actual.Subnetwork = &Subnet{
+			Name: new(lastComponent(addr.Subnetwork)),
+		}
+	}
 
 	return actual, nil
 }
@@ -89,30 +117,39 @@ func (e *Address) find(cloud gce.GCECloud) (*Address, error) {
 
 	actual := &Address{}
 	actual.IPAddress = &r.Address
+	actual.IPAddressType = &r.AddressType
+	actual.Purpose = &r.Purpose
 	actual.Name = &r.Name
+	if e.Subnetwork != nil {
+		actual.Subnetwork = &Subnet{
+			Name: new(lastComponent(r.Subnetwork)),
+		}
+	}
 
 	return actual, nil
 }
 
-var _ fi.HasAddress = &Address{}
+var _ fi.HasAddress = (*Address)(nil)
 
-func (e *Address) IsForAPIServer() bool {
-	return e.ForAPIServer
+// GetWellKnownServices implements fi.HasAddress::GetWellKnownServices.
+// It indicates which services we support with this address (likely attached to a load balancer).
+func (e *Address) GetWellKnownServices() []wellknownservices.WellKnownService {
+	return e.WellKnownServices
 }
 
-func (e *Address) FindIPAddress(context *fi.Context) (*string, error) {
-	actual, err := e.find(context.Cloud.(gce.GCECloud))
+func (e *Address) FindAddresses(context *fi.CloudupContext) ([]string, error) {
+	actual, err := e.find(context.T.Cloud.(gce.GCECloud))
 	if err != nil {
 		return nil, fmt.Errorf("error querying for IP Address: %v", err)
 	}
 	if actual == nil {
 		return nil, nil
 	}
-	return actual.IPAddress, nil
+	return []string{fi.ValueOf(actual.IPAddress)}, nil
 }
 
-func (e *Address) Run(c *fi.Context) error {
-	return fi.DefaultDeltaRunMethod(e, c)
+func (e *Address) Run(c *fi.CloudupContext) error {
+	return fi.CloudupDefaultDeltaRunMethod(e, c)
 }
 
 func (_ *Address) CheckChanges(a, e, changes *Address) error {
@@ -130,13 +167,19 @@ func (_ *Address) CheckChanges(a, e, changes *Address) error {
 func (_ *Address) RenderGCE(t *gce.GCEAPITarget, a, e, changes *Address) error {
 	cloud := t.Cloud
 	addr := &compute.Address{
-		Name:    *e.Name,
-		Address: fi.StringValue(e.IPAddress),
-		Region:  cloud.Region(),
+		Name:        *e.Name,
+		Address:     fi.ValueOf(e.IPAddress),
+		AddressType: fi.ValueOf(e.IPAddressType),
+		Purpose:     fi.ValueOf(e.Purpose),
+		Region:      cloud.Region(),
+	}
+
+	if e.Subnetwork != nil {
+		addr.Subnetwork = e.Subnetwork.URL(t.Cloud.Project(), t.Cloud.Region())
 	}
 
 	if a == nil {
-		klog.Infof("GCE creating address: %q", addr.Name)
+		klog.V(2).Infof("Creating Address: %q", addr.Name)
 
 		op, err := cloud.Compute().Addresses().Insert(cloud.Project(), cloud.Region(), addr)
 		if err != nil {
@@ -154,18 +197,26 @@ func (_ *Address) RenderGCE(t *gce.GCEAPITarget, a, e, changes *Address) error {
 }
 
 type terraformAddress struct {
-	Name *string `json:"name,omitempty" cty:"name"`
+	Name        *string                  `cty:"name"`
+	AddressType *string                  `cty:"address_type"`
+	Purpose     *string                  `cty:"purpose"`
+	Subnetwork  *terraformWriter.Literal `cty:"subnetwork"`
 }
 
 func (_ *Address) RenderTerraform(t *terraform.TerraformTarget, a, e, changes *Address) error {
 	tf := &terraformAddress{
-		Name: e.Name,
+		Name:        e.Name,
+		AddressType: e.IPAddressType,
+		Purpose:     e.Purpose,
+	}
+	if e.Subnetwork != nil {
+		tf.Subnetwork = e.Subnetwork.TerraformLink()
 	}
 	return t.RenderResource("google_compute_address", *e.Name, tf)
 }
 
 func (e *Address) TerraformAddress() *terraformWriter.Literal {
-	name := fi.StringValue(e.Name)
+	name := fi.ValueOf(e.Name)
 
 	return terraformWriter.LiteralProperty("google_compute_address", name, "address")
 }

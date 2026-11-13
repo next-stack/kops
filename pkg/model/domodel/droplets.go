@@ -34,20 +34,35 @@ type DropletBuilder struct {
 	Lifecycle              fi.Lifecycle
 }
 
-var _ fi.ModelBuilder = &DropletBuilder{}
+var _ fi.CloudupModelBuilder = &DropletBuilder{}
 
-func (d *DropletBuilder) Build(c *fi.ModelBuilderContext) error {
-	sshKeyName, err := d.SSHKeyName()
-	if err != nil {
-		return err
+func (d *DropletBuilder) Build(c *fi.CloudupModelBuilderContext) error {
+	var sshKey *dotasks.SSHKey
+	if len(d.SSHPublicKeys) != 0 {
+		sshPublicKey := d.SSHPublicKeys[0]
+
+		sshKeyName, err := d.SSHKeyName()
+		if err != nil {
+			return err
+		}
+
+		splitSSHKeyName := strings.Split(sshKeyName, "-")
+		sshKeyFingerPrint := splitSSHKeyName[len(splitSSHKeyName)-1]
+
+		sshKey = &dotasks.SSHKey{
+			Name:      &sshKeyName,
+			Lifecycle: d.Lifecycle,
+
+			PublicKey:      fi.NewBytesResource(sshPublicKey),
+			KeyFingerprint: &sshKeyFingerPrint,
+		}
+		c.AddTask(sshKey)
 	}
 
-	splitSSHKeyName := strings.Split(sshKeyName, "-")
-	sshKeyFingerPrint := splitSSHKeyName[len(splitSSHKeyName)-1]
-
 	// replace "." with "-" since DO API does not accept "."
-	clusterTag := do.TagKubernetesClusterNamePrefix + ":" + strings.Replace(d.ClusterName(), ".", "-", -1)
-	clusterMasterTag := do.TagKubernetesClusterMasterPrefix + ":" + strings.Replace(d.ClusterName(), ".", "-", -1)
+	clusterName := do.SafeClusterName(d.ClusterName())
+	clusterTag := do.TagKubernetesClusterNamePrefix + ":" + clusterName
+	clusterMasterTag := do.TagKubernetesClusterMasterPrefix + ":" + clusterName
 
 	masterIndexCount := 0
 	// In the future, DigitalOcean will use Machine API to manage groups,
@@ -56,19 +71,19 @@ func (d *DropletBuilder) Build(c *fi.ModelBuilderContext) error {
 		name := d.AutoscalingGroupName(ig)
 
 		droplet := dotasks.Droplet{
-			Count:     int(fi.Int32Value(ig.Spec.MinSize)),
-			Name:      fi.String(name),
+			Count:     int(fi.ValueOf(ig.Spec.MinSize)),
+			Name:      new(name),
 			Lifecycle: d.Lifecycle,
 
 			// kops do supports allow only 1 region
-			Region: fi.String(d.Cluster.Spec.Subnets[0].Region),
-			Size:   fi.String(ig.Spec.MachineType),
-			Image:  fi.String(ig.Spec.Image),
-			SSHKey: fi.String(sshKeyFingerPrint),
+			Region: new(d.Cluster.Spec.Networking.Subnets[0].Region),
+			Size:   new(ig.Spec.MachineType),
+			Image:  new(ig.Spec.Image),
+			SSHKey: sshKey,
 			Tags:   []string{clusterTag},
 		}
 
-		if ig.IsMaster() {
+		if ig.IsControlPlane() {
 			masterIndexCount++
 			// create tag based on etcd name. etcd name is now prefixed with etcd-
 			// Ref: https://github.com/kubernetes/kops/commit/31f8cbd571964f19d3c31024ddba918998d29929
@@ -80,8 +95,16 @@ func (d *DropletBuilder) Build(c *fi.ModelBuilderContext) error {
 			droplet.Tags = append(droplet.Tags, do.TagKubernetesInstanceGroup+":"+ig.Name)
 		}
 
-		if d.Cluster.Spec.NetworkID != "" {
-			droplet.VPC = fi.String(d.Cluster.Spec.NetworkID)
+		droplet.Tags = append(droplet.Tags, do.TagKubernetesInstanceRole+":"+string(ig.Spec.Role))
+
+		if d.Cluster.Spec.Networking.NetworkID != "" {
+			droplet.VPCUUID = new(d.Cluster.Spec.Networking.NetworkID)
+		} else if d.Cluster.Spec.Networking.NetworkCIDR != "" {
+			// since networkCIDR specified as part of the request, it is made sure that vpc with this cidr exist before
+			// creating the droplet, so you can associate with vpc uuid for this droplet.
+			vpcName := "vpc-" + clusterName
+			droplet.VPCName = new(vpcName)
+			droplet.NetworkCIDR = new(d.Cluster.Spec.Networking.NetworkCIDR)
 		}
 
 		userData, err := d.BootstrapScriptBuilder.ResourceNodeUp(c, ig)

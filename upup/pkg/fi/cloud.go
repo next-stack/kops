@@ -25,7 +25,6 @@ import (
 
 type Cloud interface {
 	ProviderID() kops.CloudProviderID
-
 	DNS() (dnsprovider.Interface, error)
 
 	// FindVPCInfo looks up the specified VPC by id, returning info if found, otherwise (nil, nil).
@@ -33,6 +32,9 @@ type Cloud interface {
 
 	// DeleteInstance deletes a cloud instance.
 	DeleteInstance(instance *cloudinstances.CloudInstance) error
+
+	// // DeregisterInstance drains a cloud instance and loadbalancers.
+	DeregisterInstance(instance *cloudinstances.CloudInstance) error
 
 	// DeleteGroup deletes the cloud resources that make up a CloudInstanceGroup, including the instances.
 	DeleteGroup(group *cloudinstances.CloudInstanceGroup) error
@@ -50,7 +52,6 @@ type Cloud interface {
 
 	// FindClusterStatus discovers the status of the cluster, by inspecting the cloud objects
 	FindClusterStatus(cluster *kops.Cluster) (*kops.ClusterStatus, error)
-
 	GetApiIngressStatus(cluster *kops.Cluster) ([]ApiIngressStatus, error)
 }
 
@@ -71,6 +72,9 @@ type SubnetInfo struct {
 // ApiIngressStatus represents the status of an ingress point:
 // traffic intended for the service should be sent to an ingress point.
 type ApiIngressStatus struct {
+	// InternalEndpoint is true when the endpoint is only reachable from the cloud.
+	InternalEndpoint bool
+
 	// IP is set for load-balancer ingress points that are IP based
 	// (typically GCE or OpenStack load-balancers)
 	// +optional

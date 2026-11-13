@@ -21,13 +21,14 @@ import (
 	"fmt"
 	"os"
 
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"k8s.io/kops/pkg/featureflag"
 
 	"k8s.io/apimachinery/pkg/util/validation/field"
-	"k8s.io/kops/pkg/acls"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraform"
 	"k8s.io/kops/util/pkg/vfs"
+	"k8s.io/kops/util/pkg/vfs/acls"
 )
 
 // +kops:fitask
@@ -35,26 +36,35 @@ type ManagedFile struct {
 	Name      *string
 	Lifecycle fi.Lifecycle
 
-	Base     *string
+	// Base is the root location of the store for the managed file
+	Base *string
+
+	// Location is the relative path of the managed file
 	Location *string
+
 	Contents fi.Resource
-	Public   *bool
+
+	// PublicACL controls whether the _object_ has an ACL which grants world-readable status.
+	// Note that the _bucket_ may itself have a grant for world-readable; that is separate.
+	PublicACL *bool
 }
 
-func (e *ManagedFile) Find(c *fi.Context) (*ManagedFile, error) {
+func (e *ManagedFile) Find(c *fi.CloudupContext) (*ManagedFile, error) {
+	ctx := c.Context()
+
 	managedFiles, err := getBasePath(c, e)
 	if err != nil {
 		return nil, err
 	}
 
-	location := fi.StringValue(e.Location)
+	location := fi.ValueOf(e.Location)
 	if location == "" {
 		return nil, nil
 	}
 
 	filePath := managedFiles.Join(location)
 
-	existingData, err := filePath.ReadFile()
+	existingData, err := filePath.ReadFile(ctx)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -74,10 +84,22 @@ func (e *ManagedFile) Find(c *fi.Context) (*ManagedFile, error) {
 		if err != nil {
 			return nil, err
 		}
-		actual.Public = &public
+		actual.PublicACL = &public
 
-		if e.Public == nil {
-			e.Public = fi.Bool(false)
+		if e.PublicACL == nil {
+			e.PublicACL = new(false)
+		}
+	}
+
+	if memfsfile, ok := filePath.(*vfs.MemFSPath); ok {
+		public, err := memfsfile.IsPublic()
+		if err != nil {
+			return nil, err
+		}
+		actual.PublicACL = &public
+
+		if e.PublicACL == nil {
+			e.PublicACL = new(false)
 		}
 	}
 
@@ -87,8 +109,8 @@ func (e *ManagedFile) Find(c *fi.Context) (*ManagedFile, error) {
 	return actual, nil
 }
 
-func (e *ManagedFile) Run(c *fi.Context) error {
-	return fi.DefaultDeltaRunMethod(e, c)
+func (e *ManagedFile) Run(c *fi.CloudupContext) error {
+	return fi.CloudupDefaultDeltaRunMethod(e, c)
 }
 
 func (s *ManagedFile) CheckChanges(a, e, changes *ManagedFile) error {
@@ -103,8 +125,37 @@ func (s *ManagedFile) CheckChanges(a, e, changes *ManagedFile) error {
 	return nil
 }
 
-func (_ *ManagedFile) Render(c *fi.Context, a, e, changes *ManagedFile) error {
-	location := fi.StringValue(e.Location)
+func (e *ManagedFile) getACL(c *fi.CloudupContext, p vfs.Path) (vfs.ACL, error) {
+	ctx := c.Context()
+
+	publicRead := s3types.ObjectCannedACLPublicRead
+	var acl vfs.ACL
+	if fi.ValueOf(e.PublicACL) {
+		switch p := p.(type) {
+		case *vfs.S3Path:
+			acl = &vfs.S3Acl{
+				RequestACL: &publicRead,
+			}
+		case *vfs.MemFSPath:
+			if !p.IsClusterReadable() {
+				return nil, fmt.Errorf("the %q path is intended for use in tests", p.Path())
+			}
+			acl = &vfs.S3Acl{
+				RequestACL: &publicRead,
+			}
+		default:
+			return nil, fmt.Errorf("the %q path does not support public ACL", p.Path())
+		}
+		return acl, nil
+	}
+
+	return acls.GetACL(ctx, p, c.T.Cluster)
+}
+
+func (_ *ManagedFile) Render(c *fi.CloudupContext, a, e, changes *ManagedFile) error {
+	ctx := c.Context()
+
+	location := fi.ValueOf(e.Location)
 	if location == "" {
 		return fi.RequiredField("Location")
 	}
@@ -120,31 +171,12 @@ func (_ *ManagedFile) Render(c *fi.Context, a, e, changes *ManagedFile) error {
 	}
 	p = p.Join(location)
 
-	var acl vfs.ACL
-	if fi.BoolValue(e.Public) {
-		switch p := p.(type) {
-		case *vfs.S3Path:
-			acl = &vfs.S3Acl{
-				RequestACL: fi.String("public-read"),
-			}
-		case *vfs.MemFSPath:
-			if !p.IsClusterReadable() {
-				return fmt.Errorf("the %q path is intended for use in tests", p.Path())
-			}
-			acl = nil
-		default:
-			return fmt.Errorf("the %q path does not support public ACL", p.Path())
-		}
-
-	} else {
-
-		acl, err = acls.GetACL(p, c.Cluster)
-		if err != nil {
-			return err
-		}
+	acl, err := e.getACL(c, p)
+	if err != nil {
+		return err
 	}
 
-	err = p.WriteFile(bytes.NewReader(data), acl)
+	err = p.WriteFile(ctx, bytes.NewReader(data), acl)
 	if err != nil {
 		return fmt.Errorf("error creating ManagedFile %q: %v", location, err)
 	}
@@ -152,8 +184,8 @@ func (_ *ManagedFile) Render(c *fi.Context, a, e, changes *ManagedFile) error {
 	return nil
 }
 
-func getBasePath(c *fi.Context, e *ManagedFile) (vfs.Path, error) {
-	base := fi.StringValue(e.Base)
+func getBasePath(c *fi.CloudupContext, e *ManagedFile) (vfs.Path, error) {
+	base := fi.ValueOf(e.Base)
 	if base != "" {
 		p, err := vfs.Context.BuildVfsPath(base)
 		if err != nil {
@@ -162,16 +194,16 @@ func getBasePath(c *fi.Context, e *ManagedFile) (vfs.Path, error) {
 		return p, nil
 	}
 
-	return c.ClusterConfigBase, nil
+	return c.T.ClusterConfigBase, nil
 }
 
 // RenderTerraform is responsible for rendering the terraform json.
-func (f *ManagedFile) RenderTerraform(c *fi.Context, t *terraform.TerraformTarget, a, e, changes *ManagedFile) error {
+func (f *ManagedFile) RenderTerraform(c *fi.CloudupContext, t *terraform.TerraformTarget, a, e, changes *ManagedFile) error {
 	if !featureflag.TerraformManagedFiles.Enabled() {
 		return f.Render(c, a, e, changes)
 	}
 
-	location := fi.StringValue(e.Location)
+	location := fi.ValueOf(e.Location)
 	if location == "" {
 		return fi.RequiredField("Location")
 	}
@@ -182,7 +214,7 @@ func (f *ManagedFile) RenderTerraform(c *fi.Context, t *terraform.TerraformTarge
 	}
 	p = p.Join(location)
 
-	acl, err := acls.GetACL(p, c.Cluster)
+	acl, err := e.getACL(c, p)
 	if err != nil {
 		return err
 	}

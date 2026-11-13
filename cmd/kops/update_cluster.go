@@ -21,24 +21,26 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
-	"path/filepath"
+	"os"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
 	"k8s.io/kops/cmd/kops/util"
 	"k8s.io/kops/pkg/apis/kops"
+	apisutil "k8s.io/kops/pkg/apis/kops/util"
 	"k8s.io/kops/pkg/assets"
 	"k8s.io/kops/pkg/commands/commandutils"
 	"k8s.io/kops/pkg/kubeconfig"
+	"k8s.io/kops/pkg/predicates"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup"
 	"k8s.io/kops/upup/pkg/fi/utils"
-	"k8s.io/kops/upup/pkg/kutil"
 	"k8s.io/kubectl/pkg/util/i18n"
 	"k8s.io/kubectl/pkg/util/templates"
 )
@@ -54,44 +56,83 @@ var (
 
 	updateClusterExample = templates.Examples(i18n.T(`
 	# After the cluster has been edited or upgraded, update the cloud resources with:
-	kops update cluster k8s-cluster.example.com --yes --state=s3://my-state-store --yes
+	kops update cluster k8s-cluster.example.com --state=s3://my-state-store --yes
 	`))
 
 	updateClusterShort = i18n.T("Update a cluster.")
 )
 
+// UpdateClusterOptions holds the options for the update cluster command.
+// The update cluster command combines some functionality, so it actually builds up options for those functionality areas.
 type UpdateClusterOptions struct {
-	Yes                bool
-	Target             string
+	// Reconcile is true if we should reconcile the cluster by rolling the control plane and nodes sequentially
+	Reconcile bool
+
+	kubeconfig.CreateKubecfgOptions
+	CoreUpdateClusterOptions
+}
+
+// CoreUpdateClusterOptions holds the core options for the update cluster command,
+// which are shared with the reconcile cluster command.
+// Connection options are passed separately through CreateKubecfgOptions.
+type CoreUpdateClusterOptions struct {
+	Yes bool
+
+	// Target is the type of target we will operate against (direct, dry-run, terraform)
+	Target cloudup.Target
+
 	OutDir             string
 	SSHPublicKey       string
 	RunTasksOptions    fi.RunTasksOptions
 	AllowKopsDowngrade bool
+	// Bypasses kubelet vs control plane version skew checks,
+	// which by default prevent non-control plane instancegroups
+	// from being updated to a version greater than the control plane
+	IgnoreKubeletVersionSkew bool
 	// GetAssets is whether this is invoked from the CmdGetAssets.
 	GetAssets bool
 
 	ClusterName string
 
-	CreateKubecfg bool
-	admin         time.Duration
-	user          string
-	internal      bool
+	// InstanceGroups is the list of instance groups to update;
+	// if not specified, all instance groups will be updated
+	InstanceGroups []string
+
+	// InstanceGroupRoles is the list of roles we should update
+	// if not specified, all instance groups will be updated
+	InstanceGroupRoles []string
 
 	Phase string
 
 	// LifecycleOverrides is a slice of taskName=lifecycle name values.  This slice is used
 	// to populate the LifecycleOverrides struct member in ApplyClusterCmd struct.
 	LifecycleOverrides []string
+
+	// Prune is true if we should clean up any old revisions of objects.
+	// Typically this is done in after we have rolling-updated the cluster.
+	// The goal is that the cluster can keep running even during more disruptive
+	// infrastructure changes.
+	Prune bool
 }
 
 func (o *UpdateClusterOptions) InitDefaults() {
-	o.Yes = false
-	o.Target = "direct"
-	o.SSHPublicKey = ""
-	o.OutDir = ""
+	o.CoreUpdateClusterOptions.InitDefaults()
+
+	o.Reconcile = false
 
 	// By default we export a kubecfg, but it doesn't have a static/eternal credential in it any more.
 	o.CreateKubecfg = true
+}
+
+func (o *CoreUpdateClusterOptions) InitDefaults() {
+	o.Yes = false
+	o.Target = cloudup.TargetDirect
+	o.SSHPublicKey = ""
+	o.OutDir = ""
+	// By default we enforce the version skew between control plane and worker nodes
+	o.IgnoreKubeletVersionSkew = false
+
+	o.Prune = false
 
 	o.RunTasksOptions.InitDefaults()
 }
@@ -100,6 +141,11 @@ func NewCmdUpdateCluster(f *util.Factory, out io.Writer) *cobra.Command {
 	options := &UpdateClusterOptions{}
 	options.InitDefaults()
 
+	allRoles := make([]string, 0, len(kops.AllInstanceGroupRoles))
+	for _, r := range kops.AllInstanceGroupRoles {
+		allRoles = append(allRoles, r.ToLowerString())
+	}
+
 	cmd := &cobra.Command{
 		Use:               "cluster [CLUSTER]",
 		Short:             updateClusterShort,
@@ -107,25 +153,45 @@ func NewCmdUpdateCluster(f *util.Factory, out io.Writer) *cobra.Command {
 		Example:           updateClusterExample,
 		Args:              rootCommand.clusterNameArgs(&options.ClusterName),
 		ValidArgsFunction: commandutils.CompleteClusterName(f, true, false),
+		PreRunE: func(cmd *cobra.Command, args []string) error {
+			// Reusing local connectivity should not overwrite it unless an export is requested.
+			if options.UseKubeconfig && !cmd.Flags().Changed("create-kube-config") {
+				options.CreateKubecfg = false
+			}
+			// Terraform treats omitted resources as deletions, so only render a complete configuration.
+			if options.Target == cloudup.TargetTerraform && (len(options.InstanceGroups) != 0 || len(options.InstanceGroupRoles) != 0) {
+				return fmt.Errorf("cannot use --target=terraform with --instance-group or --instance-group-roles; generate the full configuration and use terraform apply -target instead")
+			}
+			return nil
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			_, err := RunUpdateCluster(context.TODO(), f, out, options)
+			_, err := RunUpdateCluster(cmd.Context(), f, out, options)
 			return err
 		},
 	}
 
 	cmd.Flags().BoolVarP(&options.Yes, "yes", "y", options.Yes, "Create cloud resources, without --yes update is in dry run mode")
-	cmd.Flags().StringVar(&options.Target, "target", options.Target, "Target - direct, terraform, cloudformation")
-	cmd.RegisterFlagCompletionFunc("target", completeUpdateClusterTarget(f, options))
+	cmd.Flags().Var(&options.Target, "target", fmt.Sprintf("Target - %q, %q", cloudup.TargetDirect, cloudup.TargetTerraform))
+	cmd.RegisterFlagCompletionFunc("target", completeUpdateClusterTarget(f, &options.CoreUpdateClusterOptions))
 	cmd.Flags().StringVar(&options.SSHPublicKey, "ssh-public-key", options.SSHPublicKey, "SSH public key to use (deprecated: use kops create secret instead)")
 	cmd.Flags().StringVar(&options.OutDir, "out", options.OutDir, "Path to write any local output")
 	cmd.MarkFlagDirname("out")
-	cmd.Flags().BoolVar(&options.CreateKubecfg, "create-kube-config", options.CreateKubecfg, "Will control automatically creating the kube config file on your local filesystem")
-	cmd.Flags().DurationVar(&options.admin, "admin", options.admin, "Also export a cluster admin user credential with the specified lifetime and add it to the cluster context")
+	cmd.Flags().BoolVar(&options.CreateKubecfg, "create-kube-config", options.CreateKubecfg, "Automatically export kubeconfig after updating (defaults to false with --use-kubeconfig; --admin, --user and --internal imply export)")
+	cmd.Flags().DurationVar(&options.Admin, "admin", options.Admin, "Also export a cluster admin user credential with the specified lifetime and add it to the cluster context")
 	cmd.Flags().Lookup("admin").NoOptDefVal = kubeconfig.DefaultKubecfgAdminLifetime.String()
-	cmd.Flags().StringVar(&options.user, "user", options.user, "Existing user in kubeconfig file to use.  Implies --create-kube-config")
+	cmd.Flags().StringVar(&options.User, "user", options.User, "Existing user in kubeconfig file to use.  Implies --create-kube-config")
 	cmd.RegisterFlagCompletionFunc("user", completeKubecfgUser)
-	cmd.Flags().BoolVar(&options.internal, "internal", options.internal, "Use the cluster's internal DNS name. Implies --create-kube-config")
+
+	cmd.Flags().BoolVar(&options.Internal, "internal", options.Internal, "Use the cluster's internal DNS name. Implies --create-kube-config")
+	options.CreateKubecfgOptions.AddCommonFlags(cmd.Flags())
+
 	cmd.Flags().BoolVar(&options.AllowKopsDowngrade, "allow-kops-downgrade", options.AllowKopsDowngrade, "Allow an older version of kOps to update the cluster than last used")
+	cmd.Flags().StringSliceVar(&options.InstanceGroups, "instance-group", options.InstanceGroups, "Instance groups to update (defaults to all if not specified)")
+	cmd.RegisterFlagCompletionFunc("instance-group", completeInstanceGroup(f, &options.InstanceGroups, &options.InstanceGroupRoles))
+	cmd.Flags().StringSliceVar(&options.InstanceGroupRoles, "instance-group-roles", options.InstanceGroupRoles, "Instance group roles to update ("+strings.Join(allRoles, ",")+")")
+	cmd.RegisterFlagCompletionFunc("instance-group-roles", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		return sets.NewString(allRoles...).Delete(options.InstanceGroupRoles...).List(), cobra.ShellCompDirectiveNoFileComp
+	})
 	cmd.Flags().StringVar(&options.Phase, "phase", options.Phase, "Subset of tasks to run: "+strings.Join(cloudup.Phases.List(), ", "))
 	cmd.RegisterFlagCompletionFunc("phase", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		return cloudup.Phases.List(), cobra.ShellCompDirectiveNoFileComp
@@ -135,15 +201,18 @@ func NewCmdUpdateCluster(f *util.Factory, out io.Writer) *cobra.Command {
 	viper.BindEnv("lifecycle-overrides", "KOPS_LIFECYCLE_OVERRIDES")
 	cmd.RegisterFlagCompletionFunc("lifecycle-overrides", completeLifecycleOverrides)
 
+	cmd.Flags().BoolVar(&options.Prune, "prune", options.Prune, "Delete old revisions of cloud resources that were needed during an upgrade")
+	cmd.Flags().BoolVar(&options.IgnoreKubeletVersionSkew, "ignore-kubelet-version-skew", options.IgnoreKubeletVersionSkew, "Setting this to true will force updating the kubernetes version on all instance groups, regardles of which control plane version is running")
+
 	return cmd
 }
 
 type UpdateClusterResults struct {
-	// Target is the fi.Target we will operated against.  This can be used to get dryrun results (primarily for tests)
-	Target fi.Target
+	// Target is the fi.Target we will operate against.  This can be used to get dryrun results (primarily for tests)
+	Target fi.CloudupTarget
 
 	// TaskMap is the map of tasks that we built (output)
-	TaskMap map[string]fi.Task
+	TaskMap map[string]fi.CloudupTask
 
 	// ImageAssets are the image assets we use (output).
 	ImageAssets []*assets.ImageAsset
@@ -153,27 +222,36 @@ type UpdateClusterResults struct {
 	Cluster *kops.Cluster
 }
 
+func RunCoreUpdateCluster(ctx context.Context, f *util.Factory, out io.Writer, c *CoreUpdateClusterOptions, connectionOptions kubeconfig.CreateKubecfgOptions) (*UpdateClusterResults, error) {
+	opt := &UpdateClusterOptions{}
+	opt.CoreUpdateClusterOptions = *c
+	opt.Reconcile = false
+	opt.CreateKubecfgOptions = connectionOptions
+	opt.CreateKubecfgOptions.CreateKubecfg = false
+	return RunUpdateCluster(ctx, f, out, opt)
+}
+
 func RunUpdateCluster(ctx context.Context, f *util.Factory, out io.Writer, c *UpdateClusterOptions) (*UpdateClusterResults, error) {
 	results := &UpdateClusterResults{}
 
 	isDryrun := false
 	targetName := c.Target
 
-	if c.admin != 0 && c.user != "" {
+	if c.Admin != 0 && c.User != "" {
 		return nil, fmt.Errorf("cannot use both --admin and --user")
 	}
 
-	if c.admin != 0 && !c.CreateKubecfg {
+	if c.Admin != 0 && !c.CreateKubecfg {
 		klog.Info("--admin implies --create-kube-config")
 		c.CreateKubecfg = true
 	}
 
-	if c.user != "" && !c.CreateKubecfg {
+	if c.User != "" && !c.CreateKubecfg {
 		klog.Info("--user implies --create-kube-config")
 		c.CreateKubecfg = true
 	}
 
-	if c.internal && !c.CreateKubecfg {
+	if c.Internal && !c.CreateKubecfg {
 		klog.Info("--internal implies --create-kube-config")
 		c.CreateKubecfg = true
 	}
@@ -193,8 +271,6 @@ func RunUpdateCluster(ctx context.Context, f *util.Factory, out io.Writer, c *Up
 	if c.OutDir == "" {
 		if c.Target == cloudup.TargetTerraform {
 			c.OutDir = "out/terraform"
-		} else if c.Target == cloudup.TargetCloudformation {
-			c.OutDir = "out/cloudformation"
 		} else {
 			c.OutDir = "out"
 		}
@@ -205,7 +281,7 @@ func RunUpdateCluster(ctx context.Context, f *util.Factory, out io.Writer, c *Up
 		return results, err
 	}
 
-	clientset, err := f.Clientset()
+	clientset, err := f.KopsClient()
 	if err != nil {
 		return results, err
 	}
@@ -229,11 +305,11 @@ func RunUpdateCluster(ctx context.Context, f *util.Factory, out io.Writer, c *Up
 		fmt.Fprintf(out, "--ssh-public-key on update is deprecated - please use `kops create secret --name %s sshpublickey admin -i ~/.ssh/id_rsa.pub` instead\n", cluster.ObjectMeta.Name)
 
 		c.SSHPublicKey = utils.ExpandPath(c.SSHPublicKey)
-		authorized, err := ioutil.ReadFile(c.SSHPublicKey)
+		authorized, err := os.ReadFile(c.SSHPublicKey)
 		if err != nil {
 			return results, fmt.Errorf("error reading SSH key file %q: %v", c.SSHPublicKey, err)
 		}
-		err = sshCredentialStore.AddSSHPublicKey(authorized)
+		err = sshCredentialStore.AddSSHPublicKey(ctx, authorized)
 		if err != nil {
 			return results, fmt.Errorf("error adding SSH public key: %v", err)
 		}
@@ -255,6 +331,11 @@ func RunUpdateCluster(ctx context.Context, f *util.Factory, out io.Writer, c *Up
 		}
 	}
 
+	deletionProcessing := fi.DeletionProcessingModeDeleteIfNotDeferrred
+	if c.Prune {
+		deletionProcessing = fi.DeletionProcessingModeDeleteIncludingDeferred
+	}
+
 	lifecycleOverrideMap := make(map[string]fi.Lifecycle)
 
 	for _, override := range c.LifecycleOverrides {
@@ -274,37 +355,62 @@ func RunUpdateCluster(ctx context.Context, f *util.Factory, out io.Writer, c *Up
 		lifecycleOverrideMap[taskName] = lifecycleOverride
 	}
 
+	var instanceGroupFilters []predicates.Predicate[*kops.InstanceGroup]
+	if len(c.InstanceGroups) != 0 {
+		instanceGroupFilters = append(instanceGroupFilters, matchInstanceGroupNames(c.InstanceGroups))
+	} else if len(c.InstanceGroupRoles) != 0 {
+		instanceGroupFilters = append(instanceGroupFilters, matchInstanceGroupRoles(c.InstanceGroupRoles))
+	}
+
 	cloud, err := cloudup.BuildCloud(cluster)
 	if err != nil {
 		return nil, err
 	}
 
+	minControlPlaneRunningVersion := cluster.Spec.KubernetesVersion
+	if !c.IgnoreKubeletVersionSkew {
+		minControlPlaneRunningVersion, err = checkControlPlaneRunningVersion(ctx, f, cluster, c.CreateKubecfgOptions)
+		if err != nil {
+			klog.V(2).Infof("error checking control plane running version, assuming no k8s upgrade in progress: %v", err)
+		} else {
+			klog.V(2).Infof("found control plane running version: %v", minControlPlaneRunningVersion)
+		}
+	}
 	applyCmd := &cloudup.ApplyClusterCmd{
-		Cloud:              cloud,
-		Clientset:          clientset,
-		Cluster:            cluster,
-		DryRun:             isDryrun,
-		AllowKopsDowngrade: c.AllowKopsDowngrade,
-		RunTasksOptions:    &c.RunTasksOptions,
-		OutDir:             c.OutDir,
-		Phase:              phase,
-		TargetName:         targetName,
-		LifecycleOverrides: lifecycleOverrideMap,
-		GetAssets:          c.GetAssets,
+		Cloud:                      cloud,
+		Clientset:                  clientset,
+		Cluster:                    cluster,
+		DryRun:                     isDryrun,
+		AllowKopsDowngrade:         c.AllowKopsDowngrade,
+		RunTasksOptions:            &c.RunTasksOptions,
+		OutDir:                     c.OutDir,
+		InstanceGroupFilter:        predicates.AllOf(instanceGroupFilters...),
+		Phase:                      phase,
+		TargetName:                 targetName,
+		LifecycleOverrides:         lifecycleOverrideMap,
+		GetAssets:                  c.GetAssets,
+		DeletionProcessing:         deletionProcessing,
+		ControlPlaneRunningVersion: minControlPlaneRunningVersion,
 	}
 
-	if err := applyCmd.Run(ctx); err != nil {
+	applyResults, err := applyCmd.Run(ctx)
+	if err != nil {
 		return results, err
+	}
+	if targetName == cloudup.TargetDirect && !c.UseKubeconfig {
+		// The version check may have cached a fallback or old load balancer
+		// endpoint. Reconcile must rediscover connectivity after applying changes.
+		f.InvalidateClusterConnections(cluster)
 	}
 
 	results.Target = applyCmd.Target
 	results.TaskMap = applyCmd.TaskMap
-	results.ImageAssets = applyCmd.ImageAssets
-	results.FileAssets = applyCmd.FileAssets
+	results.ImageAssets = applyResults.AssetBuilder.ImageAssets()
+	results.FileAssets = applyResults.AssetBuilder.FileAssets()
 	results.Cluster = cluster
 
 	if isDryrun && !c.GetAssets {
-		target := applyCmd.Target.(*fi.DryRunTarget)
+		target := applyCmd.Target.(*fi.CloudupDryRunTarget)
 		if target.HasChanges() {
 			fmt.Fprintf(out, "Must specify --yes to apply changes\n")
 		} else {
@@ -316,27 +422,27 @@ func RunUpdateCluster(ctx context.Context, f *util.Factory, out io.Writer, c *Up
 	firstRun := false
 
 	if !isDryrun && c.CreateKubecfg {
-		hasKubecfg, err := hasKubecfg(cluster.ObjectMeta.Name)
+		hasKubeconfig, err := clusterIsInKubeConfig(cluster.ObjectMeta.Name)
 		if err != nil {
-			klog.Warningf("error reading kubecfg: %v", err)
-			hasKubecfg = true
+			klog.Warningf("error reading kubeconfig: %v", err)
+			hasKubeconfig = true
 		}
-		firstRun = !hasKubecfg
+		firstRun = !hasKubeconfig
+
+		if c.CreateKubecfgOptions.UseKubeconfig {
+			klog.Infof("Exporting kubeconfig will overwrite the local connection settings selected by --use-kubeconfig")
+		}
 
 		klog.Infof("Exporting kubeconfig for cluster")
 
-		// TODO: Another flag?
-		useKopsAuthenticationPlugin := false
 		conf, err := kubeconfig.BuildKubecfg(
+			ctx,
 			cluster,
 			keyStore,
 			secretStore,
 			cloud,
-			c.admin,
-			c.user,
-			c.internal,
-			f.KopsStateStore(),
-			useKopsAuthenticationPlugin)
+			c.CreateKubecfgOptions,
+			f.KopsStateStore())
 		if err != nil {
 			return nil, err
 		}
@@ -346,7 +452,7 @@ func RunUpdateCluster(ctx context.Context, f *util.Factory, out io.Writer, c *Up
 			return nil, err
 		}
 
-		if c.admin == 0 && c.user == "" {
+		if c.Admin == 0 && c.User == "" {
 			klog.Warningf("Exported kubeconfig with no user authentication; use --admin, --user or --auth-plugin flags with `kops export kubeconfig`")
 		}
 	}
@@ -363,17 +469,6 @@ func RunUpdateCluster(ctx context.Context, f *util.Factory, out io.Writer, c *Up
 				fmt.Fprintf(sb, "   cd %s\n", c.OutDir)
 				fmt.Fprintf(sb, "   terraform plan\n")
 				fmt.Fprintf(sb, "   terraform apply\n")
-				fmt.Fprintf(sb, "\n")
-			}
-		} else if c.Target == cloudup.TargetCloudformation {
-			fmt.Fprintf(sb, "\n")
-			fmt.Fprintf(sb, "Cloudformation output has been placed into %s\n", c.OutDir)
-
-			if firstRun {
-				cfName := "kubernetes-" + strings.Replace(c.ClusterName, ".", "-", -1)
-				cfPath := filepath.Join(c.OutDir, "kubernetes.json")
-				fmt.Fprintf(sb, "Run this command to apply the configuration:\n")
-				fmt.Fprintf(sb, "   aws cloudformation create-stack --capabilities CAPABILITY_NAMED_IAM --stack-name %s --template-body file://%s\n", cfName, cfPath)
 				fmt.Fprintf(sb, "\n")
 			}
 		} else if firstRun {
@@ -393,7 +488,7 @@ func RunUpdateCluster(ctx context.Context, f *util.Factory, out io.Writer, c *Up
 			fmt.Fprintf(sb, " * validate cluster: kops validate cluster --wait 10m\n")
 			fmt.Fprintf(sb, " * list nodes: kubectl get nodes --show-labels\n")
 			if !usesBastion(applyCmd.InstanceGroups) {
-				fmt.Fprintf(sb, " * ssh to the master: ssh -i ~/.ssh/id_rsa ubuntu@%s\n", cluster.Spec.MasterPublicName)
+				fmt.Fprintf(sb, " * ssh to a control-plane node: ssh -i ~/.ssh/id_rsa ubuntu@%s\n", cluster.Spec.API.PublicName)
 			} else {
 				bastionPublicName := findBastionPublicName(cluster)
 				if bastionPublicName != "" {
@@ -407,7 +502,7 @@ func RunUpdateCluster(ctx context.Context, f *util.Factory, out io.Writer, c *Up
 			fmt.Fprintf(sb, "\n")
 		}
 
-		if !firstRun {
+		if !firstRun && !c.Reconcile {
 			// TODO: Detect if rolling-update is needed
 			fmt.Fprintf(sb, "\n")
 			fmt.Fprintf(sb, "Changes may require instances to restart: kops rolling-update cluster\n")
@@ -432,7 +527,7 @@ func parseLifecycle(lifecycle string) (fi.Lifecycle, error) {
 
 func usesBastion(instanceGroups []*kops.InstanceGroup) bool {
 	for _, ig := range instanceGroups {
-		if ig.Spec.Role == kops.InstanceGroupRoleBastion {
+		if ig.Spec.Role.HasBastion() {
 			return true
 		}
 	}
@@ -441,7 +536,7 @@ func usesBastion(instanceGroups []*kops.InstanceGroup) bool {
 }
 
 func findBastionPublicName(c *kops.Cluster) string {
-	topology := c.Spec.Topology
+	topology := c.Spec.Networking.Topology
 	if topology == nil {
 		return ""
 	}
@@ -449,55 +544,61 @@ func findBastionPublicName(c *kops.Cluster) string {
 	if bastion == nil {
 		return ""
 	}
-	return bastion.BastionPublicName
+	return bastion.PublicName
 }
 
-func hasKubecfg(contextName string) (bool, error) {
-	kubectl := &kutil.Kubectl{}
-
-	config, err := kubectl.GetConfig(false)
+// clusterIsInKubeConfig checks if we have a context with the specified name (cluster name) in ~/.kube/config.
+// It is used as a check to see if this is (likely) a new cluster.
+func clusterIsInKubeConfig(contextName string) (bool, error) {
+	configAccess := clientcmd.NewDefaultPathOptions()
+	config, err := configAccess.GetStartingConfig()
 	if err != nil {
-		return false, fmt.Errorf("error getting config from kubectl: %v", err)
+		return false, fmt.Errorf("error reading kubeconfig: %w", err)
 	}
 
-	for _, context := range config.Contexts {
-		if context.Name == contextName {
+	for k := range config.Contexts {
+		if k == contextName {
 			return true, nil
 		}
 	}
+
 	return false, nil
 }
 
-func completeUpdateClusterTarget(f commandutils.Factory, options *UpdateClusterOptions) func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+func completeUpdateClusterTarget(f commandutils.Factory, options *CoreUpdateClusterOptions) func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 	return func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		ctx := cmd.Context()
 
 		commandutils.ConfigureKlogForCompletion()
-		ctx := context.TODO()
 
 		cluster, _, _, directive := GetClusterForCompletion(ctx, f, nil)
 		if cluster == nil {
-			return []string{
+			return toStringSlice([]cloudup.Target{
 				cloudup.TargetDirect,
 				cloudup.TargetDryRun,
-				cloudup.TargetCloudformation,
 				cloudup.TargetTerraform,
-			}, directive
+			}), directive
 		}
 
-		completions := []string{
+		completions := []cloudup.Target{
 			cloudup.TargetDirect,
 			cloudup.TargetDryRun,
 		}
 		for _, cp := range cloudup.TerraformCloudProviders {
-			if cluster.Spec.CloudProvider == string(cp) {
+			if cluster.GetCloudProvider() == cp {
 				completions = append(completions, cloudup.TargetTerraform)
 			}
 		}
-		if cluster.Spec.CloudProvider == string(kops.CloudProviderAWS) {
-			completions = append(completions, cloudup.TargetCloudformation)
-		}
-		return completions, cobra.ShellCompDirectiveNoFileComp
+		return toStringSlice(completions), cobra.ShellCompDirectiveNoFileComp
 	}
+}
+
+func toStringSlice[T ~string](targets []T) []string {
+	strings := make([]string, len(targets))
+	for i, target := range targets {
+		strings[i] = string(target)
+	}
+	return strings
 }
 
 func completeLifecycleOverrides(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
@@ -516,4 +617,66 @@ func completeLifecycleOverrides(cmd *cobra.Command, args []string, toComplete st
 		completions = append(completions, split[0]+lifecycle)
 	}
 	return completions, cobra.ShellCompDirectiveNoFileComp
+}
+
+// matchInstanceGroupNames returns a predicate that matches instance groups by name
+func matchInstanceGroupNames(names []string) predicates.Predicate[*kops.InstanceGroup] {
+	return func(ig *kops.InstanceGroup) bool {
+		for _, name := range names {
+			if ig.ObjectMeta.Name == name {
+				return true
+			}
+		}
+		return false
+	}
+}
+
+// matchInstanceGroupRoles returns a predicate that matches instance groups by role
+func matchInstanceGroupRoles(roles []string) predicates.Predicate[*kops.InstanceGroup] {
+	return func(ig *kops.InstanceGroup) bool {
+		for _, role := range roles {
+			instanceGroupRole, ok := kops.ParseInstanceGroupRole(role, true)
+			if !ok {
+				continue
+			}
+			if ig.Spec.Role == instanceGroupRole {
+				return true
+			}
+		}
+		return false
+	}
+}
+
+// checkControlPlaneRunningVersion returns the minimum control plane running version
+func checkControlPlaneRunningVersion(ctx context.Context, f *util.Factory, cluster *kops.Cluster, options kubeconfig.CreateKubecfgOptions) (string, error) {
+	clusterName := cluster.Name
+	version := cluster.Spec.KubernetesVersion
+	config, err := f.RESTConfig(ctx, cluster, options)
+	if err != nil {
+		return version, fmt.Errorf("cannot load kubecfg settings for %q: %v", clusterName, err)
+	}
+
+	k8sClient, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return version, fmt.Errorf("cannot build kubernetes api client for %q: %v", clusterName, err)
+	}
+
+	parsedVersion, err := apisutil.ParseKubernetesVersion(version)
+	if err != nil {
+		return version, fmt.Errorf("cannot parse kubernetes version %q: %v", clusterName, err)
+	}
+	nodeList, err := k8sClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{
+		LabelSelector: "node-role.kubernetes.io/control-plane",
+	})
+	if err != nil {
+		return version, fmt.Errorf("cannot list nodes in cluster %q: %v", clusterName, err)
+	}
+	for _, node := range nodeList.Items {
+		if apisutil.IsKubernetesGTE(node.Status.NodeInfo.KubeletVersion, *parsedVersion) {
+			version = node.Status.NodeInfo.KubeletVersion
+			parsedVersion, _ = apisutil.ParseKubernetesVersion(version)
+		}
+
+	}
+	return strings.TrimPrefix(version, "v"), nil
 }

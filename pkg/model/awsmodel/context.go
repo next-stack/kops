@@ -37,8 +37,8 @@ func (b *AWSModelContext) LinkToSubnet(z *kops.ClusterSubnetSpec) *awstasks.Subn
 
 func (b *AWSModelContext) LinkToPublicSubnetInZone(zoneName string) (*awstasks.Subnet, error) {
 	var matches []*kops.ClusterSubnetSpec
-	for i := range b.Cluster.Spec.Subnets {
-		z := &b.Cluster.Spec.Subnets[i]
+	for i := range b.Cluster.Spec.Networking.Subnets {
+		z := &b.Cluster.Spec.Networking.Subnets[i]
 		if z.Zone != zoneName {
 			continue
 		}
@@ -60,8 +60,8 @@ func (b *AWSModelContext) LinkToPublicSubnetInZone(zoneName string) (*awstasks.S
 
 func (b *AWSModelContext) LinkToUtilitySubnetInZone(zoneName string) (*awstasks.Subnet, error) {
 	var matches []*kops.ClusterSubnetSpec
-	for i := range b.Cluster.Spec.Subnets {
-		s := &b.Cluster.Spec.Subnets[i]
+	for i := range b.Cluster.Spec.Networking.Subnets {
+		s := &b.Cluster.Spec.Networking.Subnets[i]
 		if s.Zone != zoneName {
 			continue
 		}
@@ -79,4 +79,28 @@ func (b *AWSModelContext) LinkToUtilitySubnetInZone(zoneName string) (*awstasks.
 	}
 
 	return b.LinkToSubnet(matches[0]), nil
+}
+func (b *AWSModelContext) LinkToPrivateSubnetsInZone(zoneName string) ([]*awstasks.Subnet, error) {
+	var matches []*kops.ClusterSubnetSpec
+	for i := range b.Cluster.Spec.Networking.Subnets {
+		s := &b.Cluster.Spec.Networking.Subnets[i]
+		if s.Zone != zoneName {
+			continue
+		}
+		if s.Type != kops.SubnetTypePrivate {
+			continue
+		}
+		matches = append(matches, s)
+	}
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("could not find private subnet in zone: %q", zoneName)
+	}
+
+	var subnets []*awstasks.Subnet
+
+	for _, match := range matches {
+		subnets = append(subnets, b.LinkToSubnet(match))
+	}
+
+	return subnets, nil
 }

@@ -1,10 +1,11 @@
-{{ if WithDefaultBool .CloudConfig.ManageStorageClasses true }}
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
   name: standard
+{{ if or (eq .CloudProvider.GCE.PDCSIDriver nil) (not (WithDefaultBool .CloudProvider.GCE.PDCSIDriver.Enabled false))}}
   annotations:
     storageclass.kubernetes.io/is-default-class: "true"
+{{ end }}
   labels:
     kubernetes.io/cluster-service: "true"
     k8s-addon: storage-gce.addons.k8s.io
@@ -12,4 +13,3 @@ metadata:
 provisioner: kubernetes.io/gce-pd
 parameters:
   type: pd-standard
-{{ end }}

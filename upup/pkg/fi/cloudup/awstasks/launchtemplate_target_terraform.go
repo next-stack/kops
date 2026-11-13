@@ -17,6 +17,10 @@ limitations under the License.
 package awstasks
 
 import (
+	"maps"
+	"slices"
+
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraform"
@@ -25,154 +29,156 @@ import (
 
 type terraformLaunchTemplateNetworkInterface struct {
 	// AssociatePublicIPAddress associates a public ip address with the network interface. Boolean value.
-	AssociatePublicIPAddress *bool `json:"associate_public_ip_address,omitempty" cty:"associate_public_ip_address"`
+	AssociatePublicIPAddress *bool `cty:"associate_public_ip_address"`
 	// DeleteOnTermination indicates whether the network interface should be destroyed on instance termination.
-	DeleteOnTermination *bool `json:"delete_on_termination,omitempty" cty:"delete_on_termination"`
+	DeleteOnTermination *bool `cty:"delete_on_termination"`
 	// Ipv6AddressCount is the number of IPv6 addresses to assign with the primary network interface.
-	Ipv6AddressCount *int64 `json:"ipv6_address_count,omitempty" cty:"ipv6_address_count"`
+	Ipv6AddressCount *int32 `cty:"ipv6_address_count"`
+	// PrimaryIPv6 is whether to assign the IPv6 address associated with ENI as the primary IPv6 address.
+	PrimaryIPv6 *bool `cty:"primary_ipv6"`
 	// SecurityGroups is a list of security group ids.
-	SecurityGroups []*terraformWriter.Literal `json:"security_groups,omitempty" cty:"security_groups"`
+	SecurityGroups []*terraformWriter.Literal `cty:"security_groups"`
 }
 
 type terraformLaunchTemplateMonitoring struct {
 	// Enabled indicates that monitoring is enabled
-	Enabled *bool `json:"enabled,omitempty" cty:"enabled"`
+	Enabled *bool `cty:"enabled"`
 }
 
 type terraformLaunchTemplatePlacement struct {
 	// Affinity is he affinity setting for an instance on a Dedicated Host.
-	Affinity *string `json:"affinity,omitempty" cty:"affinity"`
+	Affinity *string `cty:"affinity"`
 	// AvailabilityZone is the Availability Zone for the instance.
-	AvailabilityZone *string `json:"availability_zone,omitempty" cty:"availability_zone"`
+	AvailabilityZone *string `cty:"availability_zone"`
 	// GroupName is the name of the placement group for the instance.
-	GroupName *string `json:"group_name,omitempty" cty:"group_name"`
+	GroupName *string `cty:"group_name"`
 	// HostID is the ID of the Dedicated Host for the instance.
-	HostID *string `json:"host_id,omitempty" cty:"host_id"`
+	HostID *string `cty:"host_id"`
 	// SpreadDomain are reserved for future use.
-	SpreadDomain *string `json:"spread_domain,omitempty" cty:"spread_domain"`
+	SpreadDomain *string `cty:"spread_domain"`
 	// Tenancy ist he tenancy of the instance. Can be default, dedicated, or host.
-	Tenancy *string `json:"tenancy,omitempty" cty:"tenancy"`
+	Tenancy *ec2types.Tenancy `cty:"tenancy"`
 }
 
 type terraformLaunchTemplateIAMProfile struct {
 	// Name is the name of the profile
-	Name *terraformWriter.Literal `json:"name,omitempty" cty:"name"`
+	Name *terraformWriter.Literal `cty:"name"`
 }
 
 type terraformLaunchTemplateMarketOptionsSpotOptions struct {
 	// BlockDurationMinutes is required duration in minutes. This value must be a multiple of 60.
-	BlockDurationMinutes *int64 `json:"block_duration_minutes,omitempty" cty:"block_duration_minutes"`
+	BlockDurationMinutes *int32 `cty:"block_duration_minutes"`
 	// InstanceInterruptionBehavior is the behavior when a Spot Instance is interrupted. Can be hibernate, stop, or terminate
-	InstanceInterruptionBehavior *string `json:"instance_interruption_behavior,omitempty" cty:"instance_interruption_behavior"`
+	InstanceInterruptionBehavior *ec2types.InstanceInterruptionBehavior `cty:"instance_interruption_behavior"`
 	// MaxPrice is the maximum hourly price you're willing to pay for the Spot Instances
-	MaxPrice *string `json:"max_price,omitempty" cty:"max_price"`
+	MaxPrice *string `cty:"max_price"`
 	// SpotInstanceType is the Spot Instance request type. Can be one-time, or persistent
-	SpotInstanceType *string `json:"spot_instance_type,omitempty" cty:"spot_instance_type"`
+	SpotInstanceType *string `cty:"spot_instance_type"`
 	// ValidUntil is the end date of the request
-	ValidUntil *string `json:"valid_until,omitempty" cty:"valid_until"`
+	ValidUntil *string `cty:"valid_until"`
 }
 
 type terraformLaunchTemplateMarketOptions struct {
 	// MarketType is the option type
-	MarketType *string `json:"market_type,omitempty" cty:"market_type"`
+	MarketType *string `cty:"market_type"`
 	// SpotOptions are the set of options
-	SpotOptions []*terraformLaunchTemplateMarketOptionsSpotOptions `json:"spot_options,omitempty" cty:"spot_options"`
+	SpotOptions []*terraformLaunchTemplateMarketOptionsSpotOptions `cty:"spot_options"`
 }
 
 type terraformLaunchTemplateBlockDeviceEBS struct {
 	// VolumeType is the ebs type to use
-	VolumeType *string `json:"volume_type,omitempty" cty:"volume_type"`
+	VolumeType *string `cty:"volume_type"`
 	// VolumeSize is the volume size
-	VolumeSize *int64 `json:"volume_size,omitempty" cty:"volume_size"`
+	VolumeSize *int32 `cty:"volume_size"`
 	// IOPS is the provisioned IOPS
-	IOPS *int64 `json:"iops,omitempty" cty:"iops"`
+	IOPS *int32 `cty:"iops"`
 	// Throughput is the gp3 volume throughput
-	Throughput *int64 `json:"throughput,omitempty" cty:"throughput"`
+	Throughput *int32 `cty:"throughput"`
 	// DeleteOnTermination indicates the volume should die with the instance
-	DeleteOnTermination *bool `json:"delete_on_termination,omitempty" cty:"delete_on_termination"`
+	DeleteOnTermination *bool `cty:"delete_on_termination"`
 	// Encrypted indicates the device should be encrypted
-	Encrypted *bool `json:"encrypted,omitempty" cty:"encrypted"`
+	Encrypted *bool `cty:"encrypted"`
 	// KmsKeyID is the encryption key identifier for the volume
-	KmsKeyID *string `json:"kms_key_id,omitempty" cty:"kms_key_id"`
+	KmsKeyID *string `cty:"kms_key_id"`
 }
 
 type terraformLaunchTemplateBlockDevice struct {
 	// DeviceName is the name of the device
-	DeviceName *string `json:"device_name,omitempty" cty:"device_name"`
+	DeviceName *string `cty:"device_name"`
 	// VirtualName is used for the ephemeral devices
-	VirtualName *string `json:"virtual_name,omitempty" cty:"virtual_name"`
+	VirtualName *string `cty:"virtual_name"`
 	// EBS defines the ebs spec
-	EBS []*terraformLaunchTemplateBlockDeviceEBS `json:"ebs,omitempty" cty:"ebs"`
+	EBS []*terraformLaunchTemplateBlockDeviceEBS `cty:"ebs"`
 }
 
 type terraformLaunchTemplateCreditSpecification struct {
-	CPUCredits *string `json:"cpu_credits,omitempty" cty:"cpu_credits"`
+	CPUCredits *string `cty:"cpu_credits"`
 }
 
 type terraformLaunchTemplateTagSpecification struct {
 	// ResourceType is the type of resource to tag.
-	ResourceType *string `json:"resource_type,omitempty" cty:"resource_type"`
+	ResourceType *string `cty:"resource_type"`
 	// Tags are the tags to apply to the resource.
-	Tags map[string]string `json:"tags,omitempty" cty:"tags"`
+	Tags map[string]string `cty:"tags"`
 }
 
 type terraformLaunchTemplateInstanceMetadata struct {
 	// HTTPEndpoint enables or disables the HTTP metadata endpoint on instances.
-	HTTPEndpoint *string `json:"http_endpoint,omitempty" cty:"http_endpoint"`
+	HTTPEndpoint *string `cty:"http_endpoint"`
 	// HTTPPutResponseHopLimit is the desired HTTP PUT response hop limit for instance metadata requests.
-	HTTPPutResponseHopLimit *int64 `json:"http_put_response_hop_limit,omitempty" cty:"http_put_response_hop_limit"`
+	HTTPPutResponseHopLimit *int32 `cty:"http_put_response_hop_limit"`
 	// HTTPTokens is the state of token usage for your instance metadata requests.
-	HTTPTokens *string `json:"http_tokens,omitempty" cty:"http_tokens"`
+	HTTPTokens *ec2types.LaunchTemplateHttpTokensState `cty:"http_tokens"`
 	// HTTPProtocolIPv6 enables the IPv6 instance metadata endpoint
-	HTTPProtocolIPv6 *string `json:"http_protocol_ipv6,omitempty" cty:"http_protocol_ipv6"`
+	HTTPProtocolIPv6 *ec2types.LaunchTemplateInstanceMetadataProtocolIpv6 `cty:"http_protocol_ipv6"`
 }
 
 type terraformLaunchTemplate struct {
 	// Name is the name of the launch template
-	Name *string `json:"name,omitempty" cty:"name"`
+	Name *string `cty:"name"`
 	// Lifecycle is the terraform lifecycle
-	Lifecycle *terraform.Lifecycle `json:"lifecycle,omitempty" cty:"lifecycle"`
+	Lifecycle *terraform.Lifecycle `cty:"lifecycle"`
 
 	// BlockDeviceMappings is the device mappings
-	BlockDeviceMappings []*terraformLaunchTemplateBlockDevice `json:"block_device_mappings,omitempty" cty:"block_device_mappings"`
+	BlockDeviceMappings []*terraformLaunchTemplateBlockDevice `cty:"block_device_mappings"`
 	// CreditSpecification is the credit option for CPU Usage on some instance types
-	CreditSpecification *terraformLaunchTemplateCreditSpecification `json:"credit_specification,omitempty" cty:"credit_specification"`
+	CreditSpecification *terraformLaunchTemplateCreditSpecification `cty:"credit_specification"`
 	// EBSOptimized indicates if the root device is ebs optimized
-	EBSOptimized *bool `json:"ebs_optimized,omitempty" cty:"ebs_optimized"`
+	EBSOptimized *bool `cty:"ebs_optimized"`
 	// IAMInstanceProfile is the IAM profile to assign to the nodes
-	IAMInstanceProfile []*terraformLaunchTemplateIAMProfile `json:"iam_instance_profile,omitempty" cty:"iam_instance_profile"`
+	IAMInstanceProfile []*terraformLaunchTemplateIAMProfile `cty:"iam_instance_profile"`
 	// ImageID is the ami to use for the instances
-	ImageID *string `json:"image_id,omitempty" cty:"image_id"`
+	ImageID *string `cty:"image_id"`
 	// InstanceType is the type of instance
-	InstanceType *string `json:"instance_type,omitempty" cty:"instance_type"`
+	InstanceType *ec2types.InstanceType `cty:"instance_type"`
 	// KeyName is the ssh key to use
-	KeyName *terraformWriter.Literal `json:"key_name,omitempty" cty:"key_name"`
+	KeyName *terraformWriter.Literal `cty:"key_name"`
 	// MarketOptions are the spot pricing options
-	MarketOptions []*terraformLaunchTemplateMarketOptions `json:"instance_market_options,omitempty" cty:"instance_market_options"`
+	MarketOptions []*terraformLaunchTemplateMarketOptions `cty:"instance_market_options"`
 	// MetadataOptions are the instance metadata options.
-	MetadataOptions *terraformLaunchTemplateInstanceMetadata `json:"metadata_options,omitempty" cty:"metadata_options"`
+	MetadataOptions *terraformLaunchTemplateInstanceMetadata `cty:"metadata_options"`
 	// Monitoring are the instance monitoring options
-	Monitoring []*terraformLaunchTemplateMonitoring `json:"monitoring,omitempty" cty:"monitoring"`
+	Monitoring []*terraformLaunchTemplateMonitoring `cty:"monitoring"`
 	// NetworkInterfaces are the networking options
-	NetworkInterfaces []*terraformLaunchTemplateNetworkInterface `json:"network_interfaces,omitempty" cty:"network_interfaces"`
+	NetworkInterfaces []*terraformLaunchTemplateNetworkInterface `cty:"network_interfaces"`
 	// Placement are the tenancy options
-	Placement []*terraformLaunchTemplatePlacement `json:"placement,omitempty" cty:"placement"`
+	Placement []*terraformLaunchTemplatePlacement `cty:"placement"`
 	// Tags is a map of tags applied to the launch template itself
-	Tags map[string]string `json:"tags,omitempty" cty:"tags"`
+	Tags map[string]string `cty:"tags"`
 	// TagSpecifications are the tags to apply to a resource when it is created.
-	TagSpecifications []*terraformLaunchTemplateTagSpecification `json:"tag_specifications,omitempty" cty:"tag_specifications"`
+	TagSpecifications []*terraformLaunchTemplateTagSpecification `cty:"tag_specifications"`
 	// UserData is the user data for the instances
-	UserData *terraformWriter.Literal `json:"user_data,omitempty" cty:"user_data"`
+	UserData *terraformWriter.Literal `cty:"user_data"`
 }
 
 // TerraformLink returns the terraform reference
 func (t *LaunchTemplate) TerraformLink() *terraformWriter.Literal {
-	return terraformWriter.LiteralProperty("aws_launch_template", fi.StringValue(t.Name), "id")
+	return terraformWriter.LiteralProperty("aws_launch_template", fi.ValueOf(t.Name), "id")
 }
 
 // VersionLink returns the terraform version reference
 func (t *LaunchTemplate) VersionLink() *terraformWriter.Literal {
-	return terraformWriter.LiteralProperty("aws_launch_template", fi.StringValue(t.Name), "latest_version")
+	return terraformWriter.LiteralProperty("aws_launch_template", fi.ValueOf(t.Name), "latest_version")
 }
 
 // RenderTerraform is responsible for rendering the terraform json
@@ -183,7 +189,7 @@ func (t *LaunchTemplate) RenderTerraform(target *terraform.TerraformTarget, a, e
 
 	var image *string
 	if e.ImageID != nil {
-		im, err := cloud.ResolveImage(fi.StringValue(e.ImageID))
+		im, err := cloud.ResolveImage(fi.ValueOf(e.ImageID))
 		if err != nil {
 			return err
 		}
@@ -195,10 +201,10 @@ func (t *LaunchTemplate) RenderTerraform(target *terraform.TerraformTarget, a, e
 		EBSOptimized: e.RootVolumeOptimization,
 		ImageID:      image,
 		InstanceType: e.InstanceType,
-		Lifecycle:    &terraform.Lifecycle{CreateBeforeDestroy: fi.Bool(true)},
+		Lifecycle:    &terraform.Lifecycle{CreateBeforeDestroy: new(true)},
 		MetadataOptions: &terraformLaunchTemplateInstanceMetadata{
 			// See issue https://github.com/hashicorp/terraform-provider-aws/issues/12564.
-			HTTPEndpoint:            fi.String("enabled"),
+			HTTPEndpoint:            new("enabled"),
 			HTTPTokens:              e.HTTPTokens,
 			HTTPPutResponseHopLimit: e.HTTPPutResponseHopLimit,
 			HTTPProtocolIPv6:        e.HTTPProtocolIPv6,
@@ -206,28 +212,27 @@ func (t *LaunchTemplate) RenderTerraform(target *terraform.TerraformTarget, a, e
 		NetworkInterfaces: []*terraformLaunchTemplateNetworkInterface{
 			{
 				AssociatePublicIPAddress: e.AssociatePublicIP,
-				DeleteOnTermination:      fi.Bool(true),
+				DeleteOnTermination:      new(true),
 				Ipv6AddressCount:         e.IPv6AddressCount,
+				PrimaryIPv6:              e.PrimaryIPv6,
 			},
 		},
 	}
 
-	if fi.StringValue(e.SpotPrice) != "" {
-		marketSpotOptions := terraformLaunchTemplateMarketOptionsSpotOptions{MaxPrice: e.SpotPrice}
-		if e.SpotDurationInMinutes != nil {
-			marketSpotOptions.BlockDurationMinutes = e.SpotDurationInMinutes
-		}
-		if e.InstanceInterruptionBehavior != nil {
-			marketSpotOptions.InstanceInterruptionBehavior = e.InstanceInterruptionBehavior
+	if fi.ValueOf(e.SpotPrice) != "" {
+		marketSpotOptions := terraformLaunchTemplateMarketOptionsSpotOptions{
+			BlockDurationMinutes:         e.SpotDurationInMinutes,
+			InstanceInterruptionBehavior: e.InstanceInterruptionBehavior,
+			MaxPrice:                     e.SpotPrice,
 		}
 		tf.MarketOptions = []*terraformLaunchTemplateMarketOptions{
 			{
-				MarketType:  fi.String("spot"),
+				MarketType:  new("spot"),
 				SpotOptions: []*terraformLaunchTemplateMarketOptionsSpotOptions{&marketSpotOptions},
 			},
 		}
 	}
-	if fi.StringValue(e.CPUCredits) != "" {
+	if fi.ValueOf(e.CPUCredits) != "" {
 		tf.CreditSpecification = &terraformLaunchTemplateCreditSpecification{
 			CPUCredits: e.CPUCredits,
 		}
@@ -257,75 +262,80 @@ func (t *LaunchTemplate) RenderTerraform(target *terraform.TerraformTarget, a, e
 			return err
 		}
 		if d != nil {
-			tf.UserData, err = target.AddFileBytes("aws_launch_template", fi.StringValue(e.Name), "user_data", d, true)
+			tf.UserData, err = target.AddFileBytes("aws_launch_template", fi.ValueOf(e.Name), "user_data", d, true)
 			if err != nil {
 				return err
 			}
 		}
 	}
+
 	devices, err := e.buildRootDevice(cloud)
 	if err != nil {
 		return err
 	}
-	for n, x := range devices {
-		tf.BlockDeviceMappings = append(tf.BlockDeviceMappings, &terraformLaunchTemplateBlockDevice{
-			DeviceName: fi.String(n),
-			EBS: []*terraformLaunchTemplateBlockDeviceEBS{
-				{
-					DeleteOnTermination: fi.Bool(true),
-					Encrypted:           x.EbsEncrypted,
-					KmsKeyID:            x.EbsKmsKey,
-					IOPS:                x.EbsVolumeIops,
-					Throughput:          x.EbsVolumeThroughput,
-					VolumeSize:          x.EbsVolumeSize,
-					VolumeType:          x.EbsVolumeType,
-				},
-			},
-		})
+
+	devicesKeys := slices.Sorted(maps.Keys(devices))
+	for _, key := range devicesKeys {
+		terraformLaunchTemplateBlockDevice := createTerraformLaunchTemplateBlockDevice(key, devices[key])
+		tf.BlockDeviceMappings = append(tf.BlockDeviceMappings, terraformLaunchTemplateBlockDevice)
 	}
+
 	additionals, err := buildAdditionalDevices(e.BlockDeviceMappings)
 	if err != nil {
 		return err
 	}
-	for n, x := range additionals {
-		tf.BlockDeviceMappings = append(tf.BlockDeviceMappings, &terraformLaunchTemplateBlockDevice{
-			DeviceName: fi.String(n),
-			EBS: []*terraformLaunchTemplateBlockDeviceEBS{
-				{
-					DeleteOnTermination: fi.Bool(true),
-					Encrypted:           x.EbsEncrypted,
-					IOPS:                x.EbsVolumeIops,
-					Throughput:          x.EbsVolumeThroughput,
-					KmsKeyID:            x.EbsKmsKey,
-					VolumeSize:          x.EbsVolumeSize,
-					VolumeType:          x.EbsVolumeType,
-				},
-			},
-		})
+
+	additionalsKeys := slices.Sorted(maps.Keys(additionals))
+	for _, key := range additionalsKeys {
+		terraformLaunchTemplateBlockDevice := createTerraformLaunchTemplateBlockDevice(key, additionals[key])
+		tf.BlockDeviceMappings = append(tf.BlockDeviceMappings, terraformLaunchTemplateBlockDevice)
 	}
 
-	devices, err = buildEphemeralDevices(cloud, fi.StringValue(e.InstanceType))
+	devices, err = buildEphemeralDevices(cloud, fi.ValueOf(e.InstanceType))
 	if err != nil {
 		return err
 	}
-	for n, x := range devices {
+
+	devicesKeys = slices.Sorted(maps.Keys(devices))
+	for _, key := range devicesKeys {
 		tf.BlockDeviceMappings = append(tf.BlockDeviceMappings, &terraformLaunchTemplateBlockDevice{
-			VirtualName: x.VirtualName,
-			DeviceName:  fi.String(n),
+			VirtualName: devices[key].VirtualName,
+			DeviceName:  new(key),
 		})
 	}
 
 	if e.Tags != nil {
 		tf.TagSpecifications = append(tf.TagSpecifications, &terraformLaunchTemplateTagSpecification{
-			ResourceType: fi.String("instance"),
+			ResourceType: new("instance"),
 			Tags:         e.Tags,
 		})
 		tf.TagSpecifications = append(tf.TagSpecifications, &terraformLaunchTemplateTagSpecification{
-			ResourceType: fi.String("volume"),
+			ResourceType: new("volume"),
+			Tags:         e.Tags,
+		})
+		tf.TagSpecifications = append(tf.TagSpecifications, &terraformLaunchTemplateTagSpecification{
+			ResourceType: new("network-interface"),
 			Tags:         e.Tags,
 		})
 		tf.Tags = e.Tags
 	}
 
-	return target.RenderResource("aws_launch_template", fi.StringValue(e.Name), tf)
+	return target.RenderResource("aws_launch_template", fi.ValueOf(e.Name), tf)
+}
+
+func createTerraformLaunchTemplateBlockDevice(deviceName string, v *BlockDeviceMapping) *terraformLaunchTemplateBlockDevice {
+	return &terraformLaunchTemplateBlockDevice{
+		DeviceName: new(deviceName),
+		EBS: []*terraformLaunchTemplateBlockDeviceEBS{
+			{
+				DeleteOnTermination: new(true),
+				Encrypted:           v.EbsEncrypted,
+				KmsKeyID:            v.EbsKmsKey,
+				IOPS:                v.EbsVolumeIops,
+				Throughput:          v.EbsVolumeThroughput,
+				VolumeSize:          v.EbsVolumeSize,
+				VolumeType:          new(string(v.EbsVolumeType)),
+			},
+		},
+	}
 }

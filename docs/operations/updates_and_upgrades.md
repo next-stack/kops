@@ -34,6 +34,12 @@ sudo mv ./kops /usr/local/bin/
 
 You can also rerun [these steps](../contributing/building.md) if previously built from source.
 
+You may want to run below commands to include fixes/features after updating kOps
+```
+kops update cluster $NAME --yes
+kops rolling-update cluster $NAME --yes
+```
+
 ## Upgrading Kubernetes
 
 Upgrading Kubernetes is easy with kOps. The cluster spec contains a `kubernetesVersion`, so you can simply edit it with `kops edit`, and apply the updated configuration to your cluster.
@@ -56,10 +62,23 @@ It is recommended to run the latest version of kOps to ensure compatibility with
 In future the upgrade step will likely perform the update immediately (and possibly even without a
 node restart), but currently you must:
 
+For kOps 1.31 and newer, run `kops reconcile cluster $NAME --yes`
+
+For older kOps versions, run: 
 * `kops update cluster $NAME` to preview, then `kops update cluster $NAME --yes`
 * `kops rolling-update cluster $NAME` to preview, then `kops rolling-update cluster $NAME --yes`
 
+For more detail about the command change in kOps 1.31, see [docs/tutorial/upgrading-kubernetes.md](/docs/tutorial/upgrading-kubernetes.md).
+
 Upgrade uses the latest Kubernetes version considered stable by kOps, defined in `https://github.com/kubernetes/kops/blob/master/channels/stable`.
+
+### Custom API connections
+
+Use `--use-kubeconfig` with `kops update cluster` or `kops reconcile cluster` to use the local kubeconfig context named for the cluster, including its authentication, TLS and proxy settings. `--api-server` overrides the endpoint used for API requests, including the control plane version check.
+
+With `kops update cluster --use-kubeconfig`, automatic kubeconfig export is disabled by default so that custom connection settings are preserved. To intentionally export configuration, specify `--create-kube-config=true`. As before, `--admin`, `--user` and `--internal` also imply export, even when `--create-kube-config=false` is supplied. An export can overwrite the existing endpoint and TLS settings. Reconcile does not export kubeconfig.
+
+Without `--use-kubeconfig`, API connections are generated from the cluster state and do not require a local kubeconfig. If the control plane version check fails, update retains its existing behavior of assuming the configured Kubernetes version; this permits initial cluster creation before the API is available.
 
 
 ### Terraform Users

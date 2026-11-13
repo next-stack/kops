@@ -17,10 +17,11 @@ limitations under the License.
 package aws
 
 import (
+	"context"
 	"fmt"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/eventbridge"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/eventbridge"
 	"k8s.io/klog/v2"
 
 	"k8s.io/kops/pkg/resources"
@@ -39,42 +40,48 @@ func DumpEventBridgeRule(op *resources.DumpOperation, r *resources.Resource) err
 	return nil
 }
 
-func DeleteEventBridgeRule(cloud fi.Cloud, r *resources.Resource) error {
+func EventBridgeRuleDeleter(cloud fi.Cloud, r *resources.Resource) error {
+	return DeleteEventBridgeRule(cloud, r.Name)
+}
+
+func DeleteEventBridgeRule(cloud fi.Cloud, ruleName string) error {
+	ctx := context.TODO()
 	c := cloud.(awsup.AWSCloud)
 
-	targets, err := c.EventBridge().ListTargetsByRule(&eventbridge.ListTargetsByRuleInput{
-		Rule: aws.String(r.Name),
+	targets, err := c.EventBridge().ListTargetsByRule(ctx, &eventbridge.ListTargetsByRuleInput{
+		Rule: aws.String(ruleName),
 	})
 	if err != nil {
-		return fmt.Errorf("error listing targets for EventBridge rule %q: %v", r.Name, err)
+		return fmt.Errorf("listing targets for EventBridge rule %q: %w", ruleName, err)
 	}
 	if len(targets.Targets) > 0 {
-		var ids []*string
+		var ids []string
 		for _, target := range targets.Targets {
-			ids = append(ids, target.Id)
+			ids = append(ids, aws.ToString(target.Id))
 		}
-		klog.V(2).Infof("Removing EventBridge Targets for rule %q", r.Name)
-		_, err = c.EventBridge().RemoveTargets(&eventbridge.RemoveTargetsInput{
+		klog.V(2).Infof("Removing EventBridge Targets for rule %q", ruleName)
+		_, err = c.EventBridge().RemoveTargets(ctx, &eventbridge.RemoveTargetsInput{
 			Ids:  ids,
-			Rule: aws.String(r.Name),
+			Rule: aws.String(ruleName),
 		})
 		if err != nil {
-			return fmt.Errorf("error removing targets for EventBridge rule %q: %v", r.Name, err)
+			return fmt.Errorf("removing targets for EventBridge rule %q: %w", ruleName, err)
 		}
 	}
 
-	klog.V(2).Infof("Deleting EventBridge rule %q", r.Name)
+	klog.V(2).Infof("Deleting EventBridge rule %q", ruleName)
 	request := &eventbridge.DeleteRuleInput{
-		Name: aws.String(r.Name),
+		Name: aws.String(ruleName),
 	}
-	_, err = c.EventBridge().DeleteRule(request)
+	_, err = c.EventBridge().DeleteRule(ctx, request)
 	if err != nil {
-		return fmt.Errorf("error deleting EventBridge rule %q: %v", r.Name, err)
+		return fmt.Errorf("deleting EventBridge rule %q: %w", ruleName, err)
 	}
 	return nil
 }
 
-func ListEventBridgeRules(cloud fi.Cloud, clusterName string) ([]*resources.Resource, error) {
+func ListEventBridgeRules(cloud fi.Cloud, vpcID, clusterName string) ([]*resources.Resource, error) {
+	ctx := context.TODO()
 	c := cloud.(awsup.AWSCloud)
 
 	klog.V(2).Infof("Listing EventBridge rules")
@@ -86,7 +93,7 @@ func ListEventBridgeRules(cloud fi.Cloud, clusterName string) ([]*resources.Reso
 		Limit:        nil,
 		NamePrefix:   aws.String(clusterNamePrefix),
 	}
-	response, err := c.EventBridge().ListRules(request)
+	response, err := c.EventBridge().ListRules(ctx, request)
 	if err != nil {
 		return nil, fmt.Errorf("error listing Eventbridge rules: %v", err)
 	}
@@ -100,8 +107,8 @@ func ListEventBridgeRules(cloud fi.Cloud, clusterName string) ([]*resources.Reso
 		resourceTracker := &resources.Resource{
 			Name:    *rule.Name,
 			ID:      *rule.Name,
-			Type:    "eventbridge",
-			Deleter: DeleteEventBridgeRule,
+			Type:    TypeEventBridgeRule,
+			Deleter: EventBridgeRuleDeleter,
 			Dumper:  DumpEventBridgeRule,
 			Obj:     rule,
 		}

@@ -17,9 +17,12 @@ limitations under the License.
 package pki
 
 import (
+	"context"
+	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"math/big"
 	"net"
 	"os"
 	"testing"
@@ -38,7 +41,8 @@ type mockKeystore struct {
 	invoked bool
 }
 
-func (m *mockKeystore) FindPrimaryKeypair(name string) (*Certificate, *PrivateKey, error) {
+// FindPrimaryKeypair implements Keystore
+func (m *mockKeystore) FindPrimaryKeypair(ctx context.Context, name string) (*Certificate, *PrivateKey, error) {
 	assert.False(m.t, m.invoked, "invoked already")
 	m.invoked = true
 	assert.Equal(m.t, m.signer, name, "name argument")
@@ -46,19 +50,35 @@ func (m *mockKeystore) FindPrimaryKeypair(name string) (*Certificate, *PrivateKe
 }
 
 func TestIssueCert(t *testing.T) {
-
 	origSize := os.Getenv("KOPS_RSA_PRIVATE_KEY_SIZE")
 	os.Unsetenv("KOPS_RSA_PRIVATE_KEY_SIZE")
 	defer func() {
 		os.Setenv("KOPS_RSA_PRIVATE_KEY_SIZE", origSize)
 	}()
 
-	caCertificate, err := ParsePEMCertificate([]byte("-----BEGIN CERTIFICATE-----\nMIIBRjCB8aADAgECAhAzhRMOcwfggPtgZNIOFU19MA0GCSqGSIb3DQEBCwUAMBIx\nEDAOBgNVBAMTB1Rlc3QgQ0EwHhcNMjAwNTE1MDIzNjI0WhcNMzAwNTE1MDIzNjI0\nWjASMRAwDgYDVQQDEwdUZXN0IENBMFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBAM/S\ncagGaiDA3jJWBXUr8rM19TWLA65jK/iA05FCsmQbyvETs5gbJdBfnhQp8wkKFlkt\nKxZ34k3wQUzoB1lv8/kCAwEAAaMjMCEwDgYDVR0PAQH/BAQDAgEGMA8GA1UdEwEB\n/wQFMAMBAf8wDQYJKoZIhvcNAQELBQADQQCDOxvs58AVAWgWLtD3Obvy7XXsKx6d\nMzg9epbiQchLE4G/jlbgVu7vwh8l5XFNfQooG6stCU7pmLFXkXzkJQxr\n-----END CERTIFICATE-----\n"))
+	// Generate a new RSA key pair using rsa.GenerateKey
+	caKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)
-	caPrivateKey, err := ParsePEMPrivateKey([]byte("-----BEGIN RSA PRIVATE KEY-----\nMIIBPAIBAAJBAM/ScagGaiDA3jJWBXUr8rM19TWLA65jK/iA05FCsmQbyvETs5gb\nJdBfnhQp8wkKFlktKxZ34k3wQUzoB1lv8/kCAwEAAQJBAJzXQZeBX87gP9DVQsEv\nLbc6XZjPFTQi/ChLcWALaf5J7drFJHUcWbKIHzOmM3fm3lQlb/1IcwOBU5cTY0e9\nBVECIQD73kxOWWAIzKqMOvFZ9s79Et7G1HUMnVAVKJ1NS1uvYwIhANM7LULdi0YD\nbcHvDl3+Msj4cPH7CXAJFyPWaQZPlXPzAiEAhDg6jpbUl0n57guzT6sFFk2lrXMy\nzyB2PeVITp9UzkkCIEpcF7flQ+U2ycmuvVELbpdfFmupIw5ktNex4DEPjR5PAiEA\n68vR1L1Kaja/GzU76qAQaYA/V1Ag4sPmOQdEaVZKu78=\n-----END RSA PRIVATE KEY-----\n"))
+
+	// Create pki.PrivateKey wrapper for CA key
+	caPrivateKey := &PrivateKey{Key: caKey}
+
+	// Create the CA
+	caTemplate := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "Test CA"},
+		NotBefore:             time.Now(),
+		NotAfter:              time.Now().Add(10 * 365 * 24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+
+	caCertDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, &caKey.PublicKey, caKey)
 	require.NoError(t, err)
-	privateKey, err := ParsePEMPrivateKey([]byte("-----BEGIN RSA PRIVATE KEY-----\nMIIBOQIBAAJBANgL5cR2cLOB7oZZTiuiUmMwQRBaia8yLULt+XtBtDHf0lPOrn78\nvLPh7P7zRBgHczbTddcsg68g9vAfb9TC5M8CAwEAAQJAJytxCv+WS1VhU4ZZf9u8\nKDOVeEuR7uuf/SR8OPaenvPqONpYbZSVjnWnRBRHvg3HaHchQqH32UljZUojs9z4\nEQIhAO/yoqCFckfqswOGwWyYX1oNOtU8w9ulXlZqAtZieavVAiEA5n/tKHoZyx3U\nbZcks/wns1WqhAoSmDJpMyVXOVrUlBMCIDGnalQBiYasYOMn7bsFRSYjertJ2dYI\nQJ9tTK0Er90JAiAmpVQx8SbZ80pmhWzV8HUHkFligf3UHr+cn6ocJ6p0mQIgB728\npdvrS5zRPoUN8BHfWOZcPrElKTuJjP2kH6eNPvI=\n-----END RSA PRIVATE KEY-----"))
+	caCert, err := x509.ParseCertificate(caCertDER)
 	require.NoError(t, err)
+	caCertificate := &Certificate{Certificate: caCert}
 
 	for _, tc := range []struct {
 		name                string
@@ -114,7 +134,7 @@ func TestIssueCert(t *testing.T) {
 					CommonName: "Test client/server",
 				},
 				AlternateNames: []string{"*.internal.test.cluster.local", "localhost", "127.0.0.1"},
-				PrivateKey:     privateKey,
+				PrivateKey:     caPrivateKey,
 			},
 			expectedKeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
 			expectedExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
@@ -130,7 +150,7 @@ func TestIssueCert(t *testing.T) {
 					CommonName: "Test server",
 				},
 				AlternateNames: []string{"*.internal.test.cluster.local", "localhost", "127.0.0.1"},
-				PrivateKey:     privateKey,
+				PrivateKey:     caPrivateKey,
 			},
 			expectedKeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
 			expectedExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
@@ -140,6 +160,8 @@ func TestIssueCert(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.TODO()
+
 			var minExpectedValidity int64
 			if tc.req.Validity == 0 {
 				minExpectedValidity = time.Now().Add(time.Hour * 10 * 365 * 24).Unix()
@@ -157,7 +179,7 @@ func TestIssueCert(t *testing.T) {
 					key:    caPrivateKey,
 				}
 			}
-			certificate, key, caCert, err := IssueCert(&tc.req, keystore)
+			certificate, key, caCert, err := IssueCert(ctx, &tc.req, keystore)
 			require.NoError(t, err)
 
 			cert := certificate.Certificate
@@ -220,5 +242,4 @@ func TestIssueCert(t *testing.T) {
 			assert.LessOrEqual(t, cert.NotAfter.Unix(), maxExpectedValidity, "NotAfter")
 		})
 	}
-
 }

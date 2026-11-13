@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"k8s.io/kops/upup/pkg/fi/utils"
+	"sigs.k8s.io/yaml"
 )
 
 // ParseInstanceGroupRole converts a string to an InstanceGroupRole.
@@ -33,10 +34,10 @@ func ParseInstanceGroupRole(input string, lenient bool) (InstanceGroupRole, bool
 		// Accept pluralized "bastions" for "bastion"
 		findRole = strings.TrimSuffix(findRole, "s")
 	}
+	findRole = strings.Replace(findRole, "controlplane", "control-plane", 1)
 
 	for _, role := range AllInstanceGroupRoles {
-		s := string(role)
-		s = strings.ToLower(s)
+		s := role.ToLowerString()
 		if lenient {
 			s = strings.TrimSuffix(s, "s")
 		}
@@ -44,19 +45,23 @@ func ParseInstanceGroupRole(input string, lenient bool) (InstanceGroupRole, bool
 			return role, true
 		}
 	}
+
+	if lenient && strings.ToLower(findRole) == "master" {
+		return InstanceGroupRoleControlPlane, true
+	}
+
 	return "", false
 }
 
 // ParseRawYaml parses an object just using yaml, without the full api machinery
-// Deprecated: prefer using the API machinery
+// Deprecated: prefer using the API machinery (package kopscodecs)
 func ParseRawYaml(data []byte, dest interface{}) error {
-
 	// Yaml can't parse empty strings
 	configString := string(data)
 	configString = strings.TrimSpace(configString)
 
 	if configString != "" {
-		err := utils.YamlUnmarshal([]byte(configString), dest)
+		err := yaml.Unmarshal([]byte(configString), dest, yaml.DisallowUnknownFields)
 		if err != nil {
 			return fmt.Errorf("error parsing configuration: %v", err)
 		}
@@ -66,7 +71,7 @@ func ParseRawYaml(data []byte, dest interface{}) error {
 }
 
 // ToRawYaml marshals an object to yaml, without the full api machinery
-// Deprecated: prefer using the API machinery
+// Deprecated: prefer using the API machinery (package kopscodecs)
 func ToRawYaml(obj interface{}) ([]byte, error) {
 	data, err := utils.YamlMarshal(obj)
 	if err != nil {

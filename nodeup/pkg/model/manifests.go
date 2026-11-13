@@ -31,18 +31,20 @@ type ManifestsBuilder struct {
 	*NodeupModelContext
 }
 
-var _ fi.ModelBuilder = &ManifestsBuilder{}
+var _ fi.NodeupModelBuilder = &ManifestsBuilder{}
 
 // Build creates tasks for copying the manifests
-func (b *ManifestsBuilder) Build(c *fi.ModelBuilderContext) error {
+func (b *ManifestsBuilder) Build(c *fi.NodeupModelBuilderContext) error {
+	ctx := c.Context()
+
 	// Write etcd manifests (currently etcd <=> master)
-	if b.IsMaster {
+	if b.IsMaster || b.BootConfig.InstanceGroupRole.HasEtcd() {
 		for _, manifest := range b.NodeupConfig.EtcdManifests {
 			p, err := vfs.Context.BuildVfsPath(manifest)
 			if err != nil {
 				return fmt.Errorf("error parsing path for etcd manifest %s: %v", manifest, err)
 			}
-			data, err := p.ReadFile()
+			data, err := p.ReadFile(ctx)
 			if err != nil {
 				return fmt.Errorf("error reading etcd manifest %s: %v", manifest, err)
 			}

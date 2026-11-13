@@ -33,6 +33,7 @@ import (
 	"k8s.io/kops/pkg/commands/commandutils"
 	"k8s.io/kops/pkg/kopscodecs"
 	"k8s.io/kops/util/pkg/tables"
+	"k8s.io/kops/util/pkg/vfs"
 	"k8s.io/kubectl/pkg/util/i18n"
 	"k8s.io/kubectl/pkg/util/templates"
 )
@@ -108,7 +109,7 @@ func NewCmdGetCluster(f *util.Factory, out io.Writer, getOptions *GetOptions) *c
 		},
 		ValidArgsFunction: commandutils.CompleteClusterName(f, false, true),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return RunGetClusters(context.TODO(), f, out, &options)
+			return RunGetClusters(cmd.Context(), f, out, &options)
 		},
 	}
 
@@ -118,22 +119,16 @@ func NewCmdGetCluster(f *util.Factory, out io.Writer, getOptions *GetOptions) *c
 }
 
 func RunGetClusters(ctx context.Context, f commandutils.Factory, out io.Writer, options *GetClusterOptions) error {
-	client, err := f.Clientset()
+	client, err := f.KopsClient()
 	if err != nil {
 		return err
 	}
 
+	singleClusterSelected := false
 	var clusterList []*kopsapi.Cluster
-	if len(options.ClusterNames) != 1 {
-		list, err := client.ListClusters(ctx, metav1.ListOptions{})
-		if err != nil {
-			return err
-		}
-		for i := range list.Items {
-			clusterList = append(clusterList, &list.Items[i])
-		}
-	} else {
+	if len(options.ClusterNames) == 1 {
 		// Optimization - avoid fetching all clusters if we're only querying one
+		singleClusterSelected = true
 		cluster, err := client.GetCluster(ctx, options.ClusterNames[0])
 		if err != nil {
 			if !apierrors.IsNotFound(err) {
@@ -141,6 +136,14 @@ func RunGetClusters(ctx context.Context, f commandutils.Factory, out io.Writer, 
 			}
 		} else {
 			clusterList = append(clusterList, cluster)
+		}
+	} else {
+		list, err := client.ListClusters(ctx, metav1.ListOptions{})
+		if err != nil {
+			return err
+		}
+		for i := range list.Items {
+			clusterList = append(clusterList, &list.Items[i])
 		}
 	}
 
@@ -155,7 +158,7 @@ func RunGetClusters(ctx context.Context, f commandutils.Factory, out io.Writer, 
 
 	if options.FullSpec {
 		var err error
-		clusters, err = fullClusterSpecs(clusters)
+		clusters, err = fullClusterSpecs(ctx, client.VFSContext(), clusters)
 		if err != nil {
 			return err
 		}
@@ -176,9 +179,13 @@ func RunGetClusters(ctx context.Context, f commandutils.Factory, out io.Writer, 
 	case OutputYaml:
 		return fullOutputYAML(out, obj...)
 	case OutputJSON:
-		return fullOutputJSON(out, obj...)
+		// if singleClusterSelected is true, only a single object is returned
+		// otherwise to keep it consistent, always returns an array.
+		// Ex: kops get clusters -ojson should will always return an array (even if 1 cluster is available)
+		// kops get cluster test.example.com -o json will return a single object (since a specific cluster is selected)
+		return fullOutputJSON(out, singleClusterSelected, obj...)
 	default:
-		return fmt.Errorf("Unknown output format: %q", options.Output)
+		return fmt.Errorf("unknown output format: %q", options.Output)
 	}
 }
 
@@ -212,11 +219,11 @@ func clusterOutputTable(clusters []*kopsapi.Cluster, out io.Writer) error {
 		return c.ObjectMeta.Name
 	})
 	t.AddColumn("CLOUD", func(c *kopsapi.Cluster) string {
-		return c.Spec.CloudProvider
+		return string(c.GetCloudProvider())
 	})
 	t.AddColumn("ZONES", func(c *kopsapi.Cluster) string {
 		zones := sets.NewString()
-		for _, s := range c.Spec.Subnets {
+		for _, s := range c.Spec.Networking.Subnets {
 			if s.Zone != "" {
 				zones.Insert(s.Zone)
 			}
@@ -227,12 +234,10 @@ func clusterOutputTable(clusters []*kopsapi.Cluster, out io.Writer) error {
 	return t.Render(clusters, out, "NAME", "CLOUD", "ZONES")
 }
 
-// fullOutputJson outputs the marshalled JSON of a list of clusters and instance groups.  It will handle
+// fullOutputJSON outputs the marshalled JSON of a list of clusters and instance groups.  It will handle
 // nils for clusters and instanceGroups slices.
-func fullOutputJSON(out io.Writer, args ...runtime.Object) error {
-	argsLen := len(args)
-
-	if argsLen > 1 {
+func fullOutputJSON(out io.Writer, singleObject bool, args ...runtime.Object) error {
+	if !singleObject {
 		if _, err := fmt.Fprint(out, "["); err != nil {
 			return err
 		}
@@ -249,7 +254,7 @@ func fullOutputJSON(out io.Writer, args ...runtime.Object) error {
 		}
 	}
 
-	if argsLen > 1 {
+	if !singleObject {
 		if _, err := fmt.Fprint(out, "]"); err != nil {
 			return err
 		}
@@ -258,7 +263,7 @@ func fullOutputJSON(out io.Writer, args ...runtime.Object) error {
 	return nil
 }
 
-// fullOutputJson outputs the marshalled JSON of a list of clusters and instance groups.  It will handle
+// fullOutputYAML outputs the marshalled JSON of a list of clusters and instance groups.  It will handle
 // nils for clusters and instanceGroups slices.
 func fullOutputYAML(out io.Writer, args ...runtime.Object) error {
 	for i, obj := range args {
@@ -274,15 +279,15 @@ func fullOutputYAML(out io.Writer, args ...runtime.Object) error {
 	return nil
 }
 
-func fullClusterSpecs(clusters []*kopsapi.Cluster) ([]*kopsapi.Cluster, error) {
+func fullClusterSpecs(ctx context.Context, vfsContext *vfs.VFSContext, clusters []*kopsapi.Cluster) ([]*kopsapi.Cluster, error) {
 	var fullSpecs []*kopsapi.Cluster
 	for _, cluster := range clusters {
-		configBase, err := registry.ConfigBase(cluster)
+		configBase, err := registry.ConfigBase(vfsContext, cluster)
 		if err != nil {
 			return nil, fmt.Errorf("error reading full cluster spec for %q: %v", cluster.ObjectMeta.Name, err)
 		}
 		configPath := configBase.Join(registry.PathClusterCompleted)
-		b, err := configPath.ReadFile()
+		b, err := configPath.ReadFile(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("error loading Cluster %q: %v", configPath, err)
 		}

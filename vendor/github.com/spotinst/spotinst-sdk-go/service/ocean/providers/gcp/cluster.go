@@ -46,20 +46,24 @@ type Cluster struct {
 }
 
 type Strategy struct {
-	DrainingTimeout *int `json:"drainingTimeout,omitempty"`
+	DrainingTimeout          *int    `json:"drainingTimeout,omitempty"`
+	ProvisioningModel        *string `json:"provisioningModel,omitempty"`
+	PreemptiblePercentage    *int    `json:"preemptiblePercentage,omitempty"`
+	ShouldUtilizeCommitments *bool   `json:"shouldUtilizeCommitments,omitempty"`
 
 	forceSendFields []string
 	nullFields      []string
 }
 
 type AutoScaler struct {
-	IsEnabled              *bool                     `json:"isEnabled,omitempty"`
-	IsAutoConfig           *bool                     `json:"isAutoConfig,omitempty"`
-	Cooldown               *int                      `json:"cooldown,omitempty"`
-	AutoHeadroomPercentage *int                      `json:"autoHeadroomPercentage,omitempty"`
-	Headroom               *AutoScalerHeadroom       `json:"headroom,omitempty"`
-	ResourceLimits         *AutoScalerResourceLimits `json:"resourceLimits,omitempty"`
-	Down                   *AutoScalerDown           `json:"down,omitempty"`
+	IsEnabled                        *bool                     `json:"isEnabled,omitempty"`
+	IsAutoConfig                     *bool                     `json:"isAutoConfig,omitempty"`
+	Cooldown                         *int                      `json:"cooldown,omitempty"`
+	AutoHeadroomPercentage           *int                      `json:"autoHeadroomPercentage,omitempty"`
+	Headroom                         *AutoScalerHeadroom       `json:"headroom,omitempty"`
+	ResourceLimits                   *AutoScalerResourceLimits `json:"resourceLimits,omitempty"`
+	Down                             *AutoScalerDown           `json:"down,omitempty"`
+	EnableAutomaticAndManualHeadroom *bool                     `json:"enableAutomaticAndManualHeadroom,omitempty"`
 
 	forceSendFields []string
 	nullFields      []string
@@ -139,10 +143,27 @@ type ShutdownHours struct {
 }
 
 type Task struct {
-	IsEnabled           *bool   `json:"isEnabled,omitempty"`
-	Type                *string `json:"taskType,omitempty"`
-	CronExpression      *string `json:"cronExpression,omitempty"`
-	BatchSizePercentage *int    `json:"batchSizePercentage,omitempty"`
+	IsEnabled      *bool       `json:"isEnabled,omitempty"`
+	Type           *string     `json:"taskType,omitempty"`
+	CronExpression *string     `json:"cronExpression,omitempty"`
+	Parameters     *Parameters `json:"parameters,omitempty"`
+
+	forceSendFields []string
+	nullFields      []string
+}
+
+type Parameters struct {
+	ClusterRoll *ClusterRoll `json:"clusterRoll,omitempty"`
+
+	forceSendFields []string
+	nullFields      []string
+}
+
+type ClusterRoll struct {
+	BatchMinHealthyPercentage *int    `json:"batchMinHealthyPercentage,omitempty"`
+	BatchSizePercentage       *int    `json:"batchSizePercentage,omitempty"`
+	Comment                   *string `json:"comment,omitempty"`
+	RespectPdb                *bool   `json:"respectPdb,omitempty"`
 
 	forceSendFields []string
 	nullFields      []string
@@ -158,19 +179,31 @@ type GKE struct {
 
 type InstanceTypes struct {
 	Whitelist []string `json:"whitelist,omitempty"`
+	Blacklist []string `json:"blacklist,omitempty"`
 
 	forceSendFields []string
 	nullFields      []string
 }
 
 type LaunchSpecification struct {
-	Labels             []*Label    `json:"labels,omitempty"`
-	IPForwarding       *bool       `json:"ipForwarding,omitempty"`
-	Metadata           []*Metadata `json:"metadata,omitempty"`
-	RootVolumeSizeInGB *int        `json:"rootVolumeSizeInGb,omitempty"`
-	ServiceAccount     *string     `json:"serviceAccount,omitempty"`
-	SourceImage        *string     `json:"sourceImage,omitempty"`
-	Tags               []string    `json:"tags,omitempty"`
+	Labels                 []*Label                          `json:"labels,omitempty"`
+	IPForwarding           *bool                             `json:"ipForwarding,omitempty"`
+	Metadata               []*Metadata                       `json:"metadata,omitempty"`
+	RootVolumeSizeInGB     *int                              `json:"rootVolumeSizeInGb,omitempty"`
+	ServiceAccount         *string                           `json:"serviceAccount,omitempty"`
+	SourceImage            *string                           `json:"sourceImage,omitempty"`
+	Tags                   []string                          `json:"tags,omitempty"`
+	RootVolumeType         *string                           `json:"rootVolumeType,omitempty"`
+	ShieldedInstanceConfig *LaunchSpecShieldedInstanceConfig `json:"shieldedInstanceConfig,omitempty"`
+	UseAsTemplateOnly      *bool                             `json:"useAsTemplateOnly,omitempty"`
+
+	forceSendFields []string
+	nullFields      []string
+}
+
+type LaunchSpecShieldedInstanceConfig struct {
+	EnableSecureBoot          *bool `json:"enableSecureBoot,omitempty"`
+	EnableIntegrityMonitoring *bool `json:"enableIntegrityMonitoring,omitempty"`
 
 	forceSendFields []string
 	nullFields      []string
@@ -253,6 +286,46 @@ type DeleteClusterInput struct {
 }
 
 type DeleteClusterOutput struct{}
+
+type RollSpec struct {
+	ClusterID                 *string  `json:"clusterId,omitempty"`
+	Comment                   *string  `json:"comment,omitempty"`
+	BatchSizePercentage       *int     `json:"batchSizePercentage,omitempty"`
+	BatchMinHealthyPercentage *int     `json:"batchMinHealthyPercentage,omitempty"`
+	LaunchSpecIDs             []string `json:"launchSpecIds,omitempty"`
+	InstanceNames             []string `json:"instanceNames,omitempty"`
+	RespectPDB                *bool    `json:"respectPdb,omitempty"`
+
+	forceSendFields []string
+	nullFields      []string
+}
+
+type RollStatus struct {
+	RollID        *string    `json:"rollId,omitempty"`
+	ClusterID     *string    `json:"oceanId,omitempty"`
+	Comment       *string    `json:"comment,omitempty"`
+	Status        *string    `json:"status,omitempty"`
+	Progress      *Progress  `json:"progress,omitempty"`
+	BatchNumber   *int       `json:"batchNumber,omitempty"`
+	NumOfBatches  *int       `json:"numOfBatches,omitempty"`
+	LaunchSpecIDs []string   `json:"launchSpecIds,omitempty"`
+	InstanceNames []string   `json:"instanceNames,omitempty"`
+	CreatedAt     *time.Time `json:"createdAt,omitempty"`
+	UpdatedAt     *time.Time `json:"updatedAt,omitempty"`
+}
+
+type Progress struct {
+	Unit  *string  `json:"unit,omitempty"`
+	Value *float64 `json:"value,omitempty"`
+}
+
+type CreateRollInput struct {
+	Roll *RollSpec `json:"roll,omitempty"`
+}
+
+type CreateRollOutput struct {
+	Roll *RollStatus `json:"roll,omitempty"`
+}
 
 func clusterFromJSON(in []byte) (*Cluster, error) {
 	b := new(Cluster)
@@ -472,6 +545,73 @@ func (s *ServiceOp) ImportOceanGKECluster(ctx context.Context, input *ImportOcea
 	return output, nil
 }
 
+func rollStatusFromJSON(in []byte) (*RollStatus, error) {
+	b := new(RollStatus)
+	if err := json.Unmarshal(in, b); err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
+func rollStatusesFromJSON(in []byte) ([]*RollStatus, error) {
+	var rw client.Response
+	if err := json.Unmarshal(in, &rw); err != nil {
+		return nil, err
+	}
+	out := make([]*RollStatus, len(rw.Response.Items))
+	if len(out) == 0 {
+		return out, nil
+	}
+	for i, rb := range rw.Response.Items {
+		b, err := rollStatusFromJSON(rb)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = b
+	}
+	return out, nil
+}
+
+func rollStatusesFromHttpResponse(resp *http.Response) ([]*RollStatus, error) {
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	return rollStatusesFromJSON(body)
+}
+
+func (s *ServiceOp) CreateRoll(ctx context.Context, input *CreateRollInput) (*CreateRollOutput, error) {
+	path, err := uritemplates.Expand("/ocean/gcp/k8s/cluster/{clusterId}/roll", uritemplates.Values{
+		"clusterId": spotinst.StringValue(input.Roll.ClusterID),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	input.Roll.ClusterID = nil
+
+	r := client.NewRequest(http.MethodPost, path)
+	r.Obj = input
+
+	resp, err := client.RequireOK(s.Client.Do(ctx, r))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	v, err := rollStatusesFromHttpResponse(resp)
+	if err != nil {
+		return nil, err
+	}
+
+	output := new(CreateRollOutput)
+	if len(v) > 0 {
+		output.Roll = v[0]
+	}
+
+	return output, nil
+}
+
 // region Cluster
 
 func (o Cluster) MarshalJSON() ([]byte, error) {
@@ -676,10 +816,9 @@ func (o *Task) SetCronExpression(v *string) *Task {
 	}
 	return o
 }
-
-func (o *Task) SetBatchSizePercentage(v *int) *Task {
-	if o.BatchSizePercentage = v; o.BatchSizePercentage == nil {
-		o.nullFields = append(o.nullFields, "BatchSizePercentage")
+func (o *Task) SetParameters(v *Parameters) *Task {
+	if o.Parameters = v; o.Parameters == nil {
+		o.nullFields = append(o.nullFields, "Parameters")
 	}
 	return o
 }
@@ -721,6 +860,27 @@ func (o Strategy) MarshalJSON() ([]byte, error) {
 func (o *Strategy) SetDrainingTimeout(v *int) *Strategy {
 	if o.DrainingTimeout = v; o.DrainingTimeout == nil {
 		o.nullFields = append(o.nullFields, "DrainingTimeout")
+	}
+	return o
+}
+
+func (o *Strategy) SetProvisioningModel(v *string) *Strategy {
+	if o.ProvisioningModel = v; o.ProvisioningModel == nil {
+		o.nullFields = append(o.nullFields, "ProvisioningModel")
+	}
+	return o
+}
+
+func (o *Strategy) SetPreemptiblePercentage(v *int) *Strategy {
+	if o.PreemptiblePercentage = v; o.PreemptiblePercentage == nil {
+		o.nullFields = append(o.nullFields, "PreemptiblePercentage")
+	}
+	return o
+}
+
+func (o *Strategy) SetShouldUtilizeCommitments(v *bool) *Strategy {
+	if o.ShouldUtilizeCommitments = v; o.ShouldUtilizeCommitments == nil {
+		o.nullFields = append(o.nullFields, "ShouldUtilizeCommitments")
 	}
 	return o
 }
@@ -787,6 +947,13 @@ func (o *InstanceTypes) SetWhitelist(v []string) *InstanceTypes {
 	return o
 }
 
+func (o *InstanceTypes) SetBlacklist(v []string) *InstanceTypes {
+	if o.Blacklist = v; o.Blacklist == nil {
+		o.nullFields = append(o.nullFields, "Blacklist")
+	}
+	return o
+}
+
 // endregion
 
 // region LaunchSpecification
@@ -849,6 +1016,27 @@ func (o *LaunchSpecification) SetSourceImage(v *string) *LaunchSpecification {
 func (o *LaunchSpecification) SetTags(v []string) *LaunchSpecification {
 	if o.Tags = v; o.Tags == nil {
 		o.nullFields = append(o.nullFields, "Tags")
+	}
+	return o
+}
+
+func (o *LaunchSpecification) SetRootVolumeType(v *string) *LaunchSpecification {
+	if o.RootVolumeType = v; o.RootVolumeType == nil {
+		o.nullFields = append(o.nullFields, "RootVolumeType")
+	}
+	return o
+}
+
+func (o *LaunchSpecification) SetShieldedInstanceConfig(v *LaunchSpecShieldedInstanceConfig) *LaunchSpecification {
+	if o.ShieldedInstanceConfig = v; o.ShieldedInstanceConfig == nil {
+		o.nullFields = append(o.nullFields, "ShieldedInstanceConfig")
+	}
+	return o
+}
+
+func (o *LaunchSpecification) SetUseAsTemplateOnly(v *bool) *LaunchSpecification {
+	if o.UseAsTemplateOnly = v; o.UseAsTemplateOnly == nil {
+		o.nullFields = append(o.nullFields, "UseAsTemplateOnly")
 	}
 	return o
 }
@@ -1085,6 +1273,13 @@ func (o *AutoScaler) SetDown(v *AutoScalerDown) *AutoScaler {
 	return o
 }
 
+func (o *AutoScaler) SetEnableAutomaticAndManualHeadroom(v *bool) *AutoScaler {
+	if o.EnableAutomaticAndManualHeadroom = v; o.EnableAutomaticAndManualHeadroom == nil {
+		o.nullFields = append(o.nullFields, "EnableAutomaticAndManualHeadroom")
+	}
+	return o
+}
+
 // endregion
 
 // region AutoScalerHeadroom
@@ -1170,6 +1365,133 @@ func (o *AutoScalerDown) SetMaxScaleDownPercentage(v *float64) *AutoScalerDown {
 		o.nullFields = append(o.nullFields, "MaxScaleDownPercentage")
 	}
 	return o
+}
+
+// endregion
+
+// region RollSpec
+
+func (o RollSpec) MarshalJSON() ([]byte, error) {
+	type noMethod RollSpec
+	raw := noMethod(o)
+	return jsonutil.MarshalJSON(raw, o.forceSendFields, o.nullFields)
+}
+
+func (o *RollSpec) SetComment(v *string) *RollSpec {
+	if o.Comment = v; o.Comment == nil {
+		o.nullFields = append(o.nullFields, "Comment")
+	}
+	return o
+}
+
+func (o *RollSpec) SetBatchSizePercentage(v *int) *RollSpec {
+	if o.BatchSizePercentage = v; o.BatchSizePercentage == nil {
+		o.nullFields = append(o.nullFields, "BatchSizePercentage")
+	}
+	return o
+}
+
+func (o *RollSpec) SetBatchMinHealthyPercentage(v *int) *RollSpec {
+	if o.BatchMinHealthyPercentage = v; o.BatchMinHealthyPercentage == nil {
+		o.nullFields = append(o.nullFields, "BatchMinHealthyPercentage")
+	}
+	return o
+}
+
+func (o *RollSpec) SetLaunchSpecIDs(v []string) *RollSpec {
+	if o.LaunchSpecIDs = v; o.LaunchSpecIDs == nil {
+		o.nullFields = append(o.nullFields, "LaunchSpecIDs")
+	}
+	return o
+}
+
+func (o *RollSpec) SetInstanceNames(v []string) *RollSpec {
+	if o.InstanceNames = v; o.InstanceNames == nil {
+		o.nullFields = append(o.nullFields, "InstanceNames")
+	}
+	return o
+}
+
+func (o *RollSpec) SetRespectPDB(v *bool) *RollSpec {
+	if o.RespectPDB = v; o.RespectPDB == nil {
+		o.nullFields = append(o.nullFields, "RespectPdb")
+	}
+	return o
+}
+
+// endregion
+
+// region ShieldedInstanceConfig
+
+func (o LaunchSpecShieldedInstanceConfig) MarshalJSON() ([]byte, error) {
+	type noMethod LaunchSpecShieldedInstanceConfig
+	raw := noMethod(o)
+	return jsonutil.MarshalJSON(raw, o.forceSendFields, o.nullFields)
+}
+
+func (o *LaunchSpecShieldedInstanceConfig) SetEnableIntegrityMonitoring(v *bool) *LaunchSpecShieldedInstanceConfig {
+	if o.EnableIntegrityMonitoring = v; o.EnableIntegrityMonitoring == nil {
+		o.nullFields = append(o.nullFields, "EnableIntegrityMonitoring")
+	}
+	return o
+}
+
+func (o *LaunchSpecShieldedInstanceConfig) SetEnableSecureBoot(v *bool) *LaunchSpecShieldedInstanceConfig {
+	if o.EnableSecureBoot = v; o.EnableSecureBoot == nil {
+		o.nullFields = append(o.nullFields, "EnableSecureBoot")
+	}
+	return o
+}
+
+//endregion
+
+//region cluster/scheduling/task/parameters
+
+func (o *Parameters) SetClusterRoll(v *ClusterRoll) *Parameters {
+	if o.ClusterRoll = v; o.ClusterRoll == nil {
+		o.nullFields = append(o.nullFields, "RespectPdb")
+	}
+	return o
+}
+func (o Parameters) MarshalJSON() ([]byte, error) {
+	type noMethod Parameters
+	raw := noMethod(o)
+	return jsonutil.MarshalJSON(raw, o.forceSendFields, o.nullFields)
+}
+
+// endregion
+
+//region cluster/scheduling/task/parameters/clusterRoll
+
+func (o *ClusterRoll) SetBatchMinHealthyPercentage(v *int) *ClusterRoll {
+	if o.BatchMinHealthyPercentage = v; o.BatchMinHealthyPercentage == nil {
+		o.nullFields = append(o.nullFields, "BatchMinHealthyPercentage")
+	}
+	return o
+}
+func (o *ClusterRoll) SetBatchSizePercentage(v *int) *ClusterRoll {
+	if o.BatchSizePercentage = v; o.BatchSizePercentage == nil {
+		o.nullFields = append(o.nullFields, "BatchSizePercentage")
+	}
+	return o
+}
+
+func (o *ClusterRoll) SetComment(v *string) *ClusterRoll {
+	if o.Comment = v; o.Comment == nil {
+		o.nullFields = append(o.nullFields, "Comment")
+	}
+	return o
+}
+func (o *ClusterRoll) SetRespectPdb(v *bool) *ClusterRoll {
+	if o.RespectPdb = v; o.RespectPdb == nil {
+		o.nullFields = append(o.nullFields, "RespectPdb")
+	}
+	return o
+}
+func (o ClusterRoll) MarshalJSON() ([]byte, error) {
+	type noMethod ClusterRoll
+	raw := noMethod(o)
+	return jsonutil.MarshalJSON(raw, o.forceSendFields, o.nullFields)
 }
 
 // endregion

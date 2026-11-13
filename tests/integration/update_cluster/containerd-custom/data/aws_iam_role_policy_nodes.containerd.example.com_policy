@@ -1,0 +1,15 @@
+{
+  "Statement": [
+    {
+      "Action": [
+        "ecr:BatchImportUpstreamImage",
+        "ecr:CreateRepository",
+        "ecr:ReplicateImage",
+        "ecr:TagResource"
+      ],
+      "Effect": "Allow",
+      "Resource": "*"
+    }
+  ],
+  "Version": "2012-10-17"
+}

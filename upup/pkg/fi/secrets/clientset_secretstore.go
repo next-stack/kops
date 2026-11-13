@@ -27,12 +27,12 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
-	"k8s.io/kops/pkg/acls"
 	"k8s.io/kops/pkg/apis/kops"
 	kopsinternalversion "k8s.io/kops/pkg/client/clientset_generated/clientset/typed/kops/internalversion"
 	"k8s.io/kops/pkg/pki"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/util/pkg/vfs"
+	"k8s.io/kops/util/pkg/vfs/acls"
 )
 
 // NamePrefix is a prefix we use to avoid collisions with other keysets
@@ -45,7 +45,7 @@ type ClientsetSecretStore struct {
 	clientset kopsinternalversion.KopsInterface
 }
 
-var _ fi.SecretStore = &ClientsetSecretStore{}
+var _ fi.SecretStore = (*ClientsetSecretStore)(nil)
 
 // NewClientsetSecretStore is the constructor for ClientsetSecretStore
 func NewClientsetSecretStore(cluster *kops.Cluster, clientset kopsinternalversion.KopsInterface, namespace string) fi.SecretStore {
@@ -57,9 +57,7 @@ func NewClientsetSecretStore(cluster *kops.Cluster, clientset kopsinternalversio
 	return c
 }
 
-func (c *ClientsetSecretStore) MirrorTo(basedir vfs.Path) error {
-	ctx := context.TODO()
-
+func (c *ClientsetSecretStore) MirrorTo(ctx context.Context, basedir vfs.Path) error {
 	list, err := c.clientset.Keysets(c.namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return fmt.Errorf("error listing keysets: %v", err)
@@ -88,12 +86,12 @@ func (c *ClientsetSecretStore) MirrorTo(basedir vfs.Path) error {
 			return fmt.Errorf("error serializing secret: %v", err)
 		}
 
-		acl, err := acls.GetACL(p, c.cluster)
+		acl, err := acls.GetACL(ctx, p, c.cluster)
 		if err != nil {
 			return err
 		}
 
-		if err := p.WriteFile(bytes.NewReader(data), acl); err != nil {
+		if err := p.WriteFile(ctx, bytes.NewReader(data), acl); err != nil {
 			return fmt.Errorf("error writing secret to %q: %v", p, err)
 		}
 	}
@@ -125,8 +123,7 @@ func (c *ClientsetSecretStore) ListSecrets() ([]string, error) {
 	for i := range list.Items {
 		keyset := &list.Items[i]
 
-		switch keyset.Spec.Type {
-		case kops.SecretTypeSecret:
+		if keyset.Spec.Type == kops.SecretTypeSecret {
 			name := strings.TrimPrefix(keyset.Name, NamePrefix)
 			names = append(names, name)
 		}
@@ -173,9 +170,7 @@ func (c *ClientsetSecretStore) DeleteSecret(name string) error {
 }
 
 // GetOrCreateSecret implements fi.SecretStore::GetOrCreateSecret
-func (c *ClientsetSecretStore) GetOrCreateSecret(name string, secret *fi.Secret) (*fi.Secret, bool, error) {
-	ctx := context.TODO()
-
+func (c *ClientsetSecretStore) GetOrCreateSecret(ctx context.Context, name string, secret *fi.Secret) (*fi.Secret, bool, error) {
 	for i := 0; i < 2; i++ {
 		s, err := c.FindSecret(name)
 		if err != nil {

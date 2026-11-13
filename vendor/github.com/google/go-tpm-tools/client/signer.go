@@ -10,7 +10,7 @@ import (
 	"sync"
 
 	"github.com/google/go-tpm-tools/internal"
-	"github.com/google/go-tpm/tpm2"
+	"github.com/google/go-tpm/legacy/tpm2"
 )
 
 // Global mutex to protect against concurrent TPM access.
@@ -51,7 +51,7 @@ func (signer *tpmSigner) Sign(_ io.Reader, digest []byte, opts crypto.SignerOpts
 		return nil, fmt.Errorf("hash algorithm: got %v, want %v", opts.HashFunc(), signer.Hash)
 	}
 	if len(digest) != signer.Hash.Size() {
-		return nil, fmt.Errorf("digest length: got %d, want %d", digest, signer.Hash.Size())
+		return nil, fmt.Errorf("digest length: got %d, want %d", len(digest), signer.Hash.Size())
 	}
 
 	signerMutex.Lock()

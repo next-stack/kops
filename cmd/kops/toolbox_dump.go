@@ -21,25 +21,30 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/ec2instanceconnect"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/agent"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
-	"k8s.io/kops/cmd/kops/util"
 	"k8s.io/kops/pkg/apis/kops"
+	"k8s.io/kops/pkg/client/simple"
 	"k8s.io/kops/pkg/commands/commandutils"
 	"k8s.io/kops/pkg/dump"
 	"k8s.io/kops/pkg/resources"
 	resourceops "k8s.io/kops/pkg/resources/ops"
+	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup"
+	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
 	"k8s.io/kubectl/pkg/util/i18n"
 	"k8s.io/kubectl/pkg/util/templates"
 )
@@ -54,6 +59,8 @@ var (
 	`))
 
 	toolboxDumpShort = i18n.T(`Dump cluster information`)
+
+	k8sResources = os.Getenv("KOPS_TOOLBOX_DUMP_K8S_RESOURCES")
 )
 
 type ToolboxDumpOptions struct {
@@ -61,18 +68,28 @@ type ToolboxDumpOptions struct {
 
 	ClusterName string
 
-	Dir        string
-	PrivateKey string
-	SSHUser    string
+	Dir             string
+	PrivateKey      string
+	SSHUser         string
+	MaxNodes        int
+	NodeDumpTimeout time.Duration
+	K8sResources    bool
+
+	// CloudResources controls whether we dump the cloud resources
+	CloudResources bool
 }
 
 func (o *ToolboxDumpOptions) InitDefaults() {
 	o.Output = OutputYaml
 	o.PrivateKey = "~/.ssh/id_rsa"
 	o.SSHUser = "ubuntu"
+	o.MaxNodes = 500
+	o.NodeDumpTimeout = time.Minute
+	o.K8sResources = k8sResources != ""
+	o.CloudResources = true
 }
 
-func NewCmdToolboxDump(f *util.Factory, out io.Writer) *cobra.Command {
+func NewCmdToolboxDump(f commandutils.Factory, out io.Writer) *cobra.Command {
 	options := &ToolboxDumpOptions{}
 	options.InitDefaults()
 
@@ -84,7 +101,7 @@ func NewCmdToolboxDump(f *util.Factory, out io.Writer) *cobra.Command {
 		Args:              rootCommand.clusterNameArgs(&options.ClusterName),
 		ValidArgsFunction: commandutils.CompleteClusterName(f, true, false),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return RunToolboxDump(context.TODO(), f, out, options)
+			return RunToolboxDump(cmd.Context(), f, out, options)
 		},
 	}
 
@@ -95,6 +112,10 @@ func NewCmdToolboxDump(f *util.Factory, out io.Writer) *cobra.Command {
 
 	cmd.Flags().StringVar(&options.Dir, "dir", options.Dir, "Target directory; if specified will collect logs and other information.")
 	cmd.MarkFlagDirname("dir")
+	cmd.Flags().BoolVar(&options.K8sResources, "k8s-resources", options.K8sResources, "Include k8s resources in the dump")
+	cmd.Flags().BoolVar(&options.CloudResources, "cloud-resources", options.CloudResources, "Include cloud resources in the dump")
+	cmd.Flags().IntVar(&options.MaxNodes, "max-nodes", options.MaxNodes, "The maximum number of nodes from which to dump logs")
+	cmd.Flags().DurationVar(&options.NodeDumpTimeout, "node-dump-timeout", options.NodeDumpTimeout, "Timeout for connecting to and dumping logs from a single node")
 	cmd.Flags().StringVar(&options.PrivateKey, "private-key", options.PrivateKey, "File containing private key to use for SSH access to instances")
 	cmd.Flags().StringVar(&options.SSHUser, "ssh-user", options.SSHUser, "The remote user for SSH access to instances")
 	cmd.RegisterFlagCompletionFunc("ssh-user", cobra.NoFileCompletions)
@@ -102,9 +123,8 @@ func NewCmdToolboxDump(f *util.Factory, out io.Writer) *cobra.Command {
 	return cmd
 }
 
-func RunToolboxDump(ctx context.Context, f *util.Factory, out io.Writer, options *ToolboxDumpOptions) error {
-
-	clientset, err := f.Clientset()
+func RunToolboxDump(ctx context.Context, f commandutils.Factory, out io.Writer, options *ToolboxDumpOptions) error {
+	clientset, err := f.KopsClient()
 	if err != nil {
 		return err
 	}
@@ -123,42 +143,32 @@ func RunToolboxDump(ctx context.Context, f *util.Factory, out io.Writer, options
 		return err
 	}
 
-	region := "" // Use default
-	resourceMap, err := resourceops.ListResources(cloud, cluster, region)
-	if err != nil {
-		return err
-	}
-	d, err := resources.BuildDump(ctx, cloud, resourceMap)
-	if err != nil {
-		return err
+	var cloudResources *resources.Dump
+	if options.CloudResources {
+		resourceMap, err := resourceops.ListResources(cloud, cluster)
+		if err != nil {
+			return err
+		}
+		d, err := resources.BuildDump(ctx, cloud, resourceMap)
+		if err != nil {
+			return err
+		}
+		cloudResources = d
 	}
 
 	if options.Dir != "" {
-		privateKeyPath := options.PrivateKey
-		if strings.HasPrefix(privateKeyPath, "~/") {
-			privateKeyPath = filepath.Join(os.Getenv("HOME"), privateKeyPath[2:])
-		}
-		key, err := ioutil.ReadFile(privateKeyPath)
-		if err != nil {
-			return fmt.Errorf("error reading private key %q: %v", privateKeyPath, err)
-		}
-
-		signer, err := ssh.ParsePrivateKey(key)
-		if err != nil {
-			return fmt.Errorf("error parsing private key %q: %v", privateKeyPath, err)
-		}
-
 		contextName := cluster.ObjectMeta.Name
 		clientGetter := genericclioptions.NewConfigFlags(true)
 		clientGetter.Context = &contextName
 
 		var nodes corev1.NodeList
 
-		config, err := clientGetter.ToRESTConfig()
+		// TODO: We should use the factory to get the kubeconfig
+		kubeConfig, err := clientGetter.ToRESTConfig()
 		if err != nil {
 			klog.Warningf("cannot load kubeconfig settings for %q: %v", contextName, err)
 		} else {
-			k8sClient, err := kubernetes.NewForConfig(config)
+			k8sClient, err := kubernetes.NewForConfig(kubeConfig)
 			if err != nil {
 				klog.Warningf("cannot build kube client for %q: %v", contextName, err)
 			} else {
@@ -172,56 +182,169 @@ func RunToolboxDump(ctx context.Context, f *util.Factory, out io.Writer, options
 			}
 		}
 
+		// Before the SSH key and the node log dump, both of which can fail or
+		// stall: this is the one file that explains a cluster where nothing
+		// launched, and it needs only cloud API access to write.
+		dumpCloudInstanceGroups(ctx, clientset, cloud, cluster, nodes.Items, options.Dir)
+
+		privateKeyPath := options.PrivateKey
+		if strings.HasPrefix(privateKeyPath, "~/") {
+			privateKeyPath = filepath.Join(os.Getenv("HOME"), privateKeyPath[2:])
+		}
+		key, err := os.ReadFile(privateKeyPath)
+		if err != nil {
+			return fmt.Errorf("reading private key %q: %v", privateKeyPath, err)
+		}
+
+		parsedKey, err := ssh.ParseRawPrivateKey(key)
+		if err != nil {
+			return fmt.Errorf("parsing private key %q: %v", privateKeyPath, err)
+		}
+
+		signer, err := ssh.NewSignerFromKey(parsedKey)
+		if err != nil {
+			return fmt.Errorf("creating signer for private key %q: %v", privateKeyPath, err)
+		}
+
 		sshConfig := &ssh.ClientConfig{
 			Config: ssh.Config{},
 			User:   options.SSHUser,
 			Auth: []ssh.AuthMethod{
 				ssh.PublicKeys(signer),
 			},
-			HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+			HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec // toolbox dump connects to cluster nodes without managed host keys.
 		}
 
-		dumper := dump.NewLogDumper(sshConfig, options.Dir)
+		klog.Infof("will SSH using username %q", sshConfig.User)
+		klog.Infof("ssh auth methods %v", sshConfig.Auth)
 
-		var additionalIPs []string
-		for _, instance := range d.Instances {
-			if len(instance.PublicAddresses) != 0 {
-				additionalIPs = append(additionalIPs, instance.PublicAddresses[0])
-				continue
+		keyRing := agent.NewKeyring()
+		defer func(keyRing agent.Agent) {
+			_ = keyRing.RemoveAll()
+		}(keyRing)
+		err = keyRing.Add(agent.AddedKey{
+			PrivateKey: parsedKey,
+		})
+		if err != nil {
+			return fmt.Errorf("adding key to SSH agent: %w", err)
+		}
+
+		// look for a bastion instance and use it if exists
+		// Prefer a bastion load balancer if exists
+		bastionAddress := ""
+		if cloudResources != nil {
+			for _, lb := range cloudResources.LoadBalancers {
+				if strings.Contains(lb.Name, "bastion") && lb.DNSName != "" {
+					bastionAddress = lb.DNSName
+				}
+			}
+			if bastionAddress == "" {
+				for _, instance := range cloudResources.Instances {
+					if strings.Contains(instance.Name, "bastion") {
+						bastionAddress = instance.PublicAddresses[0]
+					}
+				}
+			}
+			// If we don't have a bastion, use a control plane instance that has public IPs
+			if bastionAddress == "" {
+				for _, instance := range cloudResources.Instances {
+					if strings.Contains(instance.Name, "control-plane") && len(instance.PublicAddresses) > 0 {
+						bastionAddress = instance.PublicAddresses[0]
+					}
+				}
+			}
+		}
+
+		dumper := dump.NewLogDumper(bastionAddress, sshConfig, keyRing, options.Dir, options.NodeDumpTimeout)
+
+		dumper.SetDumpBGP(cluster.Spec.Networking.Calico != nil)
+
+		// Karpenter nodes never get the cluster SSH key pair (their EC2NodeClass has no key-name
+		// field). When Karpenter is enabled, grant short-lived access via EC2 Instance Connect
+		// before connecting, using the public key matching --private-key. A no-op without the agent.
+		karpenterEnabled := cluster.Spec.Karpenter.IsEnabled()
+		if awsCloud, ok := cloud.(awsup.AWSCloud); ok && karpenterEnabled {
+			publicKey := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(signer.PublicKey())))
+			eicClient := ec2instanceconnect.NewFromConfig(awsCloud.Config())
+			sshUser := options.SSHUser
+			dumper.SetSSHAccessGranter(func(ctx context.Context, instanceID string) error {
+				_, err := eicClient.SendSSHPublicKey(ctx, &ec2instanceconnect.SendSSHPublicKeyInput{
+					InstanceId:     aws.String(instanceID),
+					InstanceOSUser: aws.String(sshUser),
+					SSHPublicKey:   aws.String(publicKey),
+				})
+				return err
+			})
+		}
+
+		if err := dumper.DumpAllNodes(ctx, nodes, options.MaxNodes, cloudResources); err != nil {
+			klog.Warningf("error dumping nodes: %v", err)
+		}
+
+		if kubeConfig != nil && options.K8sResources {
+			dumper, err := dump.NewResourceDumper(kubeConfig, options.Output, options.Dir)
+			if err != nil {
+				return fmt.Errorf("error creating resource dumper: %w", err)
+			}
+			if err := dumper.DumpResources(ctx); err != nil {
+				klog.Warningf("error dumping resources: %v", err)
 			}
 
-			klog.Warningf("no public IP for node %q", instance.Name)
-		}
-
-		if err := dumper.DumpAllNodes(ctx, nodes, additionalIPs); err != nil {
-			return fmt.Errorf("error dumping nodes: %v", err)
+			logDumper, err := dump.NewPodLogDumper(kubeConfig, options.Dir)
+			if err != nil {
+				return fmt.Errorf("error creating pod log dumper: %w", err)
+			}
+			if err := logDumper.DumpLogs(ctx); err != nil {
+				klog.Warningf("error dumping pod logs: %v", err)
+			}
 		}
 	}
 
-	switch options.Output {
-	case OutputYaml:
-		b, err := kops.ToRawYaml(d)
-		if err != nil {
-			return fmt.Errorf("error marshaling yaml: %v", err)
-		}
-		_, err = out.Write(b)
-		if err != nil {
-			return fmt.Errorf("error writing to stdout: %v", err)
-		}
-		return nil
+	if cloudResources != nil {
+		switch options.Output {
+		case OutputYaml:
+			b, err := kops.ToRawYaml(cloudResources)
+			if err != nil {
+				return fmt.Errorf("error marshaling yaml: %v", err)
+			}
+			_, err = out.Write(b)
+			if err != nil {
+				return fmt.Errorf("error writing to stdout: %v", err)
+			}
+			return nil
 
-	case OutputJSON:
-		b, err := json.MarshalIndent(d, "", "  ")
-		if err != nil {
-			return fmt.Errorf("error marshaling json: %v", err)
-		}
-		_, err = out.Write(b)
-		if err != nil {
-			return fmt.Errorf("error writing to stdout: %v", err)
-		}
-		return nil
+		case OutputJSON:
+			b, err := json.MarshalIndent(cloudResources, "", "  ")
+			if err != nil {
+				return fmt.Errorf("error marshaling json: %v", err)
+			}
+			_, err = out.Write(b)
+			if err != nil {
+				return fmt.Errorf("error writing to stdout: %v", err)
+			}
+			return nil
 
-	default:
-		return fmt.Errorf("unsupported output format: %q", options.Output)
+		default:
+			return fmt.Errorf("unsupported output format: %q", options.Output)
+		}
+	}
+	return nil
+}
+
+// dumpCloudInstanceGroups records the cloud provider's view of the instance
+// groups. Failures are logged rather than returned: the dump is diagnostic, and
+// a missing section must not abort the rest of it.
+func dumpCloudInstanceGroups(ctx context.Context, clientset simple.Clientset, cloud fi.Cloud, cluster *kops.Cluster, nodes []corev1.Node, dir string) {
+	igList, err := clientset.InstanceGroupsFor(cluster).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		klog.Warningf("error listing instance groups: %v", err)
+		return
+	}
+	instanceGroups := make([]*kops.InstanceGroup, 0, len(igList.Items))
+	for i := range igList.Items {
+		instanceGroups = append(instanceGroups, &igList.Items[i])
+	}
+	if err := dump.DumpCloudInstanceGroups(ctx, cloud, cluster, instanceGroups, nodes, dir); err != nil {
+		klog.Warningf("error dumping cloud instance groups: %v", err)
 	}
 }

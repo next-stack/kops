@@ -21,16 +21,33 @@ set -o pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
 # Terraform versions
-TF_TAG=1.0.7
+TF_TAG=1.14.8
 
 PROVIDER_CACHE="${KOPS_ROOT}/.cache/terraform"
+
+# Optional: pass a substring to filter test directories by name
+DIR_FILTER="${1:-}"
 
 RC=0
 while IFS= read -r -d '' -u 3 test_dir; do
   [ -f "${test_dir}/kubernetes.tf" ] || [ -f "${test_dir}/kubernetes.tf.json" ] || continue
+
+  if [ -n "${DIR_FILTER}" ] && [[ "$(basename "${test_dir}")" != *"${DIR_FILTER}"* ]]; then
+    continue
+  fi
+
   echo -e "${test_dir}\n"
 
   docker run --rm --network host -e "TF_PLUGIN_CACHE_DIR=${PROVIDER_CACHE}" -v "${PROVIDER_CACHE}:${PROVIDER_CACHE}" -v "${test_dir}":"${test_dir}" -w "${test_dir}" --entrypoint=sh hashicorp/terraform:${TF_TAG} -c '/bin/terraform init -upgrade >/dev/null && /bin/terraform validate' || RC=$?
+
+  if grep -qr "arn:aws:" "${test_dir}"; then
+    echo -e "\nARN reference uses hardcoded partition in ${test_dir}\n"
+    RC=1
+  fi
+  if grep -qr "arn::" "${test_dir}"; then
+    echo -e "\nARN reference is missing partition in ${test_dir}\n"
+    RC=1
+  fi
 done 3< <(find "${KOPS_ROOT}/tests/integration/update_cluster" -maxdepth 1 -type d -print0)
 
 if [ $RC != 0 ]; then

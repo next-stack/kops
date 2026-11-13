@@ -18,6 +18,7 @@ package fi
 
 import (
 	"bytes"
+	"context"
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
@@ -31,23 +32,24 @@ import (
 	"k8s.io/kops/util/pkg/vfs"
 )
 
+// CertificateIDCA is the ID for the primary cluster CA certificate/key
 const CertificateIDCA = "kubernetes-ca"
+
+// DiscoveryCAID is the ID for the discovery service client certificate CA
+const DiscoveryCAID = "discovery-ca"
 
 const (
 	// SecretNameSSHPrimary is the Name for the primary SSH key
 	SecretNameSSHPrimary = "admin"
 )
 
-const (
-	keysetFormatLatest = "v1alpha2"
-)
-
 // Keyset is a parsed api.Keyset.
 type Keyset struct {
-	// LegacyFormat instructs a keypair task to convert a Legacy Keyset to the new Keyset API format.
-	LegacyFormat bool
-	Items        map[string]*KeysetItem
-	Primary      *KeysetItem
+	Items map[string]*KeysetItem
+
+	// Primary is the KeysetItem that is considered the "active" key.
+	// It is guaranteed to be non-nil, if there are any keypairs.
+	Primary *KeysetItem
 }
 
 // KeysetItem is a certificate/key pair in a Keyset.
@@ -63,18 +65,22 @@ type KeysetItem struct {
 	PrivateKey *pki.PrivateKey
 }
 
-// Keystore contains just the functions we need to issue keypairs, not to list / manage them
-type Keystore interface {
-	pki.Keystore
+// KeystoreReader contains just the functions we need to consume keypairs, not to update them.
+type KeystoreReader interface {
+	// FindKeyset finds a Keyset.  If the keyset is not found, it returns (nil, nil).
+	FindKeyset(ctx context.Context, name string) (*Keyset, error)
+}
 
-	// FindKeyset finds a Keyset.
-	FindKeyset(name string) (*Keyset, error)
+// Keystore contains just the functions we need to issue keypairs, not to list / manage them
+
+type Keystore interface {
+	KeystoreReader
 
 	// StoreKeyset writes a Keyset to the store.
-	StoreKeyset(name string, keyset *Keyset) error
+	StoreKeyset(ctx context.Context, name string, keyset *Keyset) error
 
 	// MirrorTo will copy secrets to a vfs.Path, which is often easier for a machine to read
-	MirrorTo(basedir vfs.Path) error
+	MirrorTo(ctx context.Context, basedir vfs.Path) error
 }
 
 // HasVFSPath is implemented by keystore & other stores that use a VFS path as their backing store
@@ -95,22 +101,10 @@ type SSHCredentialStore interface {
 	DeleteSSHCredential() error
 
 	// AddSSHPublicKey adds an SSH public key.
-	AddSSHPublicKey(data []byte) error
+	AddSSHPublicKey(ctx context.Context, data []byte) error
 
 	// FindSSHPublicKeys retrieves the SSH public keys.
 	FindSSHPublicKeys() ([]*kops.SSHCredential, error)
-}
-
-// FindPrimaryKeypair is a common implementation of pki.FindPrimaryKeypair.
-func FindPrimaryKeypair(c Keystore, name string) (*pki.Certificate, *pki.PrivateKey, error) {
-	keyset, err := c.FindKeyset(name)
-	if err != nil {
-		return nil, nil, err
-	}
-	if keyset == nil || keyset.Primary == nil {
-		return nil, nil, nil
-	}
-	return keyset.Primary.Certificate, keyset.Primary.PrivateKey, nil
 }
 
 // KeysetItemIdOlder returns whether the KeysetItem Id a is older than b.
@@ -144,11 +138,13 @@ func (k *Keyset) ToCertificateBytes() ([]byte, error) {
 	buf := new(bytes.Buffer)
 	for _, key := range keys {
 		item := k.Items[key]
-		certificate, err := item.Certificate.AsBytes()
-		if err != nil {
-			return nil, fmt.Errorf("public key %s: %v", item.Id, err)
+		if item.Certificate != nil {
+			certificate, err := item.Certificate.AsBytes()
+			if err != nil {
+				return nil, fmt.Errorf("public key %s: %v", item.Id, err)
+			}
+			buf.Write(certificate)
 		}
-		buf.Write(certificate)
 	}
 	return buf.Bytes(), nil
 }
@@ -167,12 +163,14 @@ func (k *Keyset) ToPublicKeys() (string, error) {
 	buf := new(strings.Builder)
 	for _, key := range keys {
 		item := k.Items[key]
-		publicKeyData, err := x509.MarshalPKIXPublicKey(item.Certificate.PublicKey)
-		if err != nil {
-			return "", fmt.Errorf("marshalling public key %s: %v", item.Id, err)
-		}
-		if err = pem.Encode(buf, &pem.Block{Type: "RSA PUBLIC KEY", Bytes: publicKeyData}); err != nil {
-			return "", fmt.Errorf("encoding public key %s: %v", item.Id, err)
+		if item.Certificate != nil {
+			publicKeyData, err := x509.MarshalPKIXPublicKey(item.Certificate.PublicKey)
+			if err != nil {
+				return "", fmt.Errorf("marshalling public key %s: %v", item.Id, err)
+			}
+			if err = pem.Encode(buf, &pem.Block{Type: "RSA PUBLIC KEY", Bytes: publicKeyData}); err != nil {
+				return "", fmt.Errorf("encoding public key %s: %v", item.Id, err)
+			}
 		}
 	}
 	return buf.String(), nil
@@ -239,4 +237,23 @@ func (k *Keyset) AddItem(cert *pki.Certificate, privateKey *pki.PrivateKey, prim
 	}
 
 	return ki, nil
+}
+
+type pkiKeystoreAdapter struct {
+	reader KeystoreReader
+}
+
+func (p pkiKeystoreAdapter) FindPrimaryKeypair(ctx context.Context, name string) (*pki.Certificate, *pki.PrivateKey, error) {
+	keyset, err := p.reader.FindKeyset(ctx, name)
+	if err != nil {
+		return nil, nil, err
+	}
+	if keyset == nil || keyset.Primary == nil {
+		return nil, nil, nil
+	}
+	return keyset.Primary.Certificate, keyset.Primary.PrivateKey, nil
+}
+
+func NewPKIKeystoreAdapter(reader KeystoreReader) pki.Keystore {
+	return &pkiKeystoreAdapter{reader: reader}
 }

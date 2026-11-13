@@ -22,9 +22,13 @@ import (
 	"reflect"
 	"sort"
 	"testing"
+
+	"k8s.io/kops/pkg/testutils/testcontext"
 )
 
 func TestMemFsCreateFile(t *testing.T) {
+	ctx := testcontext.ForTest(t)
+
 	tests := []struct {
 		path string
 		data []byte
@@ -37,20 +41,20 @@ func TestMemFsCreateFile(t *testing.T) {
 	for _, test := range tests {
 		memfspath := NewMemFSPath(NewMemFSContext(), test.path)
 		// Create file
-		err := memfspath.CreateFile(bytes.NewReader(test.data), nil)
+		err := memfspath.CreateFile(ctx, bytes.NewReader(test.data), nil)
 		if err != nil {
 			t.Errorf("Failed writing path %s, error: %v", test.path, err)
 			continue
 		}
 
 		// Create file again should result in error
-		err = memfspath.CreateFile(bytes.NewReader([]byte("data")), nil)
+		err = memfspath.CreateFile(ctx, bytes.NewReader([]byte("data")), nil)
 		if err != os.ErrExist {
 			t.Errorf("Expected to get os.ErrExist, got: %v", err)
 		}
 
 		// Check file content
-		data, err := memfspath.ReadFile()
+		data, err := memfspath.ReadFile(ctx)
 		if err != nil {
 			t.Errorf("Failed reading path %s, error: %v", test.path, err)
 			continue
@@ -113,6 +117,8 @@ func TestMemFsReadDir(t *testing.T) {
 }
 
 func TestMemFsReadTree(t *testing.T) {
+	ctx := testcontext.ForTest(t)
+
 	tests := []struct {
 		path     string
 		subpaths []string
@@ -142,7 +148,7 @@ func TestMemFsReadTree(t *testing.T) {
 		}
 
 		// Read dir tree
-		paths, err := memfspath.ReadTree()
+		paths, err := memfspath.ReadTree(ctx)
 		if err != nil {
 			t.Errorf("Failed reading dir tree %s, error: %v", test.path, err)
 			continue

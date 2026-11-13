@@ -17,12 +17,14 @@ limitations under the License.
 package awstasks
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"testing"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"k8s.io/kops/cloudmock/aws/mockec2"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
@@ -64,12 +66,14 @@ func Test_Subnet_CannotChangeSubnet(t *testing.T) {
 }
 
 func TestSubnetCreate(t *testing.T) {
+	ctx := context.TODO()
+
 	cloud := awsup.BuildMockAWSCloud("us-east-1", "abc")
 	c := &mockec2.MockEC2{}
 	cloud.MockEC2 = c
 
 	// We define a function so we can rebuild the tasks, because we modify in-place when running
-	buildTasks := func() map[string]fi.Task {
+	buildTasks := func() map[string]fi.CloudupTask {
 		vpc1 := &VPC{
 			Name:      s("vpc1"),
 			Lifecycle: fi.LifecycleSync,
@@ -77,14 +81,15 @@ func TestSubnetCreate(t *testing.T) {
 			Tags:      map[string]string{"Name": "vpc1"},
 		}
 		subnet1 := &Subnet{
-			Name:      s("subnet1"),
-			Lifecycle: fi.LifecycleSync,
-			VPC:       vpc1,
-			CIDR:      s("172.20.1.0/24"),
-			Tags:      map[string]string{"Name": "subnet1"},
+			Name:                s("subnet1"),
+			Lifecycle:           fi.LifecycleSync,
+			VPC:                 vpc1,
+			CIDR:                s("172.20.1.0/24"),
+			ResourceBasedNaming: new(true),
+			Tags:                map[string]string{"Name": "subnet1"},
 		}
 
-		return map[string]fi.Task{
+		return map[string]fi.CloudupTask{
 			"subnet1": subnet1,
 			"vpc1":    vpc1,
 		}
@@ -94,21 +99,9 @@ func TestSubnetCreate(t *testing.T) {
 		allTasks := buildTasks()
 		subnet1 := allTasks["subnet1"].(*Subnet)
 
-		target := &awsup.AWSAPITarget{
-			Cloud: cloud,
-		}
+		runTasks(t, cloud, allTasks)
 
-		context, err := fi.NewContext(target, nil, cloud, nil, nil, nil, true, allTasks)
-		if err != nil {
-			t.Fatalf("error building context: %v", err)
-		}
-		defer context.Close()
-
-		if err := context.RunTasks(testRunTasksOptions); err != nil {
-			t.Fatalf("unexpected error during Run: %v", err)
-		}
-
-		if fi.StringValue(subnet1.ID) == "" {
+		if fi.ValueOf(subnet1.ID) == "" {
 			t.Fatalf("ID not set after create")
 		}
 
@@ -116,100 +109,13 @@ func TestSubnetCreate(t *testing.T) {
 			t.Fatalf("Expected exactly one Subnet; found %v", c.SubnetIds())
 		}
 
-		expected := &ec2.Subnet{
-			CidrBlock: aws.String("172.20.1.0/24"),
-			SubnetId:  aws.String("subnet-1"),
-			VpcId:     aws.String("vpc-1"),
-			Tags: buildTags(map[string]string{
-				"Name": "subnet1",
-			}),
-		}
-		actual := c.FindSubnet(*subnet1.ID)
-		if actual == nil {
-			t.Fatalf("Subnet created but then not found")
-		}
-		if !reflect.DeepEqual(actual, expected) {
-			t.Fatalf("Unexpected Subnet: expected=%v actual=%v", expected, actual)
-		}
-	}
-
-	{
-		allTasks := buildTasks()
-		checkNoChanges(t, cloud, allTasks)
-	}
-}
-
-func TestSubnetCreateIPv6(t *testing.T) {
-	cloud := awsup.BuildMockAWSCloud("us-east-1", "abc")
-	c := &mockec2.MockEC2{}
-	cloud.MockEC2 = c
-
-	// We define a function so we can rebuild the tasks, because we modify in-place when running
-	buildTasks := func() map[string]fi.Task {
-		vpc1 := &VPC{
-			Name:      s("vpc1"),
-			Lifecycle: fi.LifecycleSync,
-			CIDR:      s("172.20.0.0/16"),
-			IPv6CIDR:  s("2001:db8::/56"),
-			Tags:      map[string]string{"Name": "vpc1"},
-		}
-		cidr1 := &VPCAmazonIPv6CIDRBlock{
-			Name:      s("vpcamazonipv6cidr"),
-			Lifecycle: fi.LifecycleSync,
-			VPC:       vpc1,
-		}
-		subnet1 := &Subnet{
-			Name:      s("subnet1"),
-			Lifecycle: fi.LifecycleSync,
-			VPC:       vpc1,
-			CIDR:      s("172.20.1.0/24"),
-			IPv6CIDR:  s("2001:db8:0:1::/64"),
-			Tags:      map[string]string{"Name": "subnet1"},
-		}
-
-		return map[string]fi.Task{
-			"vpc1":    vpc1,
-			"cidr1":   cidr1,
-			"subnet1": subnet1,
-		}
-	}
-
-	{
-		allTasks := buildTasks()
-		subnet1 := allTasks["subnet1"].(*Subnet)
-
-		target := &awsup.AWSAPITarget{
-			Cloud: cloud,
-		}
-
-		context, err := fi.NewContext(target, nil, cloud, nil, nil, nil, true, allTasks)
-		if err != nil {
-			t.Fatalf("error building context: %v", err)
-		}
-		defer context.Close()
-
-		if err := context.RunTasks(testRunTasksOptions); err != nil {
-			t.Fatalf("unexpected error during Run: %v", err)
-		}
-
-		if fi.StringValue(subnet1.ID) == "" {
-			t.Fatalf("ID not set after create")
-		}
-
-		if len(c.SubnetIds()) != 1 {
-			t.Fatalf("Expected exactly one Subnet; found %v", c.SubnetIds())
-		}
-
-		expected := &ec2.Subnet{
-			CidrBlock: aws.String("172.20.1.0/24"),
-			Ipv6CidrBlockAssociationSet: []*ec2.SubnetIpv6CidrBlockAssociation{
-				{
-					AssociationId: aws.String("subnet-cidr-assoc-ipv6-subnet-1"),
-					Ipv6CidrBlock: aws.String("2001:db8:0:1::/64"),
-					Ipv6CidrBlockState: &ec2.SubnetCidrBlockState{
-						State: aws.String(ec2.SubnetCidrBlockStateCodeAssociated),
-					},
-				},
+		expected := &ec2types.Subnet{
+			AssignIpv6AddressOnCreation: aws.Bool(false),
+			CidrBlock:                   aws.String("172.20.1.0/24"),
+			PrivateDnsNameOptionsOnLaunch: &ec2types.PrivateDnsNameOptionsOnLaunch{
+				EnableResourceNameDnsAAAARecord: aws.Bool(false),
+				EnableResourceNameDnsARecord:    aws.Bool(true),
+				HostnameType:                    ec2types.HostnameTypeResourceName,
 			},
 			SubnetId: aws.String("subnet-1"),
 			VpcId:    aws.String("vpc-1"),
@@ -228,17 +134,109 @@ func TestSubnetCreateIPv6(t *testing.T) {
 
 	{
 		allTasks := buildTasks()
-		checkNoChanges(t, cloud, allTasks)
+		checkNoChanges(t, ctx, cloud, allTasks)
 	}
 }
 
-func TestSubnetCreateIPv6NetNum(t *testing.T) {
+func TestSubnetCreateIPv6(t *testing.T) {
+	ctx := context.TODO()
+
 	cloud := awsup.BuildMockAWSCloud("us-east-1", "abc")
 	c := &mockec2.MockEC2{}
 	cloud.MockEC2 = c
 
 	// We define a function so we can rebuild the tasks, because we modify in-place when running
-	buildTasks := func() map[string]fi.Task {
+	buildTasks := func() map[string]fi.CloudupTask {
+		vpc1 := &VPC{
+			Name:      s("vpc1"),
+			Lifecycle: fi.LifecycleSync,
+			CIDR:      s("172.20.0.0/16"),
+			IPv6CIDR:  s("2001:db8::/56"),
+			Tags:      map[string]string{"Name": "vpc1"},
+		}
+		cidr1 := &VPCAmazonIPv6CIDRBlock{
+			Name:      s("vpcamazonipv6cidr"),
+			Lifecycle: fi.LifecycleSync,
+			VPC:       vpc1,
+		}
+		subnet1 := &Subnet{
+			Name:                s("subnet1"),
+			Lifecycle:           fi.LifecycleSync,
+			VPC:                 vpc1,
+			CIDR:                s("172.20.1.0/24"),
+			IPv6CIDR:            s("2001:db8:0:1::/64"),
+			ResourceBasedNaming: new(true),
+			Tags:                map[string]string{"Name": "subnet1"},
+		}
+
+		return map[string]fi.CloudupTask{
+			"vpc1":    vpc1,
+			"cidr1":   cidr1,
+			"subnet1": subnet1,
+		}
+	}
+
+	{
+		allTasks := buildTasks()
+		subnet1 := allTasks["subnet1"].(*Subnet)
+
+		runTasks(t, cloud, allTasks)
+
+		if fi.ValueOf(subnet1.ID) == "" {
+			t.Fatalf("ID not set after create")
+		}
+
+		if len(c.SubnetIds()) != 1 {
+			t.Fatalf("Expected exactly one Subnet; found %v", c.SubnetIds())
+		}
+
+		expected := &ec2types.Subnet{
+			AssignIpv6AddressOnCreation: aws.Bool(true),
+			CidrBlock:                   aws.String("172.20.1.0/24"),
+			Ipv6CidrBlockAssociationSet: []ec2types.SubnetIpv6CidrBlockAssociation{
+				{
+					AssociationId: aws.String("subnet-cidr-assoc-ipv6-subnet-1"),
+					Ipv6CidrBlock: aws.String("2001:db8:0:1::/64"),
+					Ipv6CidrBlockState: &ec2types.SubnetCidrBlockState{
+						State: ec2types.SubnetCidrBlockStateCodeAssociated,
+					},
+				},
+			},
+			PrivateDnsNameOptionsOnLaunch: &ec2types.PrivateDnsNameOptionsOnLaunch{
+				EnableResourceNameDnsAAAARecord: aws.Bool(true),
+				EnableResourceNameDnsARecord:    aws.Bool(true),
+				HostnameType:                    ec2types.HostnameTypeResourceName,
+			},
+			SubnetId: aws.String("subnet-1"),
+			VpcId:    aws.String("vpc-1"),
+			Tags: buildTags(map[string]string{
+				"Name": "subnet1",
+			}),
+		}
+		actual := c.FindSubnet(*subnet1.ID)
+		if actual == nil {
+			t.Fatalf("Subnet created but then not found")
+		}
+		if !reflect.DeepEqual(actual, expected) {
+			t.Fatalf("Unexpected Subnet: expected=%v actual=%v", expected, actual)
+		}
+	}
+
+	{
+		allTasks := buildTasks()
+		checkNoChanges(t, ctx, cloud, allTasks)
+	}
+}
+
+func TestSubnetCreateIPv6NetNum(t *testing.T) {
+	ctx := context.TODO()
+
+	cloud := awsup.BuildMockAWSCloud("us-east-1", "abc")
+	c := &mockec2.MockEC2{}
+	cloud.MockEC2 = c
+
+	// We define a function so we can rebuild the tasks, because we modify in-place when running
+	buildTasks := func() map[string]fi.CloudupTask {
 		vpc1 := &VPC{
 			Name:      s("vpc1"),
 			Lifecycle: fi.LifecycleSync,
@@ -260,7 +258,7 @@ func TestSubnetCreateIPv6NetNum(t *testing.T) {
 			Tags:      map[string]string{"Name": "subnet1"},
 		}
 
-		return map[string]fi.Task{
+		return map[string]fi.CloudupTask{
 			"vpc1":    vpc1,
 			"cidr1":   cidr1,
 			"subnet1": subnet1,
@@ -271,21 +269,9 @@ func TestSubnetCreateIPv6NetNum(t *testing.T) {
 		allTasks := buildTasks()
 		subnet1 := allTasks["subnet1"].(*Subnet)
 
-		target := &awsup.AWSAPITarget{
-			Cloud: cloud,
-		}
+		runTasks(t, cloud, allTasks)
 
-		context, err := fi.NewContext(target, nil, cloud, nil, nil, nil, true, allTasks)
-		if err != nil {
-			t.Fatalf("error building context: %v", err)
-		}
-		defer context.Close()
-
-		if err := context.RunTasks(testRunTasksOptions); err != nil {
-			t.Fatalf("unexpected error during Run: %v", err)
-		}
-
-		if fi.StringValue(subnet1.ID) == "" {
+		if fi.ValueOf(subnet1.ID) == "" {
 			t.Fatalf("ID not set after create")
 		}
 
@@ -293,16 +279,22 @@ func TestSubnetCreateIPv6NetNum(t *testing.T) {
 			t.Fatalf("Expected exactly one Subnet; found %v", c.SubnetIds())
 		}
 
-		expected := &ec2.Subnet{
-			CidrBlock: aws.String("172.20.1.0/24"),
-			Ipv6CidrBlockAssociationSet: []*ec2.SubnetIpv6CidrBlockAssociation{
+		expected := &ec2types.Subnet{
+			AssignIpv6AddressOnCreation: aws.Bool(true),
+			CidrBlock:                   aws.String("172.20.1.0/24"),
+			Ipv6CidrBlockAssociationSet: []ec2types.SubnetIpv6CidrBlockAssociation{
 				{
 					AssociationId: aws.String("subnet-cidr-assoc-ipv6-subnet-1"),
 					Ipv6CidrBlock: aws.String("2001:db8:0:1::/64"),
-					Ipv6CidrBlockState: &ec2.SubnetCidrBlockState{
-						State: aws.String(ec2.SubnetCidrBlockStateCodeAssociated),
+					Ipv6CidrBlockState: &ec2types.SubnetCidrBlockState{
+						State: ec2types.SubnetCidrBlockStateCodeAssociated,
 					},
 				},
+			},
+			PrivateDnsNameOptionsOnLaunch: &ec2types.PrivateDnsNameOptionsOnLaunch{
+				EnableResourceNameDnsAAAARecord: aws.Bool(false),
+				EnableResourceNameDnsARecord:    aws.Bool(false),
+				HostnameType:                    ec2types.HostnameTypeIpName,
 			},
 			SubnetId: aws.String("subnet-1"),
 			VpcId:    aws.String("vpc-1"),
@@ -321,22 +313,24 @@ func TestSubnetCreateIPv6NetNum(t *testing.T) {
 
 	{
 		allTasks := buildTasks()
-		checkNoChanges(t, cloud, allTasks)
+		checkNoChanges(t, ctx, cloud, allTasks)
 	}
 }
 
 func TestSharedSubnetCreateDoesNotCreateNew(t *testing.T) {
+	ctx := context.TODO()
+
 	cloud := awsup.BuildMockAWSCloud("us-east-1", "abc")
 	c := &mockec2.MockEC2{}
 	cloud.MockEC2 = c
 
 	// Pre-create the vpc / subnet
-	vpc, err := c.CreateVpc(&ec2.CreateVpcInput{
+	vpc, err := c.CreateVpc(ctx, &ec2.CreateVpcInput{
 		CidrBlock: aws.String("172.20.0.0/16"),
-		TagSpecifications: []*ec2.TagSpecification{
+		TagSpecifications: []ec2types.TagSpecification{
 			{
-				ResourceType: aws.String(ec2.ResourceTypeVpc),
-				Tags: []*ec2.Tag{
+				ResourceType: ec2types.ResourceTypeVpc,
+				Tags: []ec2types.Tag{
 					{
 						Key:   aws.String("Name"),
 						Value: aws.String("ExistingVPC"),
@@ -349,13 +343,13 @@ func TestSharedSubnetCreateDoesNotCreateNew(t *testing.T) {
 		t.Fatalf("error creating test VPC: %v", err)
 	}
 
-	subnet, err := c.CreateSubnet(&ec2.CreateSubnetInput{
+	subnet, err := c.CreateSubnet(ctx, &ec2.CreateSubnetInput{
 		VpcId:     vpc.Vpc.VpcId,
 		CidrBlock: aws.String("172.20.1.0/24"),
-		TagSpecifications: []*ec2.TagSpecification{
+		TagSpecifications: []ec2types.TagSpecification{
 			{
-				ResourceType: aws.String(ec2.ResourceTypeSubnet),
-				Tags: []*ec2.Tag{
+				ResourceType: ec2types.ResourceTypeSubnet,
+				Tags: []ec2types.Tag{
 					{
 						Key:   aws.String("Name"),
 						Value: aws.String("ExistingSubnet"),
@@ -369,13 +363,13 @@ func TestSharedSubnetCreateDoesNotCreateNew(t *testing.T) {
 	}
 
 	// We define a function so we can rebuild the tasks, because we modify in-place when running
-	buildTasks := func() map[string]fi.Task {
+	buildTasks := func() map[string]fi.CloudupTask {
 		vpc1 := &VPC{
 			Name:      s("vpc1"),
 			Lifecycle: fi.LifecycleSync,
 			CIDR:      s("172.20.0.0/16"),
 			Tags:      map[string]string{"kubernetes.io/cluster/cluster.example.com": "shared"},
-			Shared:    fi.Bool(true),
+			Shared:    new(true),
 			ID:        vpc.Vpc.VpcId,
 		}
 		subnet1 := &Subnet{
@@ -384,11 +378,11 @@ func TestSharedSubnetCreateDoesNotCreateNew(t *testing.T) {
 			VPC:       vpc1,
 			CIDR:      s("172.20.1.0/24"),
 			Tags:      map[string]string{"kubernetes.io/cluster/cluster.example.com": "shared"},
-			Shared:    fi.Bool(true),
+			Shared:    new(true),
 			ID:        subnet.Subnet.SubnetId,
 		}
 
-		return map[string]fi.Task{
+		return map[string]fi.CloudupTask{
 			"subnet1": subnet1,
 			"vpc1":    vpc1,
 		}
@@ -398,21 +392,9 @@ func TestSharedSubnetCreateDoesNotCreateNew(t *testing.T) {
 		allTasks := buildTasks()
 		subnet1 := allTasks["subnet1"].(*Subnet)
 
-		target := &awsup.AWSAPITarget{
-			Cloud: cloud,
-		}
+		runTasks(t, cloud, allTasks)
 
-		context, err := fi.NewContext(target, nil, cloud, nil, nil, nil, true, allTasks)
-		if err != nil {
-			t.Fatalf("error building context: %v", err)
-		}
-		defer context.Close()
-
-		if err := context.RunTasks(testRunTasksOptions); err != nil {
-			t.Fatalf("unexpected error during Run: %v", err)
-		}
-
-		if fi.StringValue(subnet1.ID) == "" {
+		if fi.ValueOf(subnet1.ID) == "" {
 			t.Fatalf("ID not set after create")
 		}
 
@@ -424,10 +406,16 @@ func TestSharedSubnetCreateDoesNotCreateNew(t *testing.T) {
 		if actual == nil {
 			t.Fatalf("Subnet created but then not found")
 		}
-		expected := &ec2.Subnet{
-			CidrBlock: aws.String("172.20.1.0/24"),
-			SubnetId:  aws.String("subnet-1"),
-			VpcId:     aws.String("vpc-1"),
+		expected := &ec2types.Subnet{
+			AssignIpv6AddressOnCreation: aws.Bool(false),
+			CidrBlock:                   aws.String("172.20.1.0/24"),
+			PrivateDnsNameOptionsOnLaunch: &ec2types.PrivateDnsNameOptionsOnLaunch{
+				EnableResourceNameDnsAAAARecord: aws.Bool(false),
+				EnableResourceNameDnsARecord:    aws.Bool(false),
+				HostnameType:                    ec2types.HostnameTypeIpName,
+			},
+			SubnetId: aws.String("subnet-1"),
+			VpcId:    aws.String("vpc-1"),
 			Tags: buildTags(map[string]string{
 				"Name": "ExistingSubnet",
 				"kubernetes.io/cluster/cluster.example.com": "shared",
@@ -444,6 +432,6 @@ func TestSharedSubnetCreateDoesNotCreateNew(t *testing.T) {
 
 	{
 		allTasks := buildTasks()
-		checkNoChanges(t, cloud, allTasks)
+		checkNoChanges(t, ctx, cloud, allTasks)
 	}
 }

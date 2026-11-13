@@ -31,11 +31,12 @@ const (
 	// A program name, for use in help, finding the XDG_CONFIG_DIR, etc.
 	ProgramName = "kustomize"
 
-	// ConfigAnnoDomain is configuration-related annotation namespace.
-	ConfigAnnoDomain = "config.kubernetes.io"
+	// ConfigAnnoDomain is internal configuration-related annotation namespace.
+	// See https://github.com/kubernetes-sigs/kustomize/blob/master/cmd/config/docs/api-conventions/functions-spec.md.
+	ConfigAnnoDomain = "internal.config.kubernetes.io"
 
 	// If a resource has this annotation, kustomize will drop it.
-	IgnoredByKustomizeAnnotation = ConfigAnnoDomain + "/local-config"
+	IgnoredByKustomizeAnnotation = "config.kubernetes.io/local-config"
 
 	// Label key that indicates the resources are built from Kustomize
 	ManagedbyLabelKey = "app.kubernetes.io/managed-by"
@@ -45,4 +46,7 @@ const (
 
 	// Label key that indicates the resources are validated by a validator
 	ValidatedByLabelKey = "validated-by"
+
+	// Annotation key for marking helm-generated resources to skip namespace transformation
+	HelmGeneratedAnnotation = ConfigAnnoDomain + "/helm-generated"
 )

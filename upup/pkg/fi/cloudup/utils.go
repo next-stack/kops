@@ -17,6 +17,7 @@ limitations under the License.
 package cloudup
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -25,24 +26,28 @@ import (
 	"k8s.io/kops/dnsprovider/pkg/dnsprovider/providers/aws/route53"
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/upup/pkg/fi"
-	"k8s.io/kops/upup/pkg/fi/cloudup/aliup"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
 	"k8s.io/kops/upup/pkg/fi/cloudup/azure"
 	"k8s.io/kops/upup/pkg/fi/cloudup/do"
 	"k8s.io/kops/upup/pkg/fi/cloudup/gce"
+	"k8s.io/kops/upup/pkg/fi/cloudup/hetzner"
+	"k8s.io/kops/upup/pkg/fi/cloudup/linode"
+	"k8s.io/kops/upup/pkg/fi/cloudup/metal"
 	"k8s.io/kops/upup/pkg/fi/cloudup/openstack"
+	"k8s.io/kops/upup/pkg/fi/cloudup/scaleway"
 )
 
 func BuildCloud(cluster *kops.Cluster) (fi.Cloud, error) {
 	var cloud fi.Cloud
+	ctx := context.TODO()
 
 	region := ""
 	project := ""
 
-	switch kops.CloudProviderID(cluster.Spec.CloudProvider) {
+	switch cluster.GetCloudProvider() {
 	case kops.CloudProviderGCE:
 		{
-			for _, subnet := range cluster.Spec.Subnets {
+			for _, subnet := range cluster.Spec.Networking.Subnets {
 				if subnet.Region != "" {
 					region = subnet.Region
 				}
@@ -51,12 +56,13 @@ func BuildCloud(cluster *kops.Cluster) (fi.Cloud, error) {
 				return nil, fmt.Errorf("on GCE, subnets must include Regions")
 			}
 
-			project = cluster.Spec.Project
+			project = cluster.Spec.CloudProvider.GCE.Project
 			if project == "" {
 				return nil, fmt.Errorf("project is required for GCE - try gcloud config get-value project")
 			}
 
-			labels := map[string]string{gce.GceLabelNameKubernetesCluster: gce.SafeClusterName(cluster.ObjectMeta.Name)}
+			clusterLabel := gce.LabelForCluster(cluster.ObjectMeta.Name)
+			labels := map[string]string{clusterLabel.Key: clusterLabel.Value}
 
 			gceCloud, err := gce.NewGCECloud(region, project, labels)
 			if err != nil {
@@ -73,7 +79,7 @@ func BuildCloud(cluster *kops.Cluster) (fi.Cloud, error) {
 				return nil, err
 			}
 
-			err = awsup.ValidateRegion(region)
+			err = awsup.ValidateRegion(ctx, region)
 			if err != nil {
 				return nil, err
 			}
@@ -86,8 +92,11 @@ func BuildCloud(cluster *kops.Cluster) (fi.Cloud, error) {
 			}
 
 			var zoneNames []string
-			for _, subnet := range cluster.Spec.Subnets {
-				zoneNames = append(zoneNames, subnet.Zone)
+			for _, subnet := range cluster.Spec.Networking.Subnets {
+				// The zone of a subnet specified by ID is looked up from the cloud later.
+				if subnet.Zone != "" {
+					zoneNames = append(zoneNames, subnet.Zone)
+				}
 			}
 			err = awsup.ValidateZones(zoneNames, awsCloud)
 			if err != nil {
@@ -100,7 +109,7 @@ func BuildCloud(cluster *kops.Cluster) (fi.Cloud, error) {
 			// for development purposes we're going to assume
 			// single region setups for DO. Reconsider this logic
 			// when setting up multi-region kubernetes clusters on DO
-			region := cluster.Spec.Subnets[0].Zone
+			region := cluster.Spec.Networking.Subnets[0].Zone
 			doCloud, err := do.NewDOCloud(region)
 			if err != nil {
 				return nil, fmt.Errorf("error initializing digitalocean cloud: %s", err)
@@ -109,15 +118,29 @@ func BuildCloud(cluster *kops.Cluster) (fi.Cloud, error) {
 			cloud = doCloud
 		}
 
+	case kops.CloudProviderHetzner:
+		{
+			region, err := hetzner.FindRegion(cluster)
+			if err != nil {
+				return nil, err
+			}
+
+			hetznerCloud, err := hetzner.NewHetznerCloud(region)
+			if err != nil {
+				return nil, fmt.Errorf("error initializing hetzner cloud: %s", err)
+			}
+
+			cloud = hetznerCloud
+		}
+
 	case kops.CloudProviderOpenstack:
 		{
-			cloudTags := map[string]string{openstack.TagClusterName: cluster.ObjectMeta.Name}
-			osc, err := openstack.NewOpenstackCloud(cloudTags, &cluster.Spec, "build-cloud")
+			osc, err := openstack.NewOpenstackCloud(cluster, "build-cloud")
 			if err != nil {
 				return nil, err
 			}
 			var zoneNames []string
-			for _, subnet := range cluster.Spec.Subnets {
+			for _, subnet := range cluster.Spec.Networking.Subnets {
 				if !fi.ArrayContains(zoneNames, subnet.Zone) {
 					zoneNames = append(zoneNames, subnet.Zone)
 				}
@@ -126,25 +149,9 @@ func BuildCloud(cluster *kops.Cluster) (fi.Cloud, error) {
 			cloud = osc
 		}
 
-	case kops.CloudProviderALI:
-		{
-			region, err := aliup.FindRegion(cluster)
-			if err != nil {
-				return nil, err
-			}
-
-			cloudTags := map[string]string{aliup.TagClusterName: cluster.ObjectMeta.Name}
-			aliCloud, err := aliup.NewALICloud(region, cloudTags)
-			if err != nil {
-				return nil, err
-			}
-
-			cloud = aliCloud
-		}
-
 	case kops.CloudProviderAzure:
 		{
-			for _, subnet := range cluster.Spec.Subnets {
+			for _, subnet := range cluster.Spec.Networking.Subnets {
 				if subnet.Region != "" {
 					region = subnet.Region
 				}
@@ -154,16 +161,72 @@ func BuildCloud(cluster *kops.Cluster) (fi.Cloud, error) {
 			}
 
 			cloudTags := map[string]string{azure.TagClusterName: cluster.ObjectMeta.Name}
+			for k, v := range cluster.Spec.CloudLabels {
+				cloudTags[k] = v
+			}
 
-			azureCloud, err := azure.NewAzureCloud(cluster.Spec.CloudConfig.Azure.SubscriptionID, region, cloudTags)
+			subscriptionID := cluster.Spec.CloudProvider.Azure.SubscriptionID
+			resourceGroupName := cluster.AzureResourceGroupName()
+			azureCloud, err := azure.NewAzureCloud(subscriptionID, resourceGroupName, region, cloudTags)
 			if err != nil {
 				return nil, err
 			}
 
 			cloud = azureCloud
 		}
+	case kops.CloudProviderScaleway:
+		{
+			zone, err := scaleway.ParseZoneFromClusterSpec(cluster.Spec)
+			if err != nil {
+				return nil, fmt.Errorf("error initializing Scaleway cloud: %w", err)
+			}
+			region, err := scaleway.ParseRegionFromZone(zone)
+			if err != nil {
+				return nil, fmt.Errorf("error initializing Scaleway cloud: %w", err)
+			}
+
+			cloudTags := map[string]string{
+				scaleway.TagClusterName: cluster.ObjectMeta.Name,
+				"zone":                  string(zone),
+				"region":                string(region),
+			}
+			for k, v := range cluster.Spec.CloudLabels {
+				cloudTags[k] = v
+			}
+
+			scwCloud, err := scaleway.NewScwCloud(cloudTags)
+			if err != nil {
+				return nil, fmt.Errorf("error initializing Scaleway cloud: %w", err)
+			}
+
+			cloud = scwCloud
+		}
+	case kops.CloudProviderMetal:
+		metalCloud, err := metal.NewCloud()
+		if err != nil {
+			return nil, fmt.Errorf("error initializing Metal cloud: %w", err)
+		}
+		cloud = metalCloud
+
+	case kops.CloudProviderLinode:
+		for _, subnet := range cluster.Spec.Networking.Subnets {
+			if subnet.Region != "" {
+				region = subnet.Region
+				break
+			}
+		}
+		if region == "" {
+			return nil, fmt.Errorf("on Akamai (Linode), subnets must include Regions")
+		}
+
+		linodeCloud, err := linode.NewCloud(region)
+		if err != nil {
+			return nil, fmt.Errorf("error initializing Akamai (Linode) cloud: %w", err)
+		}
+
+		cloud = linodeCloud
 	default:
-		return nil, fmt.Errorf("unknown CloudProvider %q", cluster.Spec.CloudProvider)
+		return nil, fmt.Errorf("unknown CloudProvider %q", cluster.GetCloudProvider())
 	}
 	return cloud, nil
 }
@@ -196,7 +259,7 @@ func FindDNSHostedZone(dns dnsprovider.Interface, clusterDNSName string, dnsType
 				hostedZone := awsZone.Route53HostedZone()
 				if hostedZone.Config != nil {
 					zoneDNSType := kops.DNSTypePublic
-					if fi.BoolValue(hostedZone.Config.PrivateZone) {
+					if hostedZone.Config.PrivateZone {
 						zoneDNSType = kops.DNSTypePrivate
 					}
 					if zoneDNSType != dnsType {
@@ -233,8 +296,8 @@ func FindDNSHostedZone(dns dnsprovider.Interface, clusterDNSName string, dnsType
 		// We make this an error because you have to set up DNS delegation anyway
 		tokens := strings.Split(clusterDNSName, ".")
 		suffix := strings.Join(tokens[len(tokens)-2:], ".")
-		//klog.Warningf("No matching hosted zones found; will created %q", suffix)
-		//return suffix, nil
+		// klog.Warningf("No matching hosted zones found; will created %q", suffix)
+		// return suffix, nil
 		return "", fmt.Errorf("No matching hosted zones found for %q; please create one (e.g. %q) first", clusterDNSName, suffix)
 	}
 

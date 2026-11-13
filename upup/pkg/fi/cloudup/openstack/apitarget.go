@@ -24,7 +24,7 @@ type OpenstackAPITarget struct {
 	Cloud OpenstackCloud
 }
 
-var _ fi.Target = &OpenstackAPITarget{}
+var _ fi.CloudupTarget = (*OpenstackAPITarget)(nil)
 
 func NewOpenstackAPITarget(cloud OpenstackCloud) *OpenstackAPITarget {
 	return &OpenstackAPITarget{
@@ -32,10 +32,10 @@ func NewOpenstackAPITarget(cloud OpenstackCloud) *OpenstackAPITarget {
 	}
 }
 
-func (t *OpenstackAPITarget) Finish(taskMap map[string]fi.Task) error {
+func (t *OpenstackAPITarget) Finish(taskMap map[string]fi.CloudupTask) error {
 	return nil
 }
 
-func (t *OpenstackAPITarget) ProcessDeletions() bool {
+func (t *OpenstackAPITarget) DefaultCheckExisting() bool {
 	return true
 }

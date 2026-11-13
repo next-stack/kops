@@ -15,23 +15,23 @@
 # limitations under the License.
 
 REPO_ROOT=$(git rev-parse --show-toplevel);
-source "${REPO_ROOT}"/tests/e2e/scenarios/lib/common.sh
 
-kops-acquire-latest
+make test-e2e-install
 
-OVERRIDES="${OVERRIDES-} --override=cluster.spec.metricsServer.enabled=true"
-OVERRIDES="$OVERRIDES --override=cluster.spec.certManager.enabled=true"
+KUBETEST2_ARGS=()
+KUBETEST2_ARGS+=("-v=2")
 
-kops-up
+if [[ "${JOB_TYPE}" == "presubmit" && "${REPO_OWNER}/${REPO_NAME}" == "kubernetes/kops" ]]; then
+  KUBETEST2_ARGS+=("--build")
+  KUBETEST2_ARGS+=("--kops-binary-path=${GOPATH}/src/k8s.io/kops/.build/dist/linux/$(go env GOARCH)/kops")
+else
+  KUBETEST2_ARGS+=("--kops-version-marker=${KOPS_VERSION_MARKER:-https://storage.googleapis.com/k8s-staging-kops/kops/releases/markers/master/latest-ci.txt}")
+fi
 
-# shellcheck disable=SC2164
-cd "$(mktemp -dt kops.XXXXXXXXX)"
-
-git clone --branch v0.5.0 https://github.com/kubernetes-sigs/metrics-server.git .
-
-# The prometheus test expects to have only one metrics-server pod, but we use two
-# We scale down to meet test expectation
-kubectl scale -n kube-system --replicas=1 deployment/metrics-server
-
-# shellcheck disable=SC2164
-go test -v ./test/e2e_test.go -count=1
+kubetest2 kops \
+    --up --down \
+    "${KUBETEST2_ARGS[@]}" \
+    --cloud-provider=aws \
+    --create-args="--set=cluster.spec.metricsServer.enabled=true --set=cluster.spec.certManager.enabled=true --control-plane-size=m6g.large --node-size=m6g.large" \
+    --kubernetes-version=https://dl.k8s.io/release/stable.txt \
+    --test=exec -- "${REPO_ROOT}/tests/e2e/scenarios/metrics-server/test.sh"

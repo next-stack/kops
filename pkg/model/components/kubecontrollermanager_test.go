@@ -25,14 +25,15 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	api "k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/assets"
-	"k8s.io/kops/upup/pkg/fi"
+	"k8s.io/kops/util/pkg/vfs"
 )
 
 func buildCluster() *api.Cluster {
-
 	return &api.Cluster{
 		Spec: api.ClusterSpec{
-			CloudProvider:     "aws",
+			CloudProvider: api.CloudProviderSpec{
+				AWS: &api.AWSSpec{},
+			},
 			KubernetesVersion: "v1.20.0",
 			KubeAPIServer:     &api.KubeAPIServerConfig{},
 		},
@@ -45,7 +46,7 @@ func Test_Build_KCM_Builder(t *testing.T) {
 
 		c := buildCluster()
 		c.Spec.KubernetesVersion = v
-		b := assets.NewAssetBuilder(c, false)
+		b := assets.NewAssetBuilder(vfs.Context, c.Spec.Assets, false)
 
 		kcm := &KubeControllerManagerOptionsBuilder{
 			OptionsContext: &OptionsContext{
@@ -53,7 +54,7 @@ func Test_Build_KCM_Builder(t *testing.T) {
 			},
 		}
 
-		err := kcm.BuildOptions(&c.Spec)
+		err := kcm.BuildOptions(c)
 		if err != nil {
 			t.Fatalf("unexpected error from BuildOptions %s", err)
 		}
@@ -62,13 +63,11 @@ func Test_Build_KCM_Builder(t *testing.T) {
 			t.Fatalf("AttachDetachReconcileSyncPeriod should be set to 1m - %s, for k8s version %s", c.Spec.KubeControllerManager.AttachDetachReconcileSyncPeriod.Duration.String(), c.Spec.KubernetesVersion)
 		}
 	}
-
 }
 
 func Test_Build_KCM_Builder_Change_Duration(t *testing.T) {
-
 	c := buildCluster()
-	b := assets.NewAssetBuilder(c, false)
+	b := assets.NewAssetBuilder(vfs.Context, c.Spec.Assets, false)
 
 	kcm := &KubeControllerManagerOptionsBuilder{
 		OptionsContext: &OptionsContext{
@@ -82,7 +81,7 @@ func Test_Build_KCM_Builder_Change_Duration(t *testing.T) {
 
 	c.Spec.KubeControllerManager.AttachDetachReconcileSyncPeriod.Duration = time.Minute * 5
 
-	err := kcm.BuildOptions(&c.Spec)
+	err := kcm.BuildOptions(c)
 	if err != nil {
 		t.Fatalf("unexpected error from BuildOptions %s", err)
 	}
@@ -90,7 +89,6 @@ func Test_Build_KCM_Builder_Change_Duration(t *testing.T) {
 	if c.Spec.KubeControllerManager.AttachDetachReconcileSyncPeriod.Duration != time.Minute*5 {
 		t.Fatalf("AttachDetachReconcileSyncPeriod should be set to 5m - %s, for k8s version %s", c.Spec.KubeControllerManager.AttachDetachReconcileSyncPeriod.Duration.String(), c.Spec.KubernetesVersion)
 	}
-
 }
 
 func Test_Build_KCM_Builder_CIDR_Mask_Size(t *testing.T) {
@@ -105,46 +103,46 @@ func Test_Build_KCM_Builder_CIDR_Mask_Size(t *testing.T) {
 		},
 		{
 			PodCIDR:          "2001:DB8::/32",
-			ExpectedMaskSize: fi.Int32(48),
+			ExpectedMaskSize: new(int32(48)),
 		},
 		{
 			PodCIDR:          "2001:DB8::/65",
-			ExpectedMaskSize: fi.Int32(81),
+			ExpectedMaskSize: new(int32(81)),
 		},
 		{
 			PodCIDR:          "2001:DB8::/32",
 			ClusterCIDR:      "2001:DB8::/65",
-			ExpectedMaskSize: fi.Int32(81),
+			ExpectedMaskSize: new(int32(81)),
 		},
 		{
 			PodCIDR:          "2001:DB8::/95",
-			ExpectedMaskSize: fi.Int32(111),
+			ExpectedMaskSize: new(int32(111)),
 		},
 		{
 			PodCIDR:          "2001:DB8::/96",
-			ExpectedMaskSize: fi.Int32(112),
+			ExpectedMaskSize: new(int32(112)),
 		},
 		{
 			PodCIDR:          "2001:DB8::/97",
-			ExpectedMaskSize: fi.Int32(112),
+			ExpectedMaskSize: new(int32(112)),
 		},
 		{
 			PodCIDR:          "2001:DB8::/98",
-			ExpectedMaskSize: fi.Int32(113),
+			ExpectedMaskSize: new(int32(113)),
 		},
 		{
 			PodCIDR:          "2001:DB8::/99",
-			ExpectedMaskSize: fi.Int32(113),
+			ExpectedMaskSize: new(int32(113)),
 		},
 		{
 			PodCIDR:          "2001:DB8::/100",
-			ExpectedMaskSize: fi.Int32(114),
+			ExpectedMaskSize: new(int32(114)),
 		},
 	}
 	for _, tc := range grid {
 		t.Run(tc.PodCIDR+":"+tc.ClusterCIDR, func(t *testing.T) {
 			c := buildCluster()
-			b := assets.NewAssetBuilder(c, false)
+			b := assets.NewAssetBuilder(vfs.Context, c.Spec.Assets, false)
 
 			kcm := &KubeControllerManagerOptionsBuilder{
 				OptionsContext: &OptionsContext{
@@ -152,16 +150,15 @@ func Test_Build_KCM_Builder_CIDR_Mask_Size(t *testing.T) {
 				},
 			}
 
-			c.Spec.PodCIDR = tc.PodCIDR
+			c.Spec.Networking.PodCIDR = tc.PodCIDR
 			c.Spec.KubeControllerManager = &api.KubeControllerManagerConfig{
 				ClusterCIDR: tc.ClusterCIDR,
 			}
 
-			err := kcm.BuildOptions(&c.Spec)
+			err := kcm.BuildOptions(c)
 			require.NoError(t, err)
 
 			assert.Equal(t, tc.ExpectedMaskSize, c.Spec.KubeControllerManager.NodeCIDRMaskSize)
 		})
 	}
-
 }

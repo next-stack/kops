@@ -7,6 +7,8 @@ locals {
   subnet_utility-us-test-1a_id      = aws_subnet.utility-us-test-1a-lifecyclephases-example-com.id
   vpc_cidr_block                    = aws_vpc.lifecyclephases-example-com.cidr_block
   vpc_id                            = aws_vpc.lifecyclephases-example-com.id
+  vpc_ipv6_cidr_block               = aws_vpc.lifecyclephases-example-com.ipv6_cidr_block
+  vpc_ipv6_cidr_length              = local.vpc_ipv6_cidr_block == "" ? null : tonumber(regex(".*/(\\d+)", local.vpc_ipv6_cidr_block)[0])
 }
 
 output "cluster_name" {
@@ -41,22 +43,25 @@ output "vpc_id" {
   value = aws_vpc.lifecyclephases-example-com.id
 }
 
-provider "aws" {
-  region = "us-test-1"
+output "vpc_ipv6_cidr_block" {
+  value = aws_vpc.lifecyclephases-example-com.ipv6_cidr_block
+}
+
+output "vpc_ipv6_cidr_length" {
+  value = local.vpc_ipv6_cidr_block == "" ? null : tonumber(regex(".*/(\\d+)", local.vpc_ipv6_cidr_block)[0])
 }
 
 provider "aws" {
-  alias  = "files"
   region = "us-test-1"
 }
 
 resource "aws_eip" "us-test-1a-lifecyclephases-example-com" {
+  domain = "vpc"
   tags = {
     "KubernetesCluster"                                 = "lifecyclephases.example.com"
     "Name"                                              = "us-test-1a.lifecyclephases.example.com"
     "kubernetes.io/cluster/lifecyclephases.example.com" = "owned"
   }
-  vpc = true
 }
 
 resource "aws_internet_gateway" "lifecyclephases-example-com" {
@@ -127,8 +132,10 @@ resource "aws_route_table_association" "utility-us-test-1a-lifecyclephases-examp
 }
 
 resource "aws_subnet" "us-test-1a-lifecyclephases-example-com" {
-  availability_zone = "us-test-1a"
-  cidr_block        = "172.20.32.0/19"
+  availability_zone                           = "us-test-1a"
+  cidr_block                                  = "172.20.32.0/19"
+  enable_resource_name_dns_a_record_on_launch = true
+  private_dns_hostname_type_on_launch         = "resource-name"
   tags = {
     "KubernetesCluster"                                 = "lifecyclephases.example.com"
     "Name"                                              = "us-test-1a.lifecyclephases.example.com"
@@ -140,8 +147,10 @@ resource "aws_subnet" "us-test-1a-lifecyclephases-example-com" {
 }
 
 resource "aws_subnet" "utility-us-test-1a-lifecyclephases-example-com" {
-  availability_zone = "us-test-1a"
-  cidr_block        = "172.20.4.0/22"
+  availability_zone                           = "us-test-1a"
+  cidr_block                                  = "172.20.4.0/22"
+  enable_resource_name_dns_a_record_on_launch = true
+  private_dns_hostname_type_on_launch         = "resource-name"
   tags = {
     "KubernetesCluster"                                 = "lifecyclephases.example.com"
     "Name"                                              = "utility-us-test-1a.lifecyclephases.example.com"
@@ -183,9 +192,8 @@ terraform {
   required_version = ">= 0.15.0"
   required_providers {
     aws = {
-      "configuration_aliases" = [aws.files]
-      "source"                = "hashicorp/aws"
-      "version"               = ">= 3.59.0"
+      "source"  = "hashicorp/aws"
+      "version" = ">= 6.57.1"
     }
   }
 }

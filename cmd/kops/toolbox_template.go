@@ -19,26 +19,21 @@ package main
 import (
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/spf13/pflag"
-	"helm.sh/helm/v3/pkg/strvals"
-	"k8s.io/kops/pkg/commands/commandutils"
 	"k8s.io/kubectl/pkg/util/i18n"
 	"k8s.io/kubectl/pkg/util/templates"
 	"sigs.k8s.io/yaml"
 
-	helmvalues "helm.sh/helm/v3/pkg/cli/values"
-
-	"k8s.io/kops/cmd/kops/util"
 	kopsapi "k8s.io/kops/pkg/apis/kops"
+	"k8s.io/kops/pkg/commands/commandutils"
 	"k8s.io/kops/pkg/try"
 	"k8s.io/kops/pkg/util/templater"
+	"k8s.io/kops/third_party/forked/helmstrvals"
 	"k8s.io/kops/upup/pkg/fi/utils"
 )
 
@@ -75,7 +70,7 @@ type ToolboxTemplateOptions struct {
 }
 
 // NewCmdToolboxTemplate returns a new templating command.
-func NewCmdToolboxTemplate(f *util.Factory, out io.Writer) *cobra.Command {
+func NewCmdToolboxTemplate(f commandutils.Factory, out io.Writer) *cobra.Command {
 	options := &ToolboxTemplateOptions{
 		channel: kopsapi.DefaultChannel,
 	}
@@ -105,24 +100,19 @@ func NewCmdToolboxTemplate(f *util.Factory, out io.Writer) *cobra.Command {
 	cmd.MarkFlagDirname("snippets")
 	cmd.Flags().StringVar(&options.channel, "channel", options.channel, "Channel to use for the channel* functions")
 	cmd.RegisterFlagCompletionFunc("channel", completeChannel)
+	cmd.Flags().StringVar(&options.outputPath, "output", options.outputPath, "Path to output file. Defaults to stdout")
+	cmd.Flags().MarkDeprecated("output", "use --out instead")
 	cmd.Flags().StringVar(&options.outputPath, "out", options.outputPath, "Path to output file. Defaults to stdout")
 	cmd.Flags().StringVar(&options.configValue, "config-value", "", "Show the value of a specific configuration value")
 	cmd.RegisterFlagCompletionFunc("config-value", cobra.NoFileCompletions)
 	cmd.Flags().BoolVar(&options.failOnMissing, "fail-on-missing", true, "Fail on referencing unset variables in templates")
 	cmd.Flags().BoolVar(&options.formatYAML, "format-yaml", false, "Attempt to format the generated yaml content before output")
-	cmd.Flags().SetNormalizeFunc(func(f *pflag.FlagSet, name string) pflag.NormalizedName {
-		// Old flag name for outputPath
-		if name == "output" {
-			name = "out"
-		}
-		return pflag.NormalizedName(name)
-	})
 
 	return cmd
 }
 
 // RunToolBoxTemplate is the action for the command
-func RunToolBoxTemplate(f *util.Factory, out io.Writer, options *ToolboxTemplateOptions) error {
+func RunToolBoxTemplate(f commandutils.Factory, out io.Writer, options *ToolboxTemplateOptions) error {
 	// @step: read in the configuration if any
 	context, err := newTemplateContext(options.configPath, options.values, options.stringValues)
 	if err != nil {
@@ -167,7 +157,7 @@ func RunToolBoxTemplate(f *util.Factory, out io.Writer, options *ToolboxTemplate
 		}
 
 		for _, j := range list {
-			content, err := ioutil.ReadFile(j)
+			content, err := os.ReadFile(j)
 			if err != nil {
 				return fmt.Errorf("unable to read snippet: %s, error: %s", j, err)
 			}
@@ -175,7 +165,7 @@ func RunToolBoxTemplate(f *util.Factory, out io.Writer, options *ToolboxTemplate
 		}
 	}
 
-	channel, err := kopsapi.LoadChannel(options.channel)
+	channel, err := kopsapi.LoadChannel(f.VFSContext(), options.channel)
 	if err != nil {
 		return fmt.Errorf("error loading channel %q: %v", options.channel, err)
 	}
@@ -184,7 +174,7 @@ func RunToolBoxTemplate(f *util.Factory, out io.Writer, options *ToolboxTemplate
 	r := templater.NewTemplater(channel)
 	var documents []string
 	for _, x := range templates {
-		content, err := ioutil.ReadFile(x)
+		content, err := os.ReadFile(x)
 		if err != nil {
 			return fmt.Errorf("unable to read template: %s, error: %s", x, err)
 		}
@@ -224,7 +214,7 @@ func RunToolBoxTemplate(f *util.Factory, out io.Writer, options *ToolboxTemplate
 	iowriter := out
 	// @check if we are writing to a file rather than stdout
 	if options.outputPath != "" {
-		w, err := os.OpenFile(utils.ExpandPath(options.outputPath), os.O_RDWR|os.O_TRUNC|os.O_CREATE, 0660)
+		w, err := os.OpenFile(utils.ExpandPath(options.outputPath), os.O_RDWR|os.O_TRUNC|os.O_CREATE, 0o660)
 		if err != nil {
 			return fmt.Errorf("unable to open file: %s, error: %v", options.outputPath, err)
 		}
@@ -249,7 +239,7 @@ func newTemplateContext(files []string, values []string, stringValues []string) 
 			return nil, err
 		}
 		for _, j := range list {
-			content, err := ioutil.ReadFile(j)
+			content, err := os.ReadFile(j)
 			if err != nil {
 				return nil, fmt.Errorf("unable to configuration file: %s, error: %s", j, err)
 			}
@@ -258,30 +248,20 @@ func newTemplateContext(files []string, values []string, stringValues []string) 
 			if err := utils.YamlUnmarshal(content, &ctx); err != nil {
 				return nil, fmt.Errorf("unable decode the configuration file: %s, error: %v", j, err)
 			}
-
-			valueOpts := &helmvalues.Options{
-				Values:       values,
-				ValueFiles:   files,
-				StringValues: stringValues,
-			}
-
-			context, err = valueOpts.MergeValues(nil)
-			if err != nil {
-				return nil, err
-			}
+			context = mergeMaps(context, ctx)
 		}
 	}
 
 	// User specified a value via --set
 	for _, value := range values {
-		if err := strvals.ParseInto(value, context); err != nil {
+		if err := helmstrvals.ParseInto(value, context); err != nil {
 			return nil, fmt.Errorf("failed parsing --set data: %s", err)
 		}
 	}
 
 	// User specified a value via --set-string
 	for _, value := range stringValues {
-		if err := strvals.ParseIntoString(value, context); err != nil {
+		if err := helmstrvals.ParseIntoString(value, context); err != nil {
 			return nil, fmt.Errorf("failed parsing --set-string data: %s", err)
 		}
 	}
@@ -314,4 +294,23 @@ func expandFiles(path string) ([]string, error) {
 	}
 
 	return list, nil
+}
+
+// mergeMaps deep-merges src into dst, returning the result. Nested maps are
+// recursively merged; other values from src overwrite dst.
+func mergeMaps(dst, src map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(dst))
+	for k, v := range dst {
+		out[k] = v
+	}
+	for k, v := range src {
+		if vmap, ok := v.(map[string]interface{}); ok {
+			if existing, ok := out[k].(map[string]interface{}); ok {
+				out[k] = mergeMaps(existing, vmap)
+				continue
+			}
+		}
+		out[k] = v
+	}
+	return out
 }

@@ -20,18 +20,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/azure"
 
-	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2020-06-01/compute"
-	// Use 2018-01-01-preview API as we need the version to create
-	// a role assignment with Data Actions (https://github.com/Azure/azure-sdk-for-go/issues/1895).
-	// The non-preview version of the authorization API (2015-07-01)
-	// doesn't support Data Actions.q
-	authz "github.com/Azure/azure-sdk-for-go/services/preview/authorization/mgmt/2018-01-01-preview/authorization"
-	"github.com/Azure/go-autorest/autorest/to"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
+	authz "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/authorization/armauthorization/v3"
 	"github.com/google/uuid"
 )
 
@@ -46,14 +42,17 @@ type RoleAssignment struct {
 	Name      *string
 	Lifecycle fi.Lifecycle
 
-	ResourceGroup *ResourceGroup
-	VMScaleSet    *VMScaleSet
-	ID            *string
-	RoleDefID     *string
+	Scope      *string
+	VMScaleSet *VMScaleSet
+	ID         *string
+	RoleDefID  *string
 }
 
-var _ fi.Task = &RoleAssignment{}
-var _ fi.CompareWithID = &RoleAssignment{}
+var (
+	_ fi.CloudupTask   = &RoleAssignment{}
+	_ fi.CompareWithID = &RoleAssignment{}
+	// RoleAssignment does not implement CloudupTaskNormalize because Azure role assignments do not support tags.
+)
 
 // CompareWithID returns the Name of the VM Scale Set.
 func (r *RoleAssignment) CompareWithID() *string {
@@ -61,7 +60,7 @@ func (r *RoleAssignment) CompareWithID() *string {
 }
 
 // Find discovers the RoleAssignment in the cloud provider.
-func (r *RoleAssignment) Find(c *fi.Context) (*RoleAssignment, error) {
+func (r *RoleAssignment) Find(c *fi.CloudupContext) (*RoleAssignment, error) {
 	if r.VMScaleSet.PrincipalID == nil {
 		// PrincipalID of the VM Scale Set hasn't yet been
 		// populated. No corresponding Role Assignment
@@ -69,21 +68,24 @@ func (r *RoleAssignment) Find(c *fi.Context) (*RoleAssignment, error) {
 		return nil, nil
 	}
 
-	cloud := c.Cloud.(azure.AzureCloud)
-	rs, err := cloud.RoleAssignment().List(context.TODO(), *r.ResourceGroup.Name)
+	cloud := c.T.Cloud.(azure.AzureCloud)
+	rs, err := cloud.RoleAssignment().List(context.TODO(), *r.Scope)
 	if err != nil {
 		return nil, err
 	}
 
 	principalID := *r.VMScaleSet.PrincipalID
 	var found *authz.RoleAssignment
-	for _, ra := range rs {
-		// Use a name constructed by VMSS and Role definition ID to find a Role Assignment. We cannot use ra.Name
-		// as it is set to a randomly generated GUID.
-		l := strings.Split(*ra.RoleDefinitionID, "/")
+	for i := range rs {
+		ra := rs[i]
+		if ra.Properties == nil {
+			continue
+		}
+		// Match the VMSS managed identity and role definition; role assignment names are GUIDs.
+		l := strings.Split(*ra.Properties.RoleDefinitionID, "/")
 		roleDefID := l[len(l)-1]
-		if *ra.PrincipalID == principalID && roleDefID == *r.RoleDefID {
-			found = &ra
+		if *ra.Properties.PrincipalID == principalID && roleDefID == *r.RoleDefID {
+			found = ra
 			break
 		}
 	}
@@ -91,42 +93,22 @@ func (r *RoleAssignment) Find(c *fi.Context) (*RoleAssignment, error) {
 		return nil, nil
 	}
 
-	// Query VM Scale Sets and find one that has matching Principal ID.
-	vs, err := cloud.VMScaleSet().List(context.TODO(), *r.ResourceGroup.Name)
-	if err != nil {
-		return nil, err
-	}
-	var foundVMSS *compute.VirtualMachineScaleSet
-	for _, v := range vs {
-		if v.Identity == nil {
-			continue
-		}
-		if *v.Identity.PrincipalID == principalID {
-			foundVMSS = &v
-			break
-		}
-	}
-	if foundVMSS == nil {
-		return nil, fmt.Errorf("corresponding VM Scale Set not found for Role Assignment: %s", *found.ID)
-	}
-
+	r.ID = found.ID
 	return &RoleAssignment{
 		Name:      r.Name,
 		Lifecycle: r.Lifecycle,
-		ResourceGroup: &ResourceGroup{
-			Name: r.ResourceGroup.Name,
-		},
+		Scope:     found.Properties.Scope,
 		VMScaleSet: &VMScaleSet{
-			Name: foundVMSS.Name,
+			Name: r.VMScaleSet.Name,
 		},
 		ID:        found.ID,
-		RoleDefID: found.RoleDefinitionID,
+		RoleDefID: to.Ptr(filepath.Base(*found.Properties.RoleDefinitionID)),
 	}, nil
 }
 
 // Run implements fi.Task.Run.
-func (r *RoleAssignment) Run(c *fi.Context) error {
-	return fi.DefaultDeltaRunMethod(r, c)
+func (r *RoleAssignment) Run(c *fi.CloudupContext) error {
+	return fi.CloudupDefaultDeltaRunMethod(r, c)
 }
 
 // CheckChanges returns an error if a change is not allowed.
@@ -161,13 +143,11 @@ func createNewRoleAssignment(t *azure.AzureAPITarget, e *RoleAssignment) error {
 	// We generate the name of Role Assignment here. It must be a valid GUID.
 	roleAssignmentName := uuid.New().String()
 
-	// TODO(kenji): Append additinoal scope ("providers/Microsoft.Storage/storageAccounts/<account-name>") when the role is for blob access so that
-	// the role is scoped to a specific storage account.
-	scope := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s", t.Cloud.SubscriptionID(), *e.ResourceGroup.Name)
+	scope := *e.Scope
 	roleDefID := fmt.Sprintf("%s/providers/Microsoft.Authorization/roleDefinitions/%s", scope, *e.RoleDefID)
 	roleAssignment := authz.RoleAssignmentCreateParameters{
-		RoleAssignmentProperties: &authz.RoleAssignmentProperties{
-			RoleDefinitionID: to.StringPtr(roleDefID),
+		Properties: &authz.RoleAssignmentProperties{
+			RoleDefinitionID: to.Ptr(roleDefID),
 			PrincipalID:      e.VMScaleSet.PrincipalID,
 		},
 	}

@@ -28,27 +28,28 @@ import (
 	"k8s.io/kops/dnsprovider/pkg/dnsprovider"
 	"k8s.io/kops/dnsprovider/pkg/dnsprovider/rrstype"
 	"k8s.io/kops/pkg/apis/kops"
-	apimodel "k8s.io/kops/pkg/apis/kops/model"
 	kopsdns "k8s.io/kops/pkg/dns"
-	"k8s.io/kops/pkg/featureflag"
-	"k8s.io/kops/pkg/model"
-	"k8s.io/kops/pkg/model/iam"
 	"k8s.io/kops/upup/pkg/fi"
 )
 
 const (
-	// PlaceholderIP is from TEST-NET-3
-	// https://en.wikipedia.org/wiki/Reserved_IP_addresses
-	PlaceholderIP  = "203.0.113.123"
 	PlaceholderTTL = 10
 	// DigitalOcean's DNS servers require a certain minimum TTL (it's 30), keeping 60 here.
 	PlaceholderTTLDigitialOcean = 60
 )
 
+type recordKey struct {
+	hostname string
+	rrsType  rrstype.RrsType
+}
+
 func findZone(cluster *kops.Cluster, cloud fi.Cloud) (dnsprovider.Zone, error) {
 	dns, err := cloud.DNS()
 	if err != nil {
 		return nil, fmt.Errorf("error building DNS provider: %v", err)
+	}
+	if dns == nil {
+		return nil, nil
 	}
 
 	zonesProvider, ok := dns.Zones()
@@ -88,19 +89,17 @@ func findZone(cluster *kops.Cluster, cloud fi.Cloud) (dnsprovider.Zone, error) {
 }
 
 func validateDNS(cluster *kops.Cluster, cloud fi.Cloud) error {
-	kopsModelContext := &model.KopsModelContext{
-		IAMModelContext: iam.IAMModelContext{Cluster: cluster},
-		// We are not initializing a lot of the fields here; revisit once UsePrivateDNS is "real"
-	}
-
-	if kopsModelContext.UsePrivateDNS() {
-		klog.V(2).Infof("Private DNS: skipping DNS validation")
+	if !cluster.PublishesDNSRecords() || cluster.UsesPrivateDNS() {
+		klog.V(2).Infof("Skipping DNS validation for non-public DNS")
 		return nil
 	}
 
 	zone, err := findZone(cluster, cloud)
 	if err != nil {
 		return err
+	}
+	if zone == nil {
+		return nil
 	}
 	dnsName := strings.TrimSuffix(zone.Name(), ".")
 
@@ -128,37 +127,29 @@ func validateDNS(cluster *kops.Cluster, cloud fi.Cloud) error {
 
 func precreateDNS(ctx context.Context, cluster *kops.Cluster, cloud fi.Cloud) error {
 	// TODO: Move to update
-	if !featureflag.DNSPreCreate.Enabled() {
-		klog.V(4).Infof("Skipping DNS record pre-creation because feature flag not enabled")
-		return nil
-	}
 
 	// We precreate some DNS names (where they don't exist), with a dummy IP address
 	// This avoids hitting negative TTL on DNS lookups, which tend to be very long
 	// If we get the names wrong here, it doesn't really matter (extra DNS name, slower boot)
 
-	dnsHostnames := buildPrecreateDNSHostnames(cluster)
-
-	{
-		var filtered []string
-		for _, name := range dnsHostnames {
-			if !kopsdns.IsGossipHostname(name) {
-				filtered = append(filtered, name)
-			}
-		}
-		dnsHostnames = filtered
+	// Nothing to do for clusters without DNS
+	if !cluster.PublishesDNSRecords() {
+		return nil
 	}
 
-	if len(dnsHostnames) == 0 {
+	recordKeys := buildPrecreateDNSHostnames(cluster)
+	if len(recordKeys) == 0 {
 		klog.V(2).Infof("No DNS records to pre-create")
 		return nil
 	}
 
 	klog.V(2).Infof("Checking DNS records")
-
 	zone, err := findZone(cluster, cloud)
 	if err != nil {
 		return err
+	}
+	if zone == nil {
+		return nil
 	}
 
 	rrs, ok := zone.ResourceRecordSets()
@@ -168,7 +159,7 @@ func precreateDNS(ctx context.Context, cluster *kops.Cluster, cloud fi.Cloud) er
 
 	recordsMap := make(map[string]dnsprovider.ResourceRecordSet)
 	// TODO: We should change the filter to be a suffix match instead
-	//records, err := rrs.List("", "")
+	// records, err := rrs.List("", "")
 	records, err := rrs.List()
 	if err != nil {
 		return fmt.Errorf("error listing DNS resource records for %q: %v", zone.Name(), err)
@@ -182,52 +173,56 @@ func precreateDNS(ctx context.Context, cluster *kops.Cluster, cloud fi.Cloud) er
 
 	changeset := rrs.StartChangeset()
 	// TODO: Add ChangeSet.IsEmpty() method
-	var created []string
+	var created []recordKey
 
-	for _, dnsHostname := range dnsHostnames {
-		dnsHostname = dns.EnsureDotSuffix(dnsHostname)
-		foundA := false
+	for _, recordKey := range recordKeys {
+		recordKey.hostname = dns.EnsureDotSuffix(recordKey.hostname)
+		foundAddress := false
 		{
-			dnsRecord := recordsMap["A::"+dnsHostname]
+			dnsRecord := recordsMap[string(recordKey.rrsType)+"::"+recordKey.hostname]
 			if dnsRecord != nil {
 				rrdatas := dnsRecord.Rrdatas()
 				if len(rrdatas) > 0 {
-					klog.V(4).Infof("Found DNS record %s => %s; won't create", dnsHostname, rrdatas)
+					klog.V(4).Infof("Found DNS record %s => %s; won't create", recordKey, rrdatas)
 				} else {
 					// This is probably an alias target; leave it alone...
-					klog.V(4).Infof("Found DNS record %s, but no records", dnsHostname)
+					klog.V(4).Infof("Found DNS record %s, but no records", recordKey)
 				}
-				foundA = true
+				foundAddress = true
 			}
 		}
 
+		ownerTXTName := externalDNSOwnerTXTName(recordKey)
 		foundTXT := false
 		{
-			dnsRecord := recordsMap["TXT::"+dnsHostname]
+			dnsRecord := recordsMap["TXT::"+ownerTXTName]
 			if dnsRecord != nil {
 				foundTXT = true
 			}
 		}
-		if foundA && foundTXT {
+		if foundAddress && foundTXT {
 			continue
 		}
 
-		klog.V(2).Infof("Pre-creating DNS record %s => %s", dnsHostname, PlaceholderIP)
+		ip := kopsdns.PlaceholderIP
+		if recordKey.rrsType != rrstype.A {
+			ip = kopsdns.PlaceholderIPv6
+		}
+		klog.V(2).Infof("Pre-creating DNS record %s => %s", recordKey, ip)
 
-		if !foundA {
+		if !foundAddress {
 			if cloud.ProviderID() == kops.CloudProviderDO {
-				changeset.Add(rrs.New(dnsHostname, []string{PlaceholderIP}, PlaceholderTTLDigitialOcean, rrstype.A))
+				changeset.Add(rrs.New(recordKey.hostname, []string{ip}, PlaceholderTTLDigitialOcean, recordKey.rrsType))
 			} else {
-				changeset.Add(rrs.New(dnsHostname, []string{PlaceholderIP}, PlaceholderTTL, rrstype.A))
-
+				changeset.Add(rrs.New(recordKey.hostname, []string{ip}, PlaceholderTTL, recordKey.rrsType))
 			}
 		}
 		if !foundTXT {
-			if cluster.Spec.ExternalDNS.Provider == kops.ExternalDNSProviderExternalDNS {
-				changeset.Add(rrs.New(dnsHostname, []string{fmt.Sprintf("\"heritage=external-dns,external-dns/owner=kops-%s\"", cluster.ObjectMeta.Name)}, PlaceholderTTL, rrstype.TXT))
+			if cluster.Spec.ExternalDNS != nil && cluster.Spec.ExternalDNS.Provider == kops.ExternalDNSProviderExternalDNS {
+				changeset.Add(rrs.New(ownerTXTName, []string{fmt.Sprintf("\"heritage=external-dns,external-dns/owner=kops-%s\"", cluster.ObjectMeta.Name)}, PlaceholderTTL, rrstype.TXT))
 			}
 		}
-		created = append(created, dnsHostname)
+		created = append(created, recordKey)
 	}
 
 	if len(created) != 0 {
@@ -243,25 +238,48 @@ func precreateDNS(ctx context.Context, cluster *kops.Cluster, cloud fi.Cloud) er
 	return nil
 }
 
+// externalDNSOwnerTXTName returns the name of the TXT record from which external-dns reads the owner of a record.
+// It is the record name with the lowercase record type as a prefix, for example "a-api.internal.example.com.".
+func externalDNSOwnerTXTName(key recordKey) string {
+	return strings.ToLower(string(key.rrsType)) + "-" + key.hostname
+}
+
 // buildPrecreateDNSHostnames returns the hostnames we should precreate
-func buildPrecreateDNSHostnames(cluster *kops.Cluster) []string {
-	dnsHostnames := []string{}
-
-	hasAPILoadbalancer := cluster.Spec.API != nil && cluster.Spec.API.LoadBalancer != nil
-	useLBForInternalAPI := hasAPILoadbalancer && cluster.Spec.API.LoadBalancer.UseForInternalApi
-
-	if cluster.Spec.MasterPublicName != "" && !hasAPILoadbalancer {
-		dnsHostnames = append(dnsHostnames, cluster.Spec.MasterPublicName)
+func buildPrecreateDNSHostnames(cluster *kops.Cluster) []recordKey {
+	var recordKeys []recordKey
+	internalType := rrstype.A
+	if cluster.Spec.IsIPv6Only() {
+		internalType = rrstype.AAAA
 	}
 
-	if cluster.Spec.MasterInternalName != "" && !useLBForInternalAPI {
-		dnsHostnames = append(dnsHostnames, cluster.Spec.MasterInternalName)
+	hasAPILoadbalancer := cluster.Spec.API.LoadBalancer != nil
+	useLBForInternalAPI := hasAPILoadbalancer && cluster.Spec.API.LoadBalancer.UseForInternalAPI
+
+	if cluster.Spec.API.PublicName != "" && !hasAPILoadbalancer {
+		recordKeys = append(recordKeys, recordKey{
+			hostname: cluster.Spec.API.PublicName,
+			rrsType:  rrstype.A,
+		})
+		if internalType != rrstype.A {
+			recordKeys = append(recordKeys, recordKey{
+				hostname: cluster.Spec.API.PublicName,
+				rrsType:  internalType,
+			})
+		}
 	}
 
-	if apimodel.UseKopsControllerForNodeBootstrap(cluster) {
-		name := "kops-controller.internal." + cluster.ObjectMeta.Name
-		dnsHostnames = append(dnsHostnames, name)
+	if !useLBForInternalAPI {
+		recordKeys = append(recordKeys, recordKey{
+			hostname: cluster.APIInternalName(),
+			rrsType:  internalType,
+		})
 	}
 
-	return dnsHostnames
+	name := "kops-controller.internal." + cluster.ObjectMeta.Name
+	recordKeys = append(recordKeys, recordKey{
+		hostname: name,
+		rrsType:  internalType,
+	})
+
+	return recordKeys
 }

@@ -17,13 +17,14 @@ limitations under the License.
 package awstasks
 
 import (
+	"context"
 	"fmt"
 
-	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"k8s.io/klog/v2"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
-	"k8s.io/kops/upup/pkg/fi/cloudup/cloudformation"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraform"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraformWriter"
 )
@@ -42,14 +43,14 @@ type InternetGateway struct {
 	Tags map[string]string
 }
 
-var _ fi.CompareWithID = &InternetGateway{}
+var _ fi.CompareWithID = (*InternetGateway)(nil)
 
 func (e *InternetGateway) CompareWithID() *string {
 	return e.ID
 }
 
-func findInternetGateway(cloud awsup.AWSCloud, request *ec2.DescribeInternetGatewaysInput) (*ec2.InternetGateway, error) {
-	response, err := cloud.EC2().DescribeInternetGateways(request)
+func findInternetGateway(ctx context.Context, cloud awsup.AWSCloud, request *ec2.DescribeInternetGatewaysInput) (*ec2types.InternetGateway, error) {
+	response, err := cloud.EC2().DescribeInternetGateways(ctx, request)
 	if err != nil {
 		return nil, fmt.Errorf("error listing InternetGateways: %v", err)
 	}
@@ -61,30 +62,31 @@ func findInternetGateway(cloud awsup.AWSCloud, request *ec2.DescribeInternetGate
 		return nil, fmt.Errorf("found multiple InternetGateways matching tags")
 	}
 	igw := response.InternetGateways[0]
-	return igw, nil
+	return &igw, nil
 }
 
-func (e *InternetGateway) Find(c *fi.Context) (*InternetGateway, error) {
-	cloud := c.Cloud.(awsup.AWSCloud)
+func (e *InternetGateway) Find(c *fi.CloudupContext) (*InternetGateway, error) {
+	ctx := c.Context()
+	cloud := awsup.GetCloud(c)
 
 	request := &ec2.DescribeInternetGatewaysInput{}
 
-	shared := fi.BoolValue(e.Shared)
+	shared := fi.ValueOf(e.Shared)
 	if shared {
-		if fi.StringValue(e.VPC.ID) == "" {
+		if fi.ValueOf(e.VPC.ID) == "" {
 			return nil, fmt.Errorf("VPC ID is required when InternetGateway is shared")
 		}
 
-		request.Filters = []*ec2.Filter{awsup.NewEC2Filter("attachment.vpc-id", *e.VPC.ID)}
+		request.Filters = []ec2types.Filter{awsup.NewEC2Filter("attachment.vpc-id", *e.VPC.ID)}
 	} else {
 		if e.ID != nil {
-			request.InternetGatewayIds = []*string{e.ID}
+			request.InternetGatewayIds = []string{fi.ValueOf(e.ID)}
 		} else {
 			request.Filters = cloud.BuildFilters(e.Name)
 		}
 	}
 
-	igw, err := findInternetGateway(cloud, request)
+	igw, err := findInternetGateway(ctx, cloud, request)
 	if err != nil {
 		return nil, err
 	}
@@ -114,15 +116,15 @@ func (e *InternetGateway) Find(c *fi.Context) (*InternetGateway, error) {
 	}
 
 	// We don't set the tags for a shared IGW
-	if fi.BoolValue(e.Shared) {
+	if fi.ValueOf(e.Shared) {
 		actual.Tags = e.Tags
 	}
 
 	return actual, nil
 }
 
-func (e *InternetGateway) Run(c *fi.Context) error {
-	return fi.DefaultDeltaRunMethod(e, c)
+func (e *InternetGateway) Run(c *fi.CloudupContext) error {
+	return fi.CloudupDefaultDeltaRunMethod(e, c)
 }
 
 func (s *InternetGateway) CheckChanges(a, e, changes *InternetGateway) error {
@@ -137,7 +139,8 @@ func (s *InternetGateway) CheckChanges(a, e, changes *InternetGateway) error {
 }
 
 func (_ *InternetGateway) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *InternetGateway) error {
-	shared := fi.BoolValue(e.Shared)
+	ctx := context.TODO()
+	shared := fi.ValueOf(e.Shared)
 	if shared {
 		// Verify the InternetGateway was found and matches our required settings
 		if a == nil {
@@ -151,10 +154,10 @@ func (_ *InternetGateway) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *Intern
 		klog.V(2).Infof("Creating InternetGateway")
 
 		request := &ec2.CreateInternetGatewayInput{
-			TagSpecifications: awsup.EC2TagSpecification(ec2.ResourceTypeInternetGateway, e.Tags),
+			TagSpecifications: awsup.EC2TagSpecification(ec2types.ResourceTypeInternetGateway, e.Tags),
 		}
 
-		response, err := t.Cloud.EC2().CreateInternetGateway(request)
+		response, err := t.Cloud.EC2().CreateInternetGateway(ctx, request)
 		if err != nil {
 			return fmt.Errorf("error creating InternetGateway: %v", err)
 		}
@@ -170,7 +173,7 @@ func (_ *InternetGateway) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *Intern
 			InternetGatewayId: e.ID,
 		}
 
-		_, err := t.Cloud.EC2().AttachInternetGateway(attachRequest)
+		_, err := t.Cloud.EC2().AttachInternetGateway(ctx, attachRequest)
 		if err != nil {
 			return fmt.Errorf("error attaching InternetGateway to VPC: %v", err)
 		}
@@ -180,24 +183,25 @@ func (_ *InternetGateway) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *Intern
 }
 
 type terraformInternetGateway struct {
-	VPCID *terraformWriter.Literal `json:"vpc_id" cty:"vpc_id"`
-	Tags  map[string]string        `json:"tags,omitempty" cty:"tags"`
+	VPCID *terraformWriter.Literal `cty:"vpc_id"`
+	Tags  map[string]string        `cty:"tags"`
 }
 
 func (_ *InternetGateway) RenderTerraform(t *terraform.TerraformTarget, a, e, changes *InternetGateway) error {
-	shared := fi.BoolValue(e.Shared)
+	ctx := context.TODO()
+	shared := fi.ValueOf(e.Shared)
 	if shared {
 		// Not terraform owned / managed
 
 		// But ... attempt to discover the ID so TerraformLink works
 		if e.ID == nil {
 			request := &ec2.DescribeInternetGatewaysInput{}
-			vpcID := fi.StringValue(e.VPC.ID)
+			vpcID := fi.ValueOf(e.VPC.ID)
 			if vpcID == "" {
 				return fmt.Errorf("VPC ID is required when InternetGateway is shared")
 			}
-			request.Filters = []*ec2.Filter{awsup.NewEC2Filter("attachment.vpc-id", vpcID)}
-			igw, err := findInternetGateway(t.Cloud.(awsup.AWSCloud), request)
+			request.Filters = []ec2types.Filter{awsup.NewEC2Filter("attachment.vpc-id", vpcID)}
+			igw, err := findInternetGateway(ctx, t.Cloud.(awsup.AWSCloud), request)
 			if err != nil {
 				return err
 			}
@@ -220,7 +224,7 @@ func (_ *InternetGateway) RenderTerraform(t *terraform.TerraformTarget, a, e, ch
 }
 
 func (e *InternetGateway) TerraformLink() *terraformWriter.Literal {
-	shared := fi.BoolValue(e.Shared)
+	shared := fi.ValueOf(e.Shared)
 	if shared {
 		if e.ID == nil {
 			klog.Fatalf("ID must be set, if InternetGateway is shared: %s", e)
@@ -231,80 +235,4 @@ func (e *InternetGateway) TerraformLink() *terraformWriter.Literal {
 	}
 
 	return terraformWriter.LiteralProperty("aws_internet_gateway", *e.Name, "id")
-}
-
-type cloudformationInternetGateway struct {
-	Tags []cloudformationTag `json:"Tags,omitempty"`
-}
-
-type cloudformationVpcGatewayAttachment struct {
-	VpcId             *cloudformation.Literal `json:"VpcId,omitempty"`
-	InternetGatewayId *cloudformation.Literal `json:"InternetGatewayId,omitempty"`
-}
-
-func (_ *InternetGateway) RenderCloudformation(t *cloudformation.CloudformationTarget, a, e, changes *InternetGateway) error {
-	shared := fi.BoolValue(e.Shared)
-	if shared {
-		// Not cloudformation owned / managed
-
-		// But ... attempt to discover the ID so CloudformationLink works
-		if e.ID == nil {
-			request := &ec2.DescribeInternetGatewaysInput{}
-			vpcID := fi.StringValue(e.VPC.ID)
-			if vpcID == "" {
-				return fmt.Errorf("VPC ID is required when InternetGateway is shared")
-			}
-			request.Filters = []*ec2.Filter{awsup.NewEC2Filter("attachment.vpc-id", vpcID)}
-			igw, err := findInternetGateway(t.Cloud.(awsup.AWSCloud), request)
-			if err != nil {
-				return err
-			}
-			if igw == nil {
-				klog.Warningf("Cannot find internet gateway for VPC %q", vpcID)
-			} else {
-				e.ID = igw.InternetGatewayId
-			}
-		}
-
-		return nil
-	}
-
-	{
-		cf := &cloudformationInternetGateway{
-			Tags: buildCloudformationTags(e.Tags),
-		}
-
-		err := t.RenderResource("AWS::EC2::InternetGateway", *e.Name, cf)
-		if err != nil {
-			return err
-		}
-	}
-
-	{
-		cf := &cloudformationVpcGatewayAttachment{
-			VpcId:             e.VPC.CloudformationLink(),
-			InternetGatewayId: e.CloudformationLink(),
-		}
-
-		err := t.RenderResource("AWS::EC2::VPCGatewayAttachment", *e.Name, cf)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func (e *InternetGateway) CloudformationLink() *cloudformation.Literal {
-	shared := fi.BoolValue(e.Shared)
-	if shared {
-		if e.ID == nil {
-			klog.Fatalf("ID must be set, if InternetGateway is shared: %s", e)
-		}
-
-		klog.V(4).Infof("reusing existing InternetGateway with id %q", *e.ID)
-		return cloudformation.LiteralString(*e.ID)
-	}
-
-	return cloudformation.Ref("AWS::EC2::InternetGateway", *e.Name)
 }

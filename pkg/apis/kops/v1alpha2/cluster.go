@@ -21,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/kops/pkg/apis/kops"
 )
 
 // +genclient
@@ -48,71 +49,89 @@ type ClusterSpec struct {
 	// The Channel we are following
 	Channel string `json:"channel,omitempty"`
 	// Additional addons that should be installed on the cluster
-	Addons []AddonSpec `json:"addons,omitempty"`
+	Addons      []AddonSpec          `json:"addons,omitempty"`
+	ConfigStore kops.ConfigStoreSpec `json:"-"`
 	// ConfigBase is the path where we store configuration for the cluster
 	// This might be different that the location when the cluster spec itself is stored,
 	// both because this must be accessible to the cluster,
 	// and because it might be on a different cloud or storage system (etcd vs S3)
-	ConfigBase string `json:"configBase,omitempty"`
+	// +k8s:conversion-gen=false
+	ConfigBase    string                 `json:"configBase,omitempty"`
+	CloudProvider kops.CloudProviderSpec `json:"-"`
 	// The CloudProvider to use (aws or gce)
-	CloudProvider string `json:"cloudProvider,omitempty"`
-	// GossipConfig for the cluster assuming the use of gossip DNS
+	// +k8s:conversion-gen=false
+	LegacyCloudProvider string `json:"cloudProvider,omitempty"`
+	// GossipConfig has no effect and must not be set; gossip DNS support was removed in kOps 1.37.
+	// Deprecated: remove this field from the cluster spec.
 	GossipConfig *GossipConfig `json:"gossipConfig,omitempty"`
-	// Container runtime to use for Kubernetes
+	// ContainerRuntime was removed.
 	ContainerRuntime string `json:"containerRuntime,omitempty"`
 	// The version of kubernetes to install (optional, and can be a "spec" like stable)
 	KubernetesVersion string `json:"kubernetesVersion,omitempty"`
 	// Configuration of subnets we are targeting
+	// +k8s:conversion-gen=false
 	Subnets []ClusterSubnetSpec `json:"subnets,omitempty"`
 	// Project is the cloud project we should use, required on GCE
+	// +k8s:conversion-gen=false
 	Project string `json:"project,omitempty"`
 	// MasterPublicName is the external DNS name for the master nodes
+	// +k8s:conversion-gen=false
 	MasterPublicName string `json:"masterPublicName,omitempty"`
-	// MasterInternalName is the internal DNS name for the master nodes
+	// MasterInternalName is unused.
+	// +k8s:conversion-gen=false
 	MasterInternalName string `json:"masterInternalName,omitempty"`
 	// NetworkCIDR is the CIDR used for the AWS VPC / GCE Network, or otherwise allocated to k8s
 	// This is a real CIDR, not the internal k8s network
 	// On AWS, it maps to the VPC CIDR.  It is not required on GCE.
+	// +k8s:conversion-gen=false
 	NetworkCIDR string `json:"networkCIDR,omitempty"`
 	// AdditionalNetworkCIDRs is a list of additional CIDR used for the AWS VPC
 	// or otherwise allocated to k8s. This is a real CIDR, not the internal k8s network
 	// On AWS, it maps to any additional CIDRs added to a VPC.
+	// +k8s:conversion-gen=false
 	AdditionalNetworkCIDRs []string `json:"additionalNetworkCIDRs,omitempty"`
 	// NetworkID is an identifier of a network, if we want to reuse/share an existing network (e.g. an AWS VPC)
+	// +k8s:conversion-gen=false
 	NetworkID string `json:"networkID,omitempty"`
 	// Topology defines the type of network topology to use on the cluster - default public
 	// This is heavily weighted towards AWS for the time being, but should also be agnostic enough
 	// to port out to GCE later if needed
+	// +k8s:conversion-gen=false
 	Topology *TopologySpec `json:"topology,omitempty"`
 	// SecretStore is the VFS path to where secrets are stored
+	// +k8s:conversion-gen=false
 	SecretStore string `json:"secretStore,omitempty"`
 	// KeyStore is the VFS path to where SSL keys and certificates are stored
+	// +k8s:conversion-gen=false
 	KeyStore string `json:"keyStore,omitempty"`
-	// ConfigStore is the VFS path to where the configuration (Cluster, InstanceGroups etc) is stored
-	ConfigStore string `json:"configStore,omitempty"`
+	// ConfigStore is unused.
+	// +k8s:conversion-gen=false
+	LegacyConfigStore string `json:"configStore,omitempty"`
 	// DNSZone is the DNS zone we should use when configuring DNS
 	// This is because some clouds let us define a managed zone foo.bar, and then have
 	// kubernetes.dev.foo.bar, without needing to define dev.foo.bar as a hosted zone.
-	// DNSZone will probably be a suffix of the MasterPublicName and MasterInternalName
+	// DNSZone will probably be a suffix of the MasterPublicName.
 	// Note that DNSZone can either by the host name of the zone (containing dots),
 	// or can be an identifier for the zone.
 	DNSZone string `json:"dnsZone,omitempty"`
-	// DNSControllerGossipConfig for the cluster assuming the use of gossip DNS
+	// DNSControllerGossipConfig has no effect and must not be set; gossip DNS support was removed in kOps 1.37.
+	// Deprecated: remove this field from the cluster spec.
 	DNSControllerGossipConfig *DNSControllerGossipConfig `json:"dnsControllerGossipConfig,omitempty"`
 	// AdditionalSANs adds additional Subject Alternate Names to apiserver cert that kops generates
+	// +k8s:conversion-gen=false
 	AdditionalSANs []string `json:"additionalSans,omitempty"`
 	// ClusterDNSDomain is the suffix we use for internal DNS names (normally cluster.local)
 	ClusterDNSDomain string `json:"clusterDNSDomain,omitempty"`
 	// ServiceClusterIPRange is the CIDR, from the internal network, where we allocate IPs for services
+	// +k8s:conversion-gen=false
 	ServiceClusterIPRange string `json:"serviceClusterIPRange,omitempty"`
 	// PodCIDR is the CIDR from which we allocate IPs for pods
+	// +k8s:conversion-gen=false
 	PodCIDR string `json:"podCIDR,omitempty"`
-	// PodCIDRFromCloud determines if the Node's podCIDR should be set by the cloud provider.
-	// This requires ipv6 enabled and that instances can be given full ipv6 prefixes.
-	PodCIDRFromCloud bool `json:"podCIDRFromCloud,omitempty"`
-	//MasterIPRange                 string `json:",omitempty"`
-	// NonMasqueradeCIDR is the CIDR for the internal k8s network (on which pods & services live)
+	// MasterIPRange                 string `json:",omitempty"`
+	// NonMasqueradeCIDR is the CIDR for the internal k8s network (for pod IPs)
 	// It cannot overlap ServiceClusterIPRange
+	// +k8s:conversion-gen=false
 	NonMasqueradeCIDR string `json:"nonMasqueradeCIDR,omitempty"`
 	// SSHAccess determines the permitted access to SSH
 	// Currently only a single CIDR is supported (though a richer grammar could be added in future)
@@ -120,11 +139,13 @@ type ClusterSpec struct {
 	// NodePortAccess is a list of the CIDRs that can access the node ports range (30000-32767).
 	NodePortAccess []string `json:"nodePortAccess,omitempty"`
 	// HTTPProxy defines connection information to support use of a private cluster behind an forward HTTP Proxy
+	// +k8s:conversion-gen=false
 	EgressProxy *EgressProxySpec `json:"egressProxy,omitempty"`
 	// SSHKeyName specifies a preexisting SSH key to use
 	SSHKeyName *string `json:"sshKeyName,omitempty"`
 	// KubernetesAPIAccess determines the permitted access to the API endpoints (master HTTPS)
 	// Currently only a single CIDR is supported (though a richer grammar could be added in future)
+	// +k8s:conversion-gen=false
 	KubernetesAPIAccess []string `json:"kubernetesApiAccess,omitempty"`
 	// IsolateMasters determines whether we should lock down masters so that they are not on the pod network.
 	// true is the kube-up behaviour, but it is very surprising: it means that daemonsets only work on the master
@@ -133,6 +154,7 @@ type ClusterSpec struct {
 	//  * give the master a normal PodCIDR
 	//  * run kube-proxy on the master
 	//  * enable debugging handlers on the master, so kubectl logs works
+	// +k8s:conversion-gen=false
 	IsolateMasters *bool `json:"isolateMasters,omitempty"`
 	// UpdatePolicy determines the policy for applying upgrades automatically.
 	// Valid values:
@@ -140,30 +162,38 @@ type ClusterSpec struct {
 	//   'external': do not apply updates automatically; they are applied manually or by an external system
 	UpdatePolicy *string `json:"updatePolicy,omitempty"`
 	// ExternalPolicies allows the insertion of pre-existing managed policies on IG Roles
-	ExternalPolicies *map[string][]string `json:"externalPolicies,omitempty"`
+	ExternalPolicies map[string][]string `json:"externalPolicies,omitempty"`
 	// Additional policies to add for roles
-	AdditionalPolicies *map[string]string `json:"additionalPolicies,omitempty"`
+	AdditionalPolicies map[string]string `json:"additionalPolicies,omitempty"`
 	// A collection of files assets for deployed cluster wide
 	FileAssets []FileAssetSpec `json:"fileAssets,omitempty"`
 	// EtcdClusters stores the configuration for each cluster
 	EtcdClusters []EtcdClusterSpec `json:"etcdClusters,omitempty"`
+	// Docker was removed.
+	Docker *DockerConfig `json:"docker,omitempty"`
 	// Component configurations
 	Containerd                     *ContainerdConfig             `json:"containerd,omitempty"`
-	Docker                         *DockerConfig                 `json:"docker,omitempty"`
 	KubeDNS                        *KubeDNSConfig                `json:"kubeDNS,omitempty"`
 	KubeAPIServer                  *KubeAPIServerConfig          `json:"kubeAPIServer,omitempty"`
 	KubeControllerManager          *KubeControllerManagerConfig  `json:"kubeControllerManager,omitempty"`
 	ExternalCloudControllerManager *CloudControllerManagerConfig `json:"cloudControllerManager,omitempty"`
 	KubeScheduler                  *KubeSchedulerConfig          `json:"kubeScheduler,omitempty"`
 	KubeProxy                      *KubeProxyConfig              `json:"kubeProxy,omitempty"`
-	Kubelet                        *KubeletConfigSpec            `json:"kubelet,omitempty"`
-	MasterKubelet                  *KubeletConfigSpec            `json:"masterKubelet,omitempty"`
-	CloudConfig                    *CloudConfiguration           `json:"cloudConfig,omitempty"`
-	ExternalDNS                    *ExternalDNSConfig            `json:"externalDns,omitempty"`
-	NTP                            *NTPConfig                    `json:"ntp,omitempty"`
+	// Kubelet is the kubelet configuration for nodes not belonging to the control plane.
+	// It can be overridden by the kubelet configuration specified in the instance group.
+	Kubelet *KubeletConfigSpec `json:"kubelet,omitempty"`
+	// MasterKubelet is the kubelet configuration for nodes belonging to the control plane
+	// It can be overridden by the kubelet configuration specified in the instance group.
+	ControlPlaneKubelet *KubeletConfigSpec  `json:"masterKubelet,omitempty"`
+	CloudConfig         *CloudConfiguration `json:"cloudConfig,omitempty"`
+	ExternalDNS         *ExternalDNSConfig  `json:"externalDns,omitempty"`
+	NTP                 *NTPConfig          `json:"ntp,omitempty"`
+	// Packages specifies additional packages to be installed.
+	Packages []string `json:"packages,omitempty"`
 
 	// NodeTerminationHandler determines the cluster autoscaler configuration.
-	NodeTerminationHandler *NodeTerminationHandlerConfig `json:"nodeTerminationHandler,omitempty"`
+	// +k8s:conversion-gen=false
+	NodeTerminationHandler *NodeTerminationHandlerSpec `json:"nodeTerminationHandler,omitempty"`
 	// NodeProblemDetector determines the node problem detector configuration.
 	NodeProblemDetector *NodeProblemDetectorConfig `json:"nodeProblemDetector,omitempty"`
 	// MetricsServer determines the metrics server configuration.
@@ -171,12 +201,17 @@ type ClusterSpec struct {
 	// CertManager determines the metrics server configuration.
 	CertManager *CertManagerConfig `json:"certManager,omitempty"`
 	// AWSLoadbalancerControllerConfig determines the AWS LB controller configuration.
-	AWSLoadBalancerController *AWSLoadBalancerControllerConfig `json:"awsLoadBalancerController,omitempty"`
+	// +k8s:conversion-gen=false
+	AWSLoadBalancerController *LoadBalancerControllerSpec `json:"awsLoadBalancerController,omitempty"`
 
 	// Networking configuration
-	Networking *NetworkingSpec `json:"networking,omitempty"`
+	// +k8s:conversion-gen=false
+	LegacyNetworking *NetworkingSpec `json:"networking,omitempty"`
+	Networking       NetworkingSpec  `json:"-"`
 	// API field controls how the API is exposed outside the cluster
-	API *AccessSpec `json:"api,omitempty"`
+	// +k8s:conversion-gen=false
+	LegacyAPI *APISpec `json:"api,omitempty"`
+	API       APISpec  `json:"-"`
 	// Authentication field controls how the cluster is configured for authentication
 	Authentication *AuthenticationSpec `json:"authentication,omitempty"`
 	// Authorization field controls how the cluster is configured for authorization
@@ -188,13 +223,14 @@ type ClusterSpec struct {
 	// Hooks for custom actions e.g. on first installation
 	Hooks []HookSpec `json:"hooks,omitempty"`
 	// Alternative locations for files and containers
-	Assets *Assets `json:"assets,omitempty"`
+	Assets *AssetsSpec `json:"assets,omitempty"`
 	// IAM field adds control over the IAM security policies applied to resources
 	IAM *IAMSpec `json:"iam,omitempty"`
 	// EncryptionConfig holds the encryption config
 	EncryptionConfig *bool `json:"encryptionConfig,omitempty"`
 	// DisableSubnetTags controls if subnets are tagged in AWS
-	DisableSubnetTags bool `json:"DisableSubnetTags,omitempty"`
+	// +k8s:conversion-gen=false
+	TagSubnets *bool `json:"DisableSubnetTags,omitempty"`
 	// Target allows for us to nest extra config for targets such as terraform
 	Target *TargetSpec `json:"target,omitempty"`
 	// UseHostCertificates will mount /etc/ssl/certs to inside needed containers.
@@ -206,24 +242,55 @@ type ClusterSpec struct {
 	SysctlParameters []string `json:"sysctlParameters,omitempty"`
 	// RollingUpdate defines the default rolling-update settings for instance groups
 	RollingUpdate *RollingUpdate `json:"rollingUpdate,omitempty"`
-	// ClusterAutoscaler defines the cluaster autoscaler configuration.
+	// ClusterAutoscaler defines the cluster autoscaler configuration.
 	ClusterAutoscaler *ClusterAutoscalerConfig `json:"clusterAutoscaler,omitempty"`
 	// WarmPool defines the default warm pool settings for instance groups (AWS only).
+	// +k8s:conversion-gen=false
 	WarmPool *WarmPoolSpec `json:"warmPool,omitempty"`
 	// ServiceAccountIssuerDiscovery configures the OIDC Issuer for ServiceAccounts.
 	ServiceAccountIssuerDiscovery *ServiceAccountIssuerDiscoveryConfig `json:"serviceAccountIssuerDiscovery,omitempty"`
 	// SnapshotController defines the CSI Snapshot Controller configuration.
 	SnapshotController *SnapshotControllerConfig `json:"snapshotController,omitempty"`
+	// Karpenter defines the Karpenter configuration.
+	Karpenter *KarpenterConfig `json:"karpenter,omitempty"`
+	// PodIdentityWebhook determines the EKS Pod Identity Webhook configuration.
+	// +k8s:conversion-gen=false
+	PodIdentityWebhook *PodIdentityWebhookSpec `json:"podIdentityWebhook,omitempty"`
+}
+
+// PodIdentityWebhookSpec configures an EKS Pod Identity Webhook.
+type PodIdentityWebhookSpec struct {
+	Enabled  bool `json:"enabled,omitempty"`
+	Replicas int  `json:"replicas,omitempty"`
+}
+
+type KarpenterConfig struct {
+	Enabled       bool               `json:"enabled,omitempty"`
+	LogEncoding   string             `json:"logEncoding,omitempty"`
+	LogLevel      string             `json:"logLevel,omitempty"`
+	Image         string             `json:"image,omitempty"`
+	FeatureGates  string             `json:"featureGates,omitempty"`
+	MemoryLimit   *resource.Quantity `json:"memoryLimit,omitempty"`
+	MemoryRequest *resource.Quantity `json:"memoryRequest,omitempty"`
+	CPURequest    *resource.Quantity `json:"cpuRequest,omitempty"`
 }
 
 // ServiceAccountIssuerDiscoveryConfig configures an OIDC Issuer.
 type ServiceAccountIssuerDiscoveryConfig struct {
 	// DiscoveryStore is the VFS path to where OIDC Issuer Discovery metadata is stored.
 	DiscoveryStore string `json:"discoveryStore,omitempty"`
+	// DiscoveryService configures discovery using a hosted discovery service.
+	DiscoveryService *DiscoveryServiceOptions `json:"discoveryService,omitempty"`
 	// EnableAWSOIDCProvider will provision an AWS OIDC provider that trusts the ServiceAccount Issuer
 	EnableAWSOIDCProvider bool `json:"enableAWSOIDCProvider,omitempty"`
 	// AdditionalAudiences adds user defined audiences to the provisioned AWS OIDC provider
 	AdditionalAudiences []string `json:"additionalAudiences,omitempty"`
+}
+
+// DiscoveryServiceOptions configures a hosted discovery service.
+type DiscoveryServiceOptions struct {
+	// URL is the base URL of the discovery service, including universe ID if applicable.
+	URL string `json:"url,omitempty"`
 }
 
 // ServiceAccountExternalPermissions grants a ServiceAccount permissions to external resources.
@@ -288,10 +355,12 @@ type FileAssetSpec struct {
 	Content string `json:"content,omitempty"`
 	// IsBase64 indicates the contents is base64 encoded
 	IsBase64 bool `json:"isBase64,omitempty"`
+	// Mode is this file's mode and permission bits
+	Mode string `json:"mode,omitempty"`
 }
 
-// Assets defined the privately hosted assets
-type Assets struct {
+// AssetsSpec defined the privately hosted assets
+type AssetsSpec struct {
 	// ContainerRegistry is a url for to a docker registry
 	ContainerRegistry *string `json:"containerRegistry,omitempty"`
 	// FileRepository is the url for a private file serving repository
@@ -317,7 +386,7 @@ type HookSpec struct {
 	// Name is an optional name for the hook, otherwise the name is kops-hook-<index>
 	Name string `json:"name,omitempty"`
 	// Disabled indicates if you want the unit switched off
-	Disabled bool `json:"disabled,omitempty"`
+	Enabled *bool `json:"disabled,omitempty"`
 	// Roles is an optional list of roles the hook should be rolled out to, defaults to all
 	Roles []InstanceGroupRole `json:"roles,omitempty"`
 	// Requires is a series of systemd units the action requires
@@ -345,19 +414,19 @@ type ExecContainerAction struct {
 }
 
 type AuthenticationSpec struct {
-	Kopeio *KopeioAuthenticationSpec `json:"kopeio,omitempty"`
-	Aws    *AwsAuthenticationSpec    `json:"aws,omitempty"`
+	Kopeio *KopeioAuthenticationSpec    `json:"kopeio,omitempty"`
+	AWS    *AWSAuthenticationSpec       `json:"aws,omitempty"`
+	OIDC   *kops.OIDCAuthenticationSpec `json:"-"`
 }
 
 func (s *AuthenticationSpec) IsEmpty() bool {
-	return s.Kopeio == nil && s.Aws == nil
+	return s.Kopeio == nil && s.AWS == nil
 }
 
-type KopeioAuthenticationSpec struct {
-}
+type KopeioAuthenticationSpec struct{}
 
-type AwsAuthenticationSpec struct {
-	// Image is the AWS IAM Authenticator docker image to uses
+type AWSAuthenticationSpec struct {
+	// Image is the AWS IAM Authenticator container image to use.
 	Image string `json:"image,omitempty"`
 	// BackendMode is the AWS IAM Authenticator backend to use. Default MountedFile
 	BackendMode string `json:"backendMode,omitempty"`
@@ -369,8 +438,19 @@ type AwsAuthenticationSpec struct {
 	CPURequest *resource.Quantity `json:"cpuRequest,omitempty"`
 	// MemoryLimit memory limit of AWS IAM Authenticator container. Default 20Mi
 	MemoryLimit *resource.Quantity `json:"memoryLimit,omitempty"`
-	// CPULimit CPU limit of AWS IAM Authenticator container. Default 10m
+	// CPULimit CPU limit of AWS IAM Authenticator container.
 	CPULimit *resource.Quantity `json:"cpuLimit,omitempty"`
+	// IdentityMappings maps IAM Identities to Kubernetes users/groups
+	IdentityMappings []AWSAuthenticationIdentityMappingSpec `json:"identityMappings,omitempty"`
+}
+
+type AWSAuthenticationIdentityMappingSpec struct {
+	// Arn of the IAM User or IAM Role to be allowed to authenticate
+	ARN string `json:"arn,omitempty"`
+	// Username that Kubernetes will see the user as
+	Username string `json:"username,omitempty"`
+	// Groups to be attached to your users/roles
+	Groups []string `json:"groups,omitempty"`
 }
 
 type AuthorizationSpec struct {
@@ -382,26 +462,26 @@ func (s *AuthorizationSpec) IsEmpty() bool {
 	return s.RBAC == nil && s.AlwaysAllow == nil
 }
 
-type RBACAuthorizationSpec struct {
-}
+type RBACAuthorizationSpec struct{}
 
-type AlwaysAllowAuthorizationSpec struct {
-}
+type AlwaysAllowAuthorizationSpec struct{}
 
-// AccessSpec provides configuration details related to kubeapi dns and ELB access
-type AccessSpec struct {
+// APISpec provides configuration details related to kubeapi dns and ELB access
+type APISpec struct {
 	// DNS will be used to provide config on kube-apiserver ELB DNS
 	DNS *DNSAccessSpec `json:"dns,omitempty"`
 	// LoadBalancer is the configuration for the kube-apiserver ELB
-	LoadBalancer *LoadBalancerAccessSpec `json:"loadBalancer,omitempty"`
+	LoadBalancer   *LoadBalancerAccessSpec `json:"loadBalancer,omitempty"`
+	PublicName     string                  `json:"-"`
+	AdditionalSANs []string                `json:"-"`
+	Access         []string                `json:"-"`
 }
 
-func (s *AccessSpec) IsEmpty() bool {
+func (s *APISpec) IsEmpty() bool {
 	return s.DNS == nil && s.LoadBalancer == nil
 }
 
-type DNSAccessSpec struct {
-}
+type DNSAccessSpec struct{}
 
 // LoadBalancerType string describes LoadBalancer types (public, internal)
 type LoadBalancerType string
@@ -411,7 +491,7 @@ const (
 	LoadBalancerTypeInternal LoadBalancerType = "Internal"
 )
 
-// LoadBalancerClass string describes LoadBalancer classes (classic, network)
+// LoadBalancerClass string describes LoadBalancer classes (network)
 type LoadBalancerClass string
 
 const (
@@ -420,16 +500,16 @@ const (
 )
 
 type AccessLogSpec struct {
-	// Interval is publishing interval in minutes. This parameter is only used with classic load balancer.
+	// Interval is unused
+	// +k8s:conversion-gen=false
 	Interval int `json:"interval,omitempty"`
 	// Bucket is S3 bucket name to store the logs in
-	Bucket string `json:"bucket,omitempty"`
+	Bucket *string `json:"bucket,omitempty"`
 	// BucketPrefix is S3 bucket prefix. Logs are stored in the root if not configured.
-	BucketPrefix string `json:"bucketPrefix,omitempty"`
+	BucketPrefix *string `json:"bucketPrefix,omitempty"`
 }
 
 var SupportedLoadBalancerClasses = []string{
-	string(LoadBalancerClassClassic),
 	string(LoadBalancerClassNetwork),
 }
 
@@ -445,18 +525,19 @@ type LoadBalancerSubnetSpec struct {
 
 // LoadBalancerAccessSpec provides configuration details related to API LoadBalancer and its access
 type LoadBalancerAccessSpec struct {
-	// LoadBalancerClass specifies the class of load balancer to create: Classic, Network
+	// LoadBalancerClass specifies the class of load balancer to create: Network
 	Class LoadBalancerClass `json:"class,omitempty"`
 	// Type of load balancer to create may Public or Internal.
 	Type LoadBalancerType `json:"type,omitempty"`
-	// IdleTimeoutSeconds sets the timeout of the api loadbalancer.
+	// IdleTimeoutSeconds is unused
+	// +k8s:conversion-gen=false
 	IdleTimeoutSeconds *int64 `json:"idleTimeoutSeconds,omitempty"`
 	// SecurityGroupOverride overrides the default Kops created SG for the load balancer.
 	SecurityGroupOverride *string `json:"securityGroupOverride,omitempty"`
 	// AdditionalSecurityGroups attaches additional security groups (e.g. sg-123456).
 	AdditionalSecurityGroups []string `json:"additionalSecurityGroups,omitempty"`
-	// UseForInternalApi indicates whether the LB should be used by the kubelet
-	UseForInternalApi bool `json:"useForInternalApi,omitempty"`
+	// UseForInternalAPI indicates whether the LB should be used by the kubelet
+	UseForInternalAPI bool `json:"useForInternalApi,omitempty"`
 	// SSLCertificate allows you to specify the ACM cert to be used the LB
 	SSLCertificate string `json:"sslCertificate,omitempty"`
 	// SSLPolicy allows you to overwrite the LB listener's Security Policy
@@ -487,9 +568,11 @@ type KubeDNSConfig struct {
 	Domain string `json:"domain,omitempty"`
 	// ExternalCoreFile is used to provide a complete CoreDNS CoreFile by the user - ignores other provided flags which modify the CoreFile.
 	ExternalCoreFile string `json:"externalCoreFile,omitempty"`
-	// Image is the name of the docker image to run - @deprecated as this is now in the addon
+	// Image is unused.
+	// +k8s:conversion-gen=false
 	Image string `json:"image,omitempty"`
-	// Replicas is the number of pod replicas - @deprecated as this is now in the addon, and controlled by autoscaler
+	// Replicas is unused.
+	// +k8s:conversion-gen=false
 	Replicas int `json:"replicas,omitempty"`
 	// Provider indicates whether CoreDNS or kube-dns will be the default service discovery.
 	Provider string `json:"provider,omitempty"`
@@ -507,12 +590,19 @@ type KubeDNSConfig struct {
 	MemoryLimit *resource.Quantity `json:"memoryLimit,omitempty"`
 	// NodeLocalDNS specifies the configuration for the node-local-dns addon
 	NodeLocalDNS *NodeLocalDNSConfig `json:"nodeLocalDNS,omitempty"`
+	// PodAnnotations makes possible to add additional annotations to CoreDNS Pods.
+	// Default: none
+	PodAnnotations map[string]string `json:"podAnnotations,omitempty"`
 }
 
 // NodeLocalDNSConfig are options of the node-local-dns
 type NodeLocalDNSConfig struct {
 	// Enabled activates the node-local-dns addon.
 	Enabled *bool `json:"enabled,omitempty"`
+	// ExternalCoreFile is used to provide a complete NodeLocalDNS CoreFile by the user - ignores other provided flags which modify the CoreFile.
+	ExternalCoreFile string `json:"externalCoreFile,omitempty"`
+	// AdditionalConfig is used to provide additional config for node local dns by the user - it will include the original CoreFile made by kOps.
+	AdditionalConfig string `json:"additionalConfig,omitempty"`
 	// Image overrides the default docker image used for node-local-dns addon.
 	Image *string `json:"image,omitempty"`
 	// Local listen IP address. It can be any IP in the 169.254.20.0/16 space or any other IP address that can be guaranteed to not collide with any existing IP.
@@ -523,6 +613,9 @@ type NodeLocalDNSConfig struct {
 	MemoryRequest *resource.Quantity `json:"memoryRequest,omitempty"`
 	// CPURequest specifies the cpu requests of each node-local-dns container in the daemonset. Default 25m.
 	CPURequest *resource.Quantity `json:"cpuRequest,omitempty"`
+	// PodAnnotations makes possible to add additional annotations to node-local-dns.
+	// Default: none
+	PodAnnotations map[string]string `json:"podAnnotations,omitempty"`
 }
 
 type ExternalDNSProvider string
@@ -535,8 +628,10 @@ const (
 // ExternalDNSConfig are options of the dns-controller
 type ExternalDNSConfig struct {
 	// Disable indicates we do not wish to run the dns-controller addon
+	// +k8s:conversion-gen=false
 	Disable bool `json:"disable,omitempty"`
-	// WatchIngress indicates you want the dns-controller to watch and create dns entries for ingress resources
+	// WatchIngress indicates you want the dns-controller to watch and create dns entries for ingress resources.
+	// Default: true if provider is 'external-dns', false otherwise.
 	WatchIngress *bool `json:"watchIngress,omitempty"`
 	// WatchNamespace is namespace to watch, defaults to all (use to control whom can creates dns entries)
 	WatchNamespace string `json:"watchNamespace,omitempty"`
@@ -544,6 +639,9 @@ type ExternalDNSConfig struct {
 	// 'dns-controller' will use kOps DNS Controller.
 	// 'external-dns' will use kubernetes-sigs/external-dns.
 	Provider ExternalDNSProvider `json:"provider,omitempty"`
+	// PriorityClassName overrides the priorityClassName on the dns-controller pod.
+	// Defaults to "system-cluster-critical" when unset.
+	PriorityClassName *string `json:"priorityClassName,omitempty"`
 }
 
 // EtcdProviderType describes etcd cluster provisioning types (Standalone, Manager)
@@ -556,7 +654,7 @@ const (
 
 // EtcdClusterSpec is the etcd cluster specification
 type EtcdClusterSpec struct {
-	// Name is the name of the etcd cluster (main, events etc)
+	// Name is the name of the etcd cluster (main, events, leases etc)
 	Name string `json:"name,omitempty"`
 	// Provider is the provider used to run etcd: Manager, Legacy.
 	// Defaults to Manager.
@@ -604,8 +702,16 @@ type EtcdManagerSpec struct {
 	// This allows etcd setting to be configured/overwriten. No config validation is done.
 	// A list of etcd config ENV vars can be found at https://github.com/etcd-io/etcd/blob/master/Documentation/op-guide/configuration.md
 	Env []EnvVar `json:"env,omitempty"`
+	// BackupInterval which is used for backups. The default is 15 minutes.
+	BackupInterval *metav1.Duration `json:"backupInterval,omitempty"`
+	// BackupRetentionDays which is used for backups. The default is 90 days.
+	BackupRetentionDays *uint32 `json:"backupRetentionDays,omitempty"`
 	// DiscoveryPollInterval which is used for discovering other cluster members. The default is 60 seconds.
-	DiscoveryPollInterval *string `json:"discoveryPollInterval,omitempty"`
+	DiscoveryPollInterval *metav1.Duration `json:"discoveryPollInterval,omitempty"`
+	// ListenMetricsURLs is the list of URLs to listen on that will respond to both the /metrics and /health endpoints
+	ListenMetricsURLs []string `json:"listenMetricsURLs,omitempty"`
+	// ListenClientHTTPURLs is the list of URLs to listen on for HTTP-only client traffic
+	ListenClientHTTPURLs []string `json:"listenClientHTTPURLs,omitempty"`
 	// LogLevel allows the klog library verbose log level to be set for etcd-manager. The default is 6.
 	// https://github.com/google/glog#verbose-logging
 	LogLevel *int32 `json:"logLevel,omitempty"`
@@ -619,14 +725,14 @@ type EtcdMemberSpec struct {
 	InstanceGroup *string `json:"instanceGroup,omitempty"`
 	// VolumeType is the underlying cloud storage class
 	VolumeType *string `json:"volumeType,omitempty"`
-	// If volume type is io1, then we need to specify the number of Iops.
-	VolumeIops *int32 `json:"volumeIops,omitempty"`
+	// If volume type is io1, then we need to specify the number of IOPS.
+	VolumeIOPS *int32 `json:"volumeIops,omitempty"`
 	// Parameter for disks that support provisioned throughput
 	VolumeThroughput *int32 `json:"volumeThroughput,omitempty"`
 	// VolumeSize is the underlying cloud volume size
 	VolumeSize *int32 `json:"volumeSize,omitempty"`
-	// KmsKeyId is a AWS KMS ID used to encrypt the volume
-	KmsKeyId *string `json:"kmsKeyId,omitempty"`
+	// KmsKeyID is a AWS KMS ID used to encrypt the volume
+	KmsKeyID *string `json:"kmsKeyId,omitempty"`
 	// EncryptedVolume indicates you want to encrypt the volume
 	EncryptedVolume *bool `json:"encryptedVolume,omitempty"`
 }
@@ -635,9 +741,10 @@ type EtcdMemberSpec struct {
 type SubnetType string
 
 const (
-	SubnetTypePublic  SubnetType = "Public"
-	SubnetTypePrivate SubnetType = "Private"
-	SubnetTypeUtility SubnetType = "Utility"
+	SubnetTypePublic    SubnetType = "Public"
+	SubnetTypePrivate   SubnetType = "Private"
+	SubnetTypeDualStack SubnetType = "DualStack"
+	SubnetTypeUtility   SubnetType = "Utility"
 )
 
 type ClusterSubnetSpec struct {
@@ -653,8 +760,8 @@ type ClusterSubnetSpec struct {
 	// IPv6CIDR is the IPv6 CIDR block assigned to the subnet.
 	IPv6CIDR string `json:"ipv6CIDR,omitempty"`
 
-	// ProviderID is the cloud provider id for the objects associated with the zone (the subnet on AWS)
-	ProviderID string `json:"id,omitempty"`
+	// ID is the cloud provider ID for the objects associated with the zone (the subnet on AWS).
+	ID string `json:"id,omitempty"`
 
 	// Egress defines the method of traffic egress for this subnet
 	Egress string `json:"egress,omitempty"`
@@ -662,6 +769,16 @@ type ClusterSubnetSpec struct {
 	Type SubnetType `json:"type,omitempty"`
 	// PublicIP to attach to NatGateway
 	PublicIP string `json:"publicIP,omitempty"`
+
+	// AdditionalRoutes to attach to the subnet's route table
+	AdditionalRoutes []RouteSpec `json:"additionalRoutes,omitempty"`
+}
+
+type RouteSpec struct {
+	// CIDR destination of the route
+	CIDR string `json:"cidr,omitempty"`
+	// Target of the route
+	Target string `json:"target,omitempty"`
 }
 
 type EgressProxySpec struct {
@@ -690,13 +807,13 @@ func (t *TargetSpec) IsEmpty() bool {
 // TerraformSpec allows us to specify terraform config in an extensible way
 type TerraformSpec struct {
 	// ProviderExtraConfig contains key/value pairs to add to the main terraform provider block
-	ProviderExtraConfig *map[string]string `json:"providerExtraConfig,omitempty"`
+	ProviderExtraConfig map[string]string `json:"providerExtraConfig,omitempty"`
 	// FilesProviderExtraConfig contains key/value pairs to add to the terraform provider block used for managed files
-	FilesProviderExtraConfig *map[string]string `json:"filesProviderExtraConfig,omitempty"`
+	FilesProviderExtraConfig map[string]string `json:"filesProviderExtraConfig,omitempty"`
 }
 
 func (t *TerraformSpec) IsEmpty() bool {
-	return t.ProviderExtraConfig == nil
+	return len(t.ProviderExtraConfig) == 0 && len(t.FilesProviderExtraConfig) == 0
 }
 
 // EnvVar represents an environment variable present in a Container.
@@ -797,4 +914,8 @@ type WarmPoolSpec struct {
 	// EnableLifecycleHook determines if an ASG lifecycle hook will be added ensuring that nodeup runs to completion.
 	// Note that the metadata API must be protected from arbitrary Pods when this is enabled.
 	EnableLifecycleHook bool `json:"enableLifecycleHook,omitempty"`
+	// LifecycleHookTimeout is the timeout for the ASG lifecycle hook in seconds.
+	LifecycleHookTimeout *int32 `json:"lifecycleHookTimeout,omitempty"`
+	// AdditionalImages is a list of additional container images to pull into the warm pool instances.
+	AdditionalImages []string `json:"additionalImages,omitempty"`
 }

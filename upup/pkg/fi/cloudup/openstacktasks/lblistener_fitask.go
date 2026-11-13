@@ -27,7 +27,7 @@ import (
 
 // LBListener
 
-var _ fi.HasLifecycle = &LBListener{}
+var _ fi.HasLifecycle = (*LBListener)(nil)
 
 // GetLifecycle returns the Lifecycle of the object, implementing fi.HasLifecycle
 func (o *LBListener) GetLifecycle() fi.Lifecycle {
@@ -39,7 +39,7 @@ func (o *LBListener) SetLifecycle(lifecycle fi.Lifecycle) {
 	o.Lifecycle = lifecycle
 }
 
-var _ fi.HasName = &LBListener{}
+var _ fi.HasName = (*LBListener)(nil)
 
 // GetName returns the Name of the object, implementing fi.HasName
 func (o *LBListener) GetName() *string {
@@ -48,5 +48,5 @@ func (o *LBListener) GetName() *string {
 
 // String is the stringer function for the task, producing readable output using fi.TaskAsString
 func (o *LBListener) String() string {
-	return fi.TaskAsString(o)
+	return fi.CloudupTaskAsString(o)
 }

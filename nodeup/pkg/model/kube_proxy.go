@@ -18,20 +18,16 @@ package model
 
 import (
 	"fmt"
-	"strings"
 
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
-	"k8s.io/kops/pkg/dns"
 	"k8s.io/kops/pkg/flagbuilder"
 	"k8s.io/kops/pkg/k8scodecs"
 	"k8s.io/kops/pkg/kubemanifest"
 	"k8s.io/kops/pkg/rbac"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/nodeup/nodetasks"
-	"k8s.io/kops/util/pkg/architectures"
 )
 
 // KubeProxyBuilder installs kube-proxy
@@ -39,24 +35,20 @@ type KubeProxyBuilder struct {
 	*NodeupModelContext
 }
 
-var _ fi.ModelBuilder = &KubeProxyBuilder{}
+var _ fi.NodeupModelBuilder = &KubeProxyBuilder{}
 
 // Build is responsible for building the kube-proxy manifest
 // @TODO we should probably change this to a daemonset in the future and follow the kubeadm path
-func (b *KubeProxyBuilder) Build(c *fi.ModelBuilderContext) error {
-
-	if b.Cluster.Spec.KubeProxy.Enabled != nil && !*b.Cluster.Spec.KubeProxy.Enabled {
+func (b *KubeProxyBuilder) Build(c *fi.NodeupModelBuilderContext) error {
+	if b.NodeupConfig.KubeProxy == nil {
 		klog.V(2).Infof("Kube-proxy is disabled, will not create configuration for it.")
 		return nil
 	}
 
-	if b.IsMaster {
-		// If this is a master that is not isolated, run it as a normal node also (start kube-proxy etc)
-		// This lets e.g. daemonset pods communicate with other pods in the system
-		if fi.BoolValue(b.Cluster.Spec.IsolateMasters) {
-			klog.V(2).Infof("Running on Master with IsolateMaster=true; skipping kube-proxy installation")
-			return nil
-		}
+	role := b.BootConfig.InstanceGroupRole
+	if role.HasEtcd() || role.HasKubeControllerManager() || role.HasScheduler() {
+		klog.V(2).Infof("Kube-proxy is disabled, role %s does not need kube-proxy.", role)
+		return nil
 	}
 
 	{
@@ -64,6 +56,8 @@ func (b *KubeProxyBuilder) Build(c *fi.ModelBuilderContext) error {
 		if err != nil {
 			return fmt.Errorf("error building kube-proxy manifest: %v", err)
 		}
+
+		pod.ObjectMeta.Labels["kubernetes.io/managed-by"] = "nodeup"
 
 		manifest, err := k8scodecs.ToVersionedYaml(pod)
 		if err != nil {
@@ -114,54 +108,46 @@ func (b *KubeProxyBuilder) Build(c *fi.ModelBuilderContext) error {
 
 // buildPod is responsible constructing the pod spec
 func (b *KubeProxyBuilder) buildPod() (*v1.Pod, error) {
-	c := b.Cluster.Spec.KubeProxy
+	c := b.NodeupConfig.KubeProxy
 	if c == nil {
 		return nil, fmt.Errorf("KubeProxy not configured")
 	}
 
+	// On distributions where iptables is not functional (e.g., RHEL10+),
+	// we must use nftables proxy mode instead.
+	// In particular when we forced nftables on rhel10, we should also pass the --proxy-mode=nftables flag.
+	if b.Distribution.ForceNftables() {
+		if c.ProxyMode == "" || c.ProxyMode == "iptables" {
+			klog.Infof("Distribution %v requires nftables; overriding kube-proxy mode from %q to nftables", b.Distribution, c.ProxyMode)
+			c.ProxyMode = "nftables"
+		}
+	}
+
 	if c.Master == "" {
-		if b.IsMaster {
-			// As a special case, if this is the master, we point kube-proxy to the local IP
-			// This prevents a circular dependency where kube-proxy can't come up until DNS comes up,
-			// which would mean that DNS can't rely on API to come up
+		if b.HasAPIServer {
+			// Use the local API server to avoid a kube-proxy/DNS bootstrap cycle. Dedicated
+			// apiserver nodes also lack an /etc/hosts entry for the API internal name.
 			c.Master = "https://127.0.0.1"
 		} else {
-			c.Master = "https://" + b.Cluster.Spec.MasterInternalName
+			c.Master = "https://" + b.APIInternalName()
 		}
 	}
 
 	resourceRequests := v1.ResourceList{}
 	resourceLimits := v1.ResourceList{}
 
-	cpuRequest, err := resource.ParseQuantity(c.CPURequest)
-	if err != nil {
-		return nil, fmt.Errorf("error parsing CPURequest=%q", c.CPURequest)
+	resourceRequests["cpu"] = *c.CPURequest
+
+	if c.CPULimit != nil {
+		resourceLimits["cpu"] = *c.CPULimit
 	}
 
-	resourceRequests["cpu"] = cpuRequest
-
-	if c.CPULimit != "" {
-		cpuLimit, err := resource.ParseQuantity(c.CPULimit)
-		if err != nil {
-			return nil, fmt.Errorf("error parsing CPULimit=%q", c.CPULimit)
-		}
-		resourceLimits["cpu"] = cpuLimit
+	if c.MemoryRequest != nil {
+		resourceRequests["memory"] = *c.MemoryRequest
 	}
 
-	if c.MemoryRequest != "" {
-		memoryRequest, err := resource.ParseQuantity(c.MemoryRequest)
-		if err != nil {
-			return nil, fmt.Errorf("error parsing MemoryRequest=%q", c.MemoryRequest)
-		}
-		resourceRequests["memory"] = memoryRequest
-	}
-
-	if c.MemoryLimit != "" {
-		memoryLimit, err := resource.ParseQuantity(c.MemoryLimit)
-		if err != nil {
-			return nil, fmt.Errorf("error parsing MemoryLimit=%q", c.MemoryLimit)
-		}
-		resourceLimits["memory"] = memoryLimit
+	if c.MemoryLimit != nil {
+		resourceLimits["memory"] = *c.MemoryLimit
 	}
 
 	if c.ConntrackMaxPerCore == nil {
@@ -176,9 +162,11 @@ func (b *KubeProxyBuilder) buildPod() (*v1.Pod, error) {
 
 	flags = append(flags, []string{
 		"--kubeconfig=/var/lib/kube-proxy/kubeconfig",
-		"--oom-score-adj=-998"}...)
+		"--oom-score-adj=-998",
+	}...)
 
-	image := kubeProxyImage(b.NodeupModelContext)
+	image := b.RemapImage(c.Image)
+
 	container := &v1.Container{
 		Name:  "kube-proxy",
 		Image: image,
@@ -187,7 +175,7 @@ func (b *KubeProxyBuilder) buildPod() (*v1.Pod, error) {
 			Limits:   resourceLimits,
 		},
 		SecurityContext: &v1.SecurityContext{
-			Privileged: fi.Bool(true),
+			Privileged: new(true),
 		},
 	}
 
@@ -207,34 +195,30 @@ func (b *KubeProxyBuilder) buildPod() (*v1.Pod, error) {
 	}
 
 	// Log both to docker and to the logfile
-	addHostPathMapping(pod, container, "logfile", "/var/log/kube-proxy.log").ReadOnly = false
+	kubemanifest.AddHostPathMapping(pod, container, "logfile", "/var/log/kube-proxy.log", kubemanifest.WithReadWrite())
 	// We use lighter containers that don't include shells
 	// But they have richer logging support via klog
-	container.Command = []string{"/usr/local/bin/kube-proxy"}
-	container.Args = append(
-		sortedStrings(flags),
-		"--logtostderr=false", //https://github.com/kubernetes/klog/issues/60
-		"--alsologtostderr",
-		"--log-file=/var/log/kube-proxy.log")
-
 	{
-		addHostPathMapping(pod, container, "kubeconfig", "/var/lib/kube-proxy/kubeconfig")
+		container.Command = []string{"/go-runner"}
+		container.Args = []string{
+			"--log-file=/var/log/kube-proxy.log",
+			"--also-stdout",
+			"/usr/local/bin/kube-proxy",
+		}
+		container.Args = append(container.Args, sortedStrings(flags)...)
+	}
+	{
+		kubemanifest.AddHostPathMapping(pod, container, "kubeconfig", "/var/lib/kube-proxy")
 		// @note: mapping the host modules directory to fix the missing ipvs kernel module
-		addHostPathMapping(pod, container, "modules", "/lib/modules")
+		kubemanifest.AddHostPathMapping(pod, container, "modules", "/lib/modules")
 
 		// Map SSL certs from host: /usr/share/ca-certificates -> /etc/ssl/certs
-		sslCertsHost := addHostPathMapping(pod, container, "ssl-certs-hosts", "/usr/share/ca-certificates")
-		sslCertsHost.MountPath = "/etc/ssl/certs"
-	}
-
-	if dns.IsGossipHostname(b.Cluster.Name) {
-		// Map /etc/hosts from host, so that we see the updates that are made by protokube
-		addHostPathMapping(pod, container, "etchosts", "/etc/hosts")
+		kubemanifest.AddHostPathMapping(pod, container, "ssl-certs-hosts", "/usr/share/ca-certificates", kubemanifest.WithMountPath("/etc/ssl/certs"))
 	}
 
 	// Mount the iptables lock file
 	{
-		addHostPathMapping(pod, container, "iptableslock", "/run/xtables.lock").ReadOnly = false
+		kubemanifest.AddHostPathMapping(pod, container, "iptableslock", "/run/xtables.lock", kubemanifest.WithReadWrite())
 
 		vol := pod.Spec.Volumes[len(pod.Spec.Volumes)-1]
 		if vol.Name != "iptableslock" {
@@ -247,27 +231,6 @@ func (b *KubeProxyBuilder) buildPod() (*v1.Pod, error) {
 
 	pod.Spec.Containers = append(pod.Spec.Containers, *container)
 
-	// Note that e.g. kubeadm has this as a daemonset, but this doesn't have a lot of test coverage AFAICT
-	//ServiceAccountName: "kube-proxy",
-
-	//d := &v1beta1.DaemonSet{
-	//	ObjectMeta: metav1.ObjectMeta{
-	//		Labels: map[string]string{
-	//			"k8s-app": "kube-proxy",
-	//		},
-	//		Name: "kube-proxy",
-	//		Namespace: "kube-proxy",
-	//	},
-	//	Spec: v1beta1.DeploymentSpec{
-	//		Selector: &metav1.LabelSelector{
-	//			MatchLabels: map[string]string{
-	//				"k8s-app": "kube-proxy",
-	//			},
-	//		},
-	//		Template: template,
-	//	},
-	//}
-
 	// This annotation ensures that kube-proxy does not get evicted if the node
 	// supports critical pod annotation based priority scheme.
 	// Note that kube-proxy runs as a static pod so this annotation does NOT have
@@ -278,6 +241,8 @@ func (b *KubeProxyBuilder) buildPod() (*v1.Pod, error) {
 	// Also set priority so that kube-proxy does not get evicted in clusters where
 	// PodPriority is enabled.
 	kubemanifest.MarkPodAsNodeCritical(pod)
+
+	kubemanifest.AddHostPathSELinuxContext(pod, b.NodeupConfig)
 
 	return pod, nil
 }
@@ -293,12 +258,4 @@ func tolerateMasterTaints() []v1.Toleration {
 	//}
 
 	return tolerations
-}
-
-func kubeProxyImage(b *NodeupModelContext) string {
-	image := b.Cluster.Spec.KubeProxy.Image
-	if b.Architecture != architectures.ArchitectureAmd64 {
-		image = strings.Replace(image, "-amd64", "-"+string(b.Architecture), 1)
-	}
-	return image
 }

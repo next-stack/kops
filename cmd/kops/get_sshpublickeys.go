@@ -57,7 +57,7 @@ func NewCmdGetSSHPublicKeys(f *util.Factory, out io.Writer, getOptions *GetOptio
 		Args:              rootCommand.clusterNameArgs(&options.ClusterName),
 		ValidArgsFunction: commandutils.CompleteClusterName(f, true, false),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return RunGetSSHPublicKeys(context.TODO(), f, out, &options)
+			return RunGetSSHPublicKeys(cmd.Context(), f, out, &options)
 		},
 	}
 
@@ -70,7 +70,7 @@ type SSHKeyItem struct {
 }
 
 func RunGetSSHPublicKeys(ctx context.Context, f *util.Factory, out io.Writer, options *GetSSHPublicKeysOptions) error {
-	clientset, err := f.Clientset()
+	clientset, err := f.KopsClient()
 	if err != nil {
 		return err
 	}
@@ -105,12 +105,12 @@ func RunGetSSHPublicKeys(ctx context.Context, f *util.Factory, out io.Writer, op
 		items = append(items, item)
 	}
 
-	if len(items) == 0 {
-		return fmt.Errorf("no SSH public key found")
-	}
 	switch options.Output {
 
 	case OutputTable:
+		if len(items) == 0 {
+			return fmt.Errorf("no SSH public key found")
+		}
 		t := &tables.Table{}
 		t.AddColumn("ID", func(i *SSHKeyItem) string {
 			return i.ID

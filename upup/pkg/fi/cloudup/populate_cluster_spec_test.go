@@ -17,6 +17,7 @@ limitations under the License.
 package cloudup
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -34,22 +35,23 @@ import (
 )
 
 func buildMinimalCluster() (*awsup.MockAWSCloud, *kopsapi.Cluster) {
-	cloud := awsup.InstallMockAWSCloud(MockAWSRegion, "abcd")
+	cloud := awsup.InstallMockAWSCloud(testAWSRegion, "abcd")
 
-	c := testutils.BuildMinimalCluster("testcluster.test.com")
+	c := testutils.BuildMinimalClusterAWS("testcluster.test.com")
 
 	return cloud, c
 }
 
 func TestPopulateCluster_Default_NoError(t *testing.T) {
+	ctx := context.TODO()
 	cloud, c := buildMinimalCluster()
 
-	err := PerformAssignments(c, cloud)
+	err := PerformAssignments(c, vfs.Context, cloud)
 	if err != nil {
 		t.Fatalf("error from PerformAssignments: %v", err)
 	}
 
-	_, err = mockedPopulateClusterSpec(c, cloud)
+	_, err = mockedPopulateClusterSpec(ctx, c, cloud)
 	if err != nil {
 		t.Fatalf("Unexpected error from PopulateCluster: %v", err)
 	}
@@ -69,244 +71,178 @@ func TestPopulateCluster_Subnets(t *testing.T) {
 		{
 			NonMasqueradeCIDR:             "10.0.0.0/9",
 			ExpectedClusterCIDR:           "10.64.0.0/10",
-			ExpectedServiceClusterIPRange: "10.0.0.0/12",
+			ExpectedServiceClusterIPRange: "100.64.0.0/13",
 		},
 		{
 			NonMasqueradeCIDR:             "10.0.0.0/8",
 			ExpectedClusterCIDR:           "10.128.0.0/9",
-			ExpectedServiceClusterIPRange: "10.0.0.0/12",
+			ExpectedServiceClusterIPRange: "100.64.0.0/13",
 		},
 		{
-			NonMasqueradeCIDR:             "fd00:10:96::/96",
-			ExpectedClusterCIDR:           "fd00:10:96::8000:0/97",
-			ExpectedServiceClusterIPRange: "fd00:10:96::/108",
-		},
-		{
-			NonMasqueradeCIDR:             "fd00:10:96::/95",
-			ExpectedClusterCIDR:           "fd00:10:96::1:0:0/96",
-			ExpectedServiceClusterIPRange: "fd00:10:96::/108",
-		},
-		{
-			NonMasqueradeCIDR:             "fd00:10:96::/94",
-			ExpectedClusterCIDR:           "fd00:10:96::1:0:0/96",
-			ExpectedServiceClusterIPRange: "fd00:10:96::/108",
-		},
-		{
-			NonMasqueradeCIDR:             "fd00:10:96::/106",
-			ExpectedClusterCIDR:           "fd00:10:96::20:0/107",
-			ExpectedServiceClusterIPRange: "fd00:10:96::/109",
+			NonMasqueradeCIDR:             "::/0",
+			ExpectedServiceClusterIPRange: "fd00:5e4f:ce::/108",
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.NonMasqueradeCIDR, func(t *testing.T) {
+			ctx := context.TODO()
 			cloud, c := buildMinimalCluster()
-			c.Spec.NonMasqueradeCIDR = tc.NonMasqueradeCIDR
+			c.Spec.Networking.NonMasqueradeCIDR = tc.NonMasqueradeCIDR
+			c.Spec.Networking.Kubenet = nil
+			c.Spec.Networking.CNI = &kopsapi.CNINetworkingSpec{}
+			c.Spec.ExternalCloudControllerManager = &kopsapi.CloudControllerManagerConfig{}
+			c.Spec.CloudProvider.AWS.EBSCSIDriver = &kopsapi.EBSCSIDriverSpec{
+				Enabled: new(true),
+			}
 
-			err := PerformAssignments(c, cloud)
+			err := PerformAssignments(c, vfs.Context, cloud)
 			require.NoError(t, err, "PerformAssignments")
 
-			full, err := mockedPopulateClusterSpec(c, cloud)
+			full, err := mockedPopulateClusterSpec(ctx, c, cloud)
 			require.NoError(t, err, "PopulateClusterSpec")
 
 			assert.Equal(t, tc.ExpectedClusterCIDR, full.Spec.KubeControllerManager.ClusterCIDR, "ClusterCIDR")
-			assert.Equal(t, tc.ExpectedServiceClusterIPRange, full.Spec.ServiceClusterIPRange, "ServiceClusterIPRange")
+			assert.Equal(t, tc.ExpectedServiceClusterIPRange, full.Spec.Networking.ServiceClusterIPRange, "ServiceClusterIPRange")
 		})
 	}
 }
 
-func mockedPopulateClusterSpec(c *kopsapi.Cluster, cloud fi.Cloud) (*kopsapi.Cluster, error) {
+func mockedPopulateClusterSpec(ctx context.Context, c *kopsapi.Cluster, cloud fi.Cloud) (*kopsapi.Cluster, error) {
 	vfs.Context.ResetMemfsContext(true)
 
-	assetBuilder := assets.NewAssetBuilder(c, false)
+	assetBuilder := assets.NewAssetBuilder(vfs.Context, c.Spec.Assets, false)
 	basePath, err := vfs.Context.BuildVfsPath("memfs://tests")
 	if err != nil {
 		return nil, fmt.Errorf("error building vfspath: %v", err)
 	}
-	clientset := vfsclientset.NewVFSClientset(basePath)
-	return PopulateClusterSpec(clientset, c, cloud, assetBuilder)
-}
-
-func TestPopulateCluster_Docker_Spec(t *testing.T) {
-	cloud, c := buildMinimalCluster()
-	c.Spec.Docker = &kopsapi.DockerConfig{
-		MTU:                fi.Int32(5678),
-		InsecureRegistry:   fi.String("myregistry.com:1234"),
-		InsecureRegistries: []string{"myregistry.com:1234", "myregistry2.com:1234"},
-		RegistryMirrors:    []string{"https://registry.example.com"},
-		LogOpt:             []string{"env=FOO"},
-	}
-
-	err := PerformAssignments(c, cloud)
-	if err != nil {
-		t.Fatalf("error from PerformAssignments: %v", err)
-	}
-
-	full, err := mockedPopulateClusterSpec(c, cloud)
-	if err != nil {
-		t.Fatalf("Unexpected error from PopulateCluster: %v", err)
-	}
-
-	if fi.Int32Value(full.Spec.Docker.MTU) != 5678 {
-		t.Fatalf("Unexpected Docker MTU: %v", full.Spec.Docker.MTU)
-	}
-
-	if fi.StringValue(full.Spec.Docker.InsecureRegistry) != "myregistry.com:1234" {
-		t.Fatalf("Unexpected Docker InsecureRegistry: %v", full.Spec.Docker.InsecureRegistry)
-	}
-
-	if strings.Join(full.Spec.Docker.InsecureRegistries, "!") != "myregistry.com:1234!myregistry2.com:1234" {
-		t.Fatalf("Unexpected Docker InsecureRegistries: %v", full.Spec.Docker.InsecureRegistries)
-	}
-
-	if strings.Join(full.Spec.Docker.RegistryMirrors, "!") != "https://registry.example.com" {
-		t.Fatalf("Unexpected Docker RegistryMirrors: %v", full.Spec.Docker.RegistryMirrors)
-	}
-
-	if strings.Join(full.Spec.Docker.LogOpt, "!") != "env=FOO" {
-		t.Fatalf("Unexpected Docker LogOpt: %v", full.Spec.Docker.LogOpt)
-	}
+	clientset := vfsclientset.NewVFSClientset(vfs.Context, basePath)
+	return PopulateClusterSpec(ctx, clientset, c, nil, cloud, assetBuilder)
 }
 
 func TestPopulateCluster_StorageDefault(t *testing.T) {
+	ctx := context.TODO()
 	cloud, c := buildMinimalCluster()
 
-	err := PerformAssignments(c, cloud)
+	err := PerformAssignments(c, vfs.Context, cloud)
 	if err != nil {
 		t.Fatalf("error from PerformAssignments: %v", err)
 	}
 
-	full, err := mockedPopulateClusterSpec(c, cloud)
+	full, err := mockedPopulateClusterSpec(ctx, c, cloud)
 	if err != nil {
 		t.Fatalf("Unexpected error from PopulateCluster: %v", err)
 	}
 
-	if fi.StringValue(full.Spec.KubeAPIServer.StorageBackend) != "etcd3" {
+	if fi.ValueOf(full.Spec.KubeAPIServer.StorageBackend) != "etcd3" {
 		t.Fatalf("Unexpected StorageBackend: %v", *full.Spec.KubeAPIServer.StorageBackend)
 	}
 }
 
+func TestPopulateCluster_EvictionHard(t *testing.T) {
+	ctx := context.TODO()
+	cloud, c := buildMinimalCluster()
+
+	err := PerformAssignments(c, vfs.Context, cloud)
+	if err != nil {
+		t.Fatalf("error from PerformAssignments: %v", err)
+	}
+
+	c.Spec.Kubelet = &kopsapi.KubeletConfigSpec{
+		EvictionHard: new("memory.available<250Mi"),
+	}
+
+	full, err := mockedPopulateClusterSpec(ctx, c, cloud)
+	if err != nil {
+		t.Fatalf("Unexpected error from PopulateCluster: %v", err)
+	}
+
+	if fi.ValueOf(full.Spec.Kubelet.EvictionHard) != "memory.available<250Mi" {
+		t.Fatalf("Unexpected StorageBackend: %v", *full.Spec.Kubelet.EvictionHard)
+	}
+}
+
 func build(c *kopsapi.Cluster) (*kopsapi.Cluster, error) {
+	ctx := context.TODO()
 	cloud, err := BuildCloud(c)
 	if err != nil {
 		return nil, fmt.Errorf("error from BuildCloud: %v", err)
 	}
 
-	err = PerformAssignments(c, cloud)
+	err = PerformAssignments(c, vfs.Context, cloud)
 	if err != nil {
 		return nil, fmt.Errorf("error from PerformAssignments: %v", err)
 	}
 
-	full, err := mockedPopulateClusterSpec(c, cloud)
+	full, err := mockedPopulateClusterSpec(ctx, c, cloud)
 	if err != nil {
 		return nil, fmt.Errorf("Unexpected error from PopulateCluster: %v", err)
 	}
 	return full, nil
 }
 
-func TestPopulateCluster_Kubenet(t *testing.T) {
-	_, c := buildMinimalCluster()
-
-	full, err := build(c)
-	if err != nil {
-		t.Fatalf("error during build: %v", err)
-	}
-
-	if full.Spec.Kubelet.NetworkPluginName != "kubenet" {
-		t.Fatalf("Unexpected NetworkPluginName: %v", full.Spec.Kubelet.NetworkPluginName)
-	}
-
-	if fi.BoolValue(full.Spec.KubeControllerManager.ConfigureCloudRoutes) != true {
-		t.Fatalf("Unexpected ConfigureCloudRoutes: %v", full.Spec.KubeControllerManager.ConfigureCloudRoutes)
-	}
-}
-
-func TestPopulateCluster_CNI(t *testing.T) {
-	_, c := buildMinimalCluster()
-
-	c.Spec.Kubelet = &kopsapi.KubeletConfigSpec{
-		ConfigureCBR0:     fi.Bool(false),
-		NetworkPluginName: "cni",
-		NonMasqueradeCIDR: c.Spec.NonMasqueradeCIDR,
-		CloudProvider:     c.Spec.CloudProvider,
-	}
-
-	full, err := build(c)
-	if err != nil {
-		t.Fatalf("error during build: %v", err)
-	}
-
-	if full.Spec.Kubelet.NetworkPluginName != "cni" {
-		t.Fatalf("Unexpected NetworkPluginName: %v", full.Spec.Kubelet.NetworkPluginName)
-	}
-
-	if fi.BoolValue(full.Spec.Kubelet.ConfigureCBR0) != false {
-		t.Fatalf("Unexpected ConfigureCBR0: %v", full.Spec.Kubelet.ConfigureCBR0)
-	}
-
-	if fi.BoolValue(full.Spec.KubeControllerManager.ConfigureCloudRoutes) != true {
-		t.Fatalf("Unexpected ConfigureCloudRoutes: %v", full.Spec.KubeControllerManager.ConfigureCloudRoutes)
-	}
-}
-
 func TestPopulateCluster_Custom_CIDR(t *testing.T) {
+	ctx := context.TODO()
+
 	cloud, c := buildMinimalCluster()
-	c.Spec.NetworkCIDR = "172.20.2.0/24"
-	c.Spec.Subnets = []kopsapi.ClusterSubnetSpec{
-		{Name: "subnet-us-mock-1a", Zone: "us-mock-1a", CIDR: "172.20.2.0/27"},
-		{Name: "subnet-us-mock-1b", Zone: "us-mock-1b", CIDR: "172.20.2.32/27"},
-		{Name: "subnet-us-mock-1c", Zone: "us-mock-1c", CIDR: "172.20.2.64/27"},
+	c.Spec.Networking.NetworkCIDR = "172.20.2.0/24"
+	c.Spec.Networking.Subnets = []kopsapi.ClusterSubnetSpec{
+		{Name: "subnet-us-test-1a", Zone: "us-test-1a", CIDR: "172.20.2.0/27", Type: kopsapi.SubnetTypePublic},
+		{Name: "subnet-us-test-1b", Zone: "us-test-1b", CIDR: "172.20.2.32/27", Type: kopsapi.SubnetTypePublic},
+		{Name: "subnet-us-test-1c", Zone: "us-test-1c", CIDR: "172.20.2.64/27", Type: kopsapi.SubnetTypePublic},
 	}
 
-	err := PerformAssignments(c, cloud)
+	err := PerformAssignments(c, vfs.Context, cloud)
 	if err != nil {
 		t.Fatalf("error from PerformAssignments: %v", err)
 	}
 
-	full, err := mockedPopulateClusterSpec(c, cloud)
+	full, err := mockedPopulateClusterSpec(ctx, c, cloud)
 	if err != nil {
 		t.Fatalf("Unexpected error from PopulateCluster: %v", err)
 	}
-	if full.Spec.NetworkCIDR != "172.20.2.0/24" {
-		t.Fatalf("Unexpected NetworkCIDR: %v", full.Spec.NetworkCIDR)
+	if full.Spec.Networking.NetworkCIDR != "172.20.2.0/24" {
+		t.Fatalf("Unexpected NetworkCIDR: %v", full.Spec.Networking.NetworkCIDR)
 	}
 }
 
 func TestPopulateCluster_IsolateMasters(t *testing.T) {
+	ctx := context.TODO()
 	cloud, c := buildMinimalCluster()
-	c.Spec.IsolateMasters = fi.Bool(true)
+	c.Spec.Networking.IsolateControlPlane = new(true)
 
-	err := PerformAssignments(c, cloud)
+	err := PerformAssignments(c, vfs.Context, cloud)
 	if err != nil {
 		t.Fatalf("error from PerformAssignments: %v", err)
 	}
 
-	full, err := mockedPopulateClusterSpec(c, cloud)
+	full, err := mockedPopulateClusterSpec(ctx, c, cloud)
 	if err != nil {
 		t.Fatalf("Unexpected error from PopulateCluster: %v", err)
 	}
-	if fi.BoolValue(full.Spec.MasterKubelet.EnableDebuggingHandlers) != false {
-		t.Fatalf("Unexpected EnableDebuggingHandlers: %v", fi.BoolValue(full.Spec.MasterKubelet.EnableDebuggingHandlers))
+	if fi.ValueOf(full.Spec.ControlPlaneKubelet.EnableDebuggingHandlers) != false {
+		t.Fatalf("Unexpected EnableDebuggingHandlers: %v", fi.ValueOf(full.Spec.ControlPlaneKubelet.EnableDebuggingHandlers))
 	}
-	if fi.BoolValue(full.Spec.MasterKubelet.ReconcileCIDR) != false {
-		t.Fatalf("Unexpected ReconcileCIDR: %v", fi.BoolValue(full.Spec.MasterKubelet.ReconcileCIDR))
+	if fi.ValueOf(full.Spec.ControlPlaneKubelet.ReconcileCIDR) != false {
+		t.Fatalf("Unexpected ReconcileCIDR: %v", fi.ValueOf(full.Spec.ControlPlaneKubelet.ReconcileCIDR))
 	}
 }
 
 func TestPopulateCluster_IsolateMastersFalse(t *testing.T) {
+	ctx := context.TODO()
 	cloud, c := buildMinimalCluster()
-	// default: c.Spec.IsolateMasters = fi.Bool(false)
+	// default: c.Spec.IsolateControlPlane = new(false)
 
-	err := PerformAssignments(c, cloud)
+	err := PerformAssignments(c, vfs.Context, cloud)
 	if err != nil {
 		t.Fatalf("error from PerformAssignments: %v", err)
 	}
 
-	full, err := mockedPopulateClusterSpec(c, cloud)
+	full, err := mockedPopulateClusterSpec(ctx, c, cloud)
 	if err != nil {
 		t.Fatalf("Unexpected error from PopulateCluster: %v", err)
 	}
-	if fi.BoolValue(full.Spec.MasterKubelet.EnableDebuggingHandlers) != true {
-		t.Fatalf("Unexpected EnableDebuggingHandlers: %v", fi.BoolValue(full.Spec.MasterKubelet.EnableDebuggingHandlers))
+	if fi.ValueOf(full.Spec.ControlPlaneKubelet.EnableDebuggingHandlers) != true {
+		t.Fatalf("Unexpected EnableDebuggingHandlers: %v", fi.ValueOf(full.Spec.ControlPlaneKubelet.EnableDebuggingHandlers))
 	}
 }
 
@@ -319,75 +255,35 @@ func TestPopulateCluster_Name_Required(t *testing.T) {
 
 func TestPopulateCluster_Zone_Required(t *testing.T) {
 	cloud, c := buildMinimalCluster()
-	c.Spec.Subnets = nil
+	c.Spec.Networking.Subnets = nil
 
 	expectErrorFromPopulateCluster(t, c, cloud, "subnet")
 }
 
 func TestPopulateCluster_NetworkCIDR_Required(t *testing.T) {
 	cloud, c := buildMinimalCluster()
-	c.Spec.NetworkCIDR = ""
+	c.Spec.Networking.NetworkCIDR = ""
 
 	expectErrorFromPopulateCluster(t, c, cloud, "networkCIDR")
 }
 
 func TestPopulateCluster_NonMasqueradeCIDR_Required(t *testing.T) {
 	cloud, c := buildMinimalCluster()
-	c.Spec.NonMasqueradeCIDR = ""
+	c.Spec.Networking.NonMasqueradeCIDR = ""
 
 	expectErrorFromPopulateCluster(t, c, cloud, "nonMasqueradeCIDR")
 }
 
 func TestPopulateCluster_CloudProvider_Required(t *testing.T) {
 	cloud, c := buildMinimalCluster()
-	c.Spec.CloudProvider = ""
+	c.Spec.CloudProvider = kopsapi.CloudProviderSpec{}
 
 	expectErrorFromPopulateCluster(t, c, cloud, "cloudProvider")
 }
 
-func TestPopulateCluster_TopologyInvalidNil_Required(t *testing.T) {
-	cloud, c := buildMinimalCluster()
-	c.Spec.Topology.Masters = ""
-	c.Spec.Topology.Nodes = ""
-	expectErrorFromPopulateCluster(t, c, cloud, "topology")
-}
-
-func TestPopulateCluster_TopologyInvalidValue_Required(t *testing.T) {
-	cloud, c := buildMinimalCluster()
-	c.Spec.Topology.Masters = "123"
-	c.Spec.Topology.Nodes = "abc"
-	expectErrorFromPopulateCluster(t, c, cloud, "topology")
-}
-
-//func TestPopulateCluster_TopologyInvalidMatchingValues_Required(t *testing.T) {
-//	// We can't have a bastion with public masters / nodes
-//	c := buildMinimalCluster()
-//	c.Spec.Topology.Masters = api.TopologyPublic
-//	c.Spec.Topology.Nodes = api.TopologyPrivate
-//	expectErrorFromPopulateCluster(t, c, "Topology")
-//}
-
-func TestPopulateCluster_BastionInvalidMatchingValues_Required(t *testing.T) {
-	// We can't have a bastion with public masters / nodes
-	cloud, c := buildMinimalCluster()
-	c.Spec.Topology.Masters = kopsapi.TopologyPublic
-	c.Spec.Topology.Nodes = kopsapi.TopologyPublic
-	c.Spec.Topology.Bastion = &kopsapi.BastionSpec{}
-	expectErrorFromPopulateCluster(t, c, cloud, "bastion")
-}
-
-func TestPopulateCluster_BastionIdleTimeoutInvalidNegative_Required(t *testing.T) {
-	cloud, c := buildMinimalCluster()
-
-	c.Spec.Topology.Masters = kopsapi.TopologyPrivate
-	c.Spec.Topology.Nodes = kopsapi.TopologyPrivate
-	c.Spec.Topology.Bastion = &kopsapi.BastionSpec{}
-	c.Spec.Topology.Bastion.IdleTimeoutSeconds = fi.Int64(-1)
-	expectErrorFromPopulateCluster(t, c, cloud, "bastion")
-}
-
 func expectErrorFromPopulateCluster(t *testing.T, c *kopsapi.Cluster, cloud fi.Cloud, message string) {
-	_, err := mockedPopulateClusterSpec(c, cloud)
+	ctx := context.TODO()
+	_, err := mockedPopulateClusterSpec(ctx, c, cloud)
 	if err == nil {
 		t.Fatalf("Expected error from PopulateCluster")
 	}
@@ -405,21 +301,23 @@ func TestPopulateCluster_APIServerCount(t *testing.T) {
 		t.Fatalf("error during build: %v", err)
 	}
 
-	if fi.Int32Value(full.Spec.KubeAPIServer.APIServerCount) != 3 {
-		t.Fatalf("Unexpected APIServerCount: %v", fi.Int32Value(full.Spec.KubeAPIServer.APIServerCount))
+	if fi.ValueOf(full.Spec.KubeAPIServer.APIServerCount) != 3 {
+		t.Fatalf("Unexpected APIServerCount: %v", fi.ValueOf(full.Spec.KubeAPIServer.APIServerCount))
 	}
 }
 
 func TestPopulateCluster_AnonymousAuth(t *testing.T) {
+	ctx := context.TODO()
+
 	cloud, c := buildMinimalCluster()
 	c.Spec.KubernetesVersion = "1.20.0"
 
-	err := PerformAssignments(c, cloud)
+	err := PerformAssignments(c, vfs.Context, cloud)
 	if err != nil {
 		t.Fatalf("error from PerformAssignments: %v", err)
 	}
 
-	full, err := mockedPopulateClusterSpec(c, cloud)
+	full, err := mockedPopulateClusterSpec(ctx, c, cloud)
 	if err != nil {
 		t.Fatalf("Unexpected error from PopulateCluster: %v", err)
 	}
@@ -428,52 +326,22 @@ func TestPopulateCluster_AnonymousAuth(t *testing.T) {
 		t.Fatalf("AnonymousAuth not specified")
 	}
 
-	if fi.BoolValue(full.Spec.KubeAPIServer.AnonymousAuth) != false {
-		t.Fatalf("Unexpected AnonymousAuth: %v", fi.BoolValue(full.Spec.KubeAPIServer.AnonymousAuth))
-	}
-}
-
-func TestPopulateCluster_DockerVersion(t *testing.T) {
-	grid := []struct {
-		KubernetesVersion string
-		DockerVersion     string
-	}{
-		{
-			KubernetesVersion: "1.17.0",
-			DockerVersion:     "19.03.15",
-		},
-		{
-			KubernetesVersion: "1.21.0",
-			DockerVersion:     "20.10.9",
-		},
-	}
-
-	for _, test := range grid {
-		_, c := buildMinimalCluster()
-		c.Spec.KubernetesVersion = test.KubernetesVersion
-		c.Spec.ContainerRuntime = "docker"
-
-		full, err := build(c)
-		if err != nil {
-			t.Fatalf("error during build: %v", err)
-		}
-
-		if fi.StringValue(full.Spec.Docker.Version) != test.DockerVersion {
-			t.Fatalf("Unexpected DockerVersion: %v", fi.StringValue(full.Spec.Docker.Version))
-		}
+	if fi.ValueOf(full.Spec.KubeAPIServer.AnonymousAuth) != false {
+		t.Fatalf("Unexpected AnonymousAuth: %v", fi.ValueOf(full.Spec.KubeAPIServer.AnonymousAuth))
 	}
 }
 
 func TestPopulateCluster_KubeController_High_Enough_Version(t *testing.T) {
+	ctx := context.TODO()
 	cloud, c := buildMinimalCluster()
 	c.Spec.KubernetesVersion = "v1.9.0"
 
-	err := PerformAssignments(c, cloud)
+	err := PerformAssignments(c, vfs.Context, cloud)
 	if err != nil {
 		t.Fatalf("error from PerformAssignments: %v", err)
 	}
 
-	full, err := mockedPopulateClusterSpec(c, cloud)
+	full, err := mockedPopulateClusterSpec(ctx, c, cloud)
 	if err != nil {
 		t.Fatalf("Unexpected error from PopulateCluster: %v", err)
 	}
@@ -481,5 +349,4 @@ func TestPopulateCluster_KubeController_High_Enough_Version(t *testing.T) {
 	if full.Spec.KubeControllerManager.AttachDetachReconcileSyncPeriod == nil {
 		t.Fatalf("AttachDetachReconcileSyncPeriod not set correctly")
 	}
-
 }

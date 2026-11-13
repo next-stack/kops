@@ -1,5 +1,5 @@
 /*
-Copyright 2020 The Kubernetes Authors.
+Copyright 2026 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,59 +17,78 @@ limitations under the License.
 package vfs
 
 import (
-	"os"
 	"testing"
+	"time"
+
+	"k8s.io/apimachinery/pkg/util/wait"
 )
 
-func TestBuildVaultPath(t *testing.T) {
-	token := os.Getenv("VAULT_DEV_ROOT_TOKEN_ID")
-	if token == "" {
-		t.Skip("No vault dev token set")
-	}
-	if os.Getenv("VAULT_TOKEN") != token {
-		t.Skip("BuildVaultPath test needs VAULT_TOKEN == VAULT_DEV_ROOT_TOKEN_ID")
-	}
+func TestNextBackoffDuration(t *testing.T) {
 	grid := []struct {
-		url       string
-		scheme    string
-		vaultAddr string
+		name     string
+		duration time.Duration
+		backoff  wait.Backoff
+		expected time.Duration
 	}{
 		{
-			url:       "vault://localhost:8200/foo/bar?tls=false",
-			scheme:    "http://",
-			vaultAddr: "http://localhost:8200",
+			name:     "doubles below the cap",
+			duration: 4 * time.Second,
+			backoff:  wait.Backoff{Factor: 2, Cap: 30 * time.Second},
+			expected: 8 * time.Second,
 		},
 		{
-			url:       "vault://foo.test.bar/foo/bar?tls=false",
-			scheme:    "http://",
-			vaultAddr: "http://foo.test.bar",
+			name:     "clamps at the cap",
+			duration: 16 * time.Second,
+			backoff:  wait.Backoff{Factor: 2, Cap: 30 * time.Second},
+			expected: 30 * time.Second,
 		},
 		{
-			url:       "vault://foo.test.bar/foo/bar",
-			scheme:    "https://",
-			vaultAddr: "https://foo.test.bar",
+			name:     "stays at the cap once reached",
+			duration: 30 * time.Second,
+			backoff:  wait.Backoff{Factor: 2, Cap: 30 * time.Second},
+			expected: 30 * time.Second,
+		},
+		{
+			name:     "grows unbounded when no cap is set",
+			duration: 16 * time.Second,
+			backoff:  wait.Backoff{Factor: 2},
+			expected: 32 * time.Second,
 		},
 	}
 
 	for _, g := range grid {
-		context := &VFSContext{}
-		p, err := context.buildVaultPath(g.url)
-		if err != nil {
-			t.Fatalf("Unexepcted error for %q: %v", g.url, err)
-		}
-		if p.String() != g.url {
-			t.Errorf("Unexpected path: expected %q, actual %q", g.url, p.Path())
-		}
+		t.Run(g.name, func(t *testing.T) {
+			actual := nextBackoffDuration(g.duration, g.backoff)
+			if actual != g.expected {
+				t.Errorf("nextBackoffDuration(%v, cap=%v) = %v, want %v", g.duration, g.backoff.Cap, actual, g.expected)
+			}
+		})
+	}
+}
 
-		vaultAddr := p.vaultClient.Address()
-		if vaultAddr != g.vaultAddr {
-			t.Errorf("Unexpected vaultAddr: expected %q, actual %q", g.vaultAddr, vaultAddr)
-		}
-
-		if p.scheme != g.scheme {
-			t.Errorf("Unexpected scheme for %q: expected %q, actual %q", g.url, g.scheme, p.scheme)
-		}
-
+// TestRetryWithBackoffRespectsCap covers the reason the cap exists: an uncapped backoff with a
+// large Steps count pushes later attempts arbitrarily far apart, so a caller that has been
+// failing for a while stops retrying at any useful rate.
+func TestRetryWithBackoffRespectsCap(t *testing.T) {
+	backoff := wait.Backoff{
+		Duration: 1 * time.Millisecond,
+		Factor:   2,
+		Cap:      4 * time.Millisecond,
+		Steps:    8,
 	}
 
+	attempts := 0
+	done, err := RetryWithBackoff(backoff, func() (bool, error) {
+		attempts++
+		return attempts >= 8, nil
+	})
+	if err != nil {
+		t.Fatalf("RetryWithBackoff returned error: %v", err)
+	}
+	if !done {
+		t.Errorf("RetryWithBackoff returned done=false, want true")
+	}
+	if attempts != 8 {
+		t.Errorf("condition called %d times, want 8", attempts)
+	}
 }

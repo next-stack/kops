@@ -24,10 +24,10 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/gophercloud/gophercloud/openstack/networking/v2/ports"
+	"github.com/gophercloud/gophercloud/v2/openstack/networking/v2/ports"
 
 	"github.com/google/uuid"
-	"github.com/gophercloud/gophercloud/openstack/networking/v2/extensions/layer3/routers"
+	"github.com/gophercloud/gophercloud/v2/openstack/networking/v2/extensions/layer3/routers"
 )
 
 type routerListResponse struct {
@@ -75,7 +75,6 @@ func (m *MockClient) mockRouters() {
 }
 
 func (m *MockClient) listRouters(w http.ResponseWriter, vals url.Values) {
-
 	w.WriteHeader(http.StatusOK)
 
 	routers := make([]routers.Router, 0)
@@ -182,7 +181,8 @@ func (m *MockClient) routerInterface(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		panic("error decoding create router interface request")
 	}
-	if parts[2] == "add_router_interface" {
+	switch parts[2] {
+	case "add_router_interface":
 		subnet := m.subnets[createInterface.SubnetID]
 		interfaces := m.routerInterfaces[routerID]
 		interfaces = append(interfaces, routers.InterfaceInfo{
@@ -202,7 +202,7 @@ func (m *MockClient) routerInterface(w http.ResponseWriter, r *http.Request) {
 			},
 		}
 		m.ports[port.ID] = port
-	} else if parts[2] == "remove_router_interface" {
+	case "remove_router_interface":
 		interfaces := make([]routers.InterfaceInfo, 0)
 		for _, i := range m.routerInterfaces[routerID] {
 			if i.SubnetID != createInterface.SubnetID {
@@ -210,7 +210,7 @@ func (m *MockClient) routerInterface(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		m.routerInterfaces[routerID] = interfaces
-	} else {
+	default:
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}

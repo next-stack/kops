@@ -12,42 +12,44 @@ listed below, are available which implement and manage this abstraction.
 
 The following table provides the support status for various networking providers with regards to kOps version:
 
-| Network provider | Experimental | Stable | Deprecated | Removed |
-| ------------ | -----------: | -----: | ---------: | ------: |
-| AWS VPC | 1.9 | 1.21 | - | - |
-| Calico | 1.6 | 1.11 | - | - |
-| Canal  | 1.12 | - | - | - |
-| Cilium | 1.9 | 1.15 | - | - |
-| Flannel udp | 1.5.2 | - | - | - |
-| Flannel vxlan | 1.8.0 | - | - | - |
-| Kopeio | 1.5 | - | - | - |
-| Kube-router | 1.6.2 | - | - | - |
-| Kubenet | 1.5 | 1.5 | - | - |
-| Lyft VPC | 1.11 | - | 1.22 | 1.23 |
-| Romana | 1.8 | - | 1.18 | 1.19 |
-| Weave | 1.5 | - | - | - |
+As of kOps 1.26 the default network provider is Cilium. Prior to that the default is Kubenet.
 
-### Which networking provider should you use?
+| Network provider | Experimental | Stable | Deprecated |
+|------------------|-------------:|-------:|-----------:|
+| AWS VPC          |          1.9 |   1.21 |          - |
+| Calico           |          1.6 |   1.11 |          - |
+| Cilium (default) |          1.9 |   1.15 |          - |
+| Cilium ENI       |         1.18 |   1.26 |          - |
+| Flannel UDP      |        1.5.2 |      - |          - |
+| Flannel VXLAN    |        1.8.0 |      - |          - |
+| Kindnet          |         1.32 |      - |          - |
+| Kube-router      |        1.6.2 |      - |          - |
+| Kubenet          |          1.5 |    1.5 |          - |
 
-kOps maintainers have no bias over the CNI provider that you run, we only aim to be flexible and provide a working setup of the CNIs.
+The following providers are no longer supported and can no longer be used:
 
-We do recommended something other than `kubenet` for production clusters due to `kubenet`'s limitations, as explained [below](#kubenet-default).
+| Network provider | Experimental | Stable | Deprecated |         Removed |
+|------------------|-------------:|-------:|-----------:|----------------:|
+| Canal            |         1.12 |      - |       1.27 | Kubernetes 1.28 |
+| Kopeio           |          1.5 |      - |       1.37 |       kOps 1.37 |
+| Lyft VPC         |         1.11 |      - |       1.22 |       kOps 1.23 |
+| Romana           |          1.8 |      - |       1.18 |       kOps 1.19 |
+| Weave            |          1.5 |      - |       1.23 | Kubernetes 1.23 |
 
 ### Specifying network option for cluster creation
 
 You can specify the network provider via the `--networking` command line switch. However, this will only give a default configuration of the provider. Typically you would often modify the `spec.networking` section of the cluster spec to configure the provider further.
 
-### Kubenet (default)
+### Kubenet
 
-Kubernetes Operations (kOps) uses `kubenet` networking by default. This sets up networking on AWS using VPC
-networking, where the master allocates a /24 CIDR to each Node, drawing from the Node network.
-Using `kubenet` mode routes for each node are then configured in the AWS VPC routing tables.
+The "kubenet" option has the control plane allocate a /24 CIDR to each Node, drawing from the Node network.
+Routes for each node are then configured in the cloud provider network's routing tables.
 
-One important limitation when using `kubenet` networking is that an AWS routing table cannot have more than
+One important limitation when using `kubenet` networking on AWS is that an AWS routing table cannot have more than
 50 entries, which sets a limit of 50 nodes per cluster. AWS support will sometimes raise the limit to 100,
 but their documentation notes that routing tables over 50 may take a performance hit.
 
-Because k8s modifies the AWS routing table, this means that realistically Kubernetes needs to own the
+Because kubernetes modifies the AWS routing table, this means that, realistically, Kubernetes needs to own the
 routing table, and thus it requires its own subnet.  It is theoretically possible to share a routing table
 with other infrastructure (but not a second cluster!), but this is not really recommended.  Certain
 `cni` networking solutions claim to address these problems.
@@ -56,11 +58,9 @@ Users running `--topology private` will not be able to choose `kubenet` networki
 requires a single routing table. These advanced users are usually running in multiple availability zones
 and as NAT gateways are single AZ, multiple route tables are needed to use each NAT gateway.
 
-Kubenet is the default networking option because of its simplicity, however, it should not be used in
+Kubenet is simple, however, it should not be used in
 production clusters which expect a gradual increase in traffic and/or workload over time. Such clusters
 will eventually "out-grow" the `kubenet` networking provider.
-
-For more on the `kubenet` networking provider, please see the [`kubenet` section of the Kubernetes documentation](https://kubernetes.io/docs/concepts/extend-kubernetes/compute-storage-net/network-plugins/#kubenet).
 
 ### CNI
 
@@ -72,11 +72,10 @@ Several CNI providers are currently built into kOps:
 
 * [AWS VPC](networking/aws-vpc.md)
 * [Calico](networking/calico.md)
-* [Canal](networking/canal.md)
 * [Cilium](networking/cilium.md)
 * [Flannel](networking/flannel.md)
+* [Kindnet](networking/kindnet.md)
 * [Kube-router](networking/kube-router.md)
-* [Weave](networking/weave.md)
 
 kOps makes it easy for cluster operators to choose one of these options. The manifests for the providers
 are included with kOps, and you simply use `--networking <provider-name>`. Replace the provider name
@@ -111,7 +110,6 @@ You will notice that `kube-dns` and similar pods that depend on pod networks fai
 
 Here are some steps items that will confirm a good CNI install:
 
-- `kubelet` is running with the with `--network-plugin=cni` option.
 - The CNS provider started without errors.
 - `kube-dns` daemonset starts.
 - Logging on a node will display messages on pod create and delete.

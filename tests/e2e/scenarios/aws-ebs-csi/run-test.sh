@@ -15,27 +15,30 @@
 # limitations under the License.
 
 REPO_ROOT=$(git rev-parse --show-toplevel);
-source "${REPO_ROOT}"/tests/e2e/scenarios/lib/common.sh
+TEST_ROOT="${REPO_ROOT}/tests/e2e/scenarios/aws-ebs-csi"
 
-kops-acquire-latest
+make test-e2e-install
 
-OVERRIDES="${OVERRIDES-} --override=cluster.spec.cloudConfig.awsEBSCSIDriver.enabled=true"
-OVERRIDES="$OVERRIDES --override=cluster.spec.snapshotController.enabled=true"
-OVERRIDES="$OVERRIDES --override=cluster.spec.certManager.enabled=true"
+KUBETEST2_ARGS=()
+KUBETEST2_ARGS+=("-v=2")
 
-kops-up
+if [[ "${JOB_TYPE}" == "presubmit" && "${REPO_OWNER}/${REPO_NAME}" == "kubernetes/kops" ]]; then
+  KUBETEST2_ARGS+=("--build")
+  KUBETEST2_ARGS+=("--kops-binary-path=${GOPATH}/src/k8s.io/kops/.build/dist/linux/$(go env GOARCH)/kops")
+else
+  KUBETEST2_ARGS+=("--kops-version-marker=${KOPS_VERSION_MARKER:-https://storage.googleapis.com/k8s-staging-kops/kops/releases/markers/master/latest-ci.txt}")
+fi
 
-ZONE=$(${KOPS} get ig -o json | jq -r '[.[] | select(.spec.role=="Node") | .spec.subnets[0]][0]')
-REPORT_DIR="${ARTIFACTS:-$(pwd)/_artifacts}/aws-ebs-csi-driver/"
+CREATE_ARGS="--networking calico"
+CREATE_ARGS="${CREATE_ARGS} --set=cluster.spec.cloudProvider.aws.ebsCSIDriver.enabled=true"
+CREATE_ARGS="${CREATE_ARGS} --set=cluster.spec.snapshotController.enabled=true"
+CREATE_ARGS="${CREATE_ARGS} --set=cluster.spec.certManager.enabled=true"
+CREATE_ARGS="${CREATE_ARGS} --control-plane-size=t3.medium --node-size=c5.large"
 
-# shellcheck disable=SC2164
-cd "$(mktemp -dt kops.XXXXXXXXX)"
-go get github.com/onsi/ginkgo/ginkgo
-
-git clone --branch v1.4.0 https://github.com/kubernetes-sigs/aws-ebs-csi-driver.git .
-
-# shellcheck disable=SC2164
-cd tests/e2e-kubernetes/
-
-# Skipping disruptive and flakes caused by https://github.com/kubernetes-sigs/aws-ebs-csi-driver/issues/911
-ginkgo --nodes=25 ./... -- -cluster-tag="${CLUSTER_NAME}" -ginkgo.skip="\[Disruptive\]|should.check.snapshot.fields" -report-dir="${REPORT_DIR}" -gce-zone="${ZONE}"
+kubetest2 kops \
+    --up --down \
+    "${KUBETEST2_ARGS[@]}" \
+    --cloud-provider=aws \
+    --create-args="${CREATE_ARGS}" \
+    --kubernetes-version="https://dl.k8s.io/release/stable.txt" \
+    --test=exec -- "${TEST_ROOT}/test.sh"

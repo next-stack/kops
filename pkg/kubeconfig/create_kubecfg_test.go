@@ -17,7 +17,7 @@ limitations under the License.
 package kubeconfig
 
 import (
-	"fmt"
+	"context"
 	"testing"
 	"time"
 
@@ -33,9 +33,11 @@ import (
 	"k8s.io/kops/util/pkg/vfs"
 )
 
-const certData = "-----BEGIN CERTIFICATE-----\nMIIC2DCCAcCgAwIBAgIRALJXAkVj964tq67wMSI8oJQwDQYJKoZIhvcNAQELBQAw\nFTETMBEGA1UEAxMKa3ViZXJuZXRlczAeFw0xNzEyMjcyMzUyNDBaFw0yNzEyMjcy\nMzUyNDBaMBUxEzARBgNVBAMTCmt1YmVybmV0ZXMwggEiMA0GCSqGSIb3DQEBAQUA\nA4IBDwAwggEKAoIBAQDgnCkSmtnmfxEgS3qNPaUCH5QOBGDH/inHbWCODLBCK9gd\nXEcBl7FVv8T2kFr1DYb0HVDtMI7tixRVFDLgkwNlW34xwWdZXB7GeoFgU1xWOQSY\nOACC8JgYTQ/139HBEvgq4sej67p+/s/SNcw34Kk7HIuFhlk1rRk5kMexKIlJBKP1\nYYUYetsJ/QpUOkqJ5HW4GoetE76YtHnORfYvnybviSMrh2wGGaN6r/s4ChOaIbZC\nAn8/YiPKGIDaZGpj6GXnmXARRX/TIdgSQkLwt0aTDBnPZ4XvtpI8aaL8DYJIqAzA\nNPH2b4/uNylat5jDo0b0G54agMi97+2AUrC9UUXpAgMBAAGjIzAhMA4GA1UdDwEB\n/wQEAwIBBjAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQBVGR2r\nhzXzRMU5wriPQAJScszNORvoBpXfZoZ09FIupudFxBVU3d4hV9StKnQgPSGA5XQO\nHE97+BxJDuA/rB5oBUsMBjc7y1cde/T6hmi3rLoEYBSnSudCOXJE4G9/0f8byAJe\nrN8+No1r2VgZvZh6p74TEkXv/l3HBPWM7IdUV0HO9JDhSgOVF1fyQKJxRuLJR8jt\nO6mPH2UX0vMwVa4jvwtkddqk2OAdYQvH9rbDjjbzaiW0KnmdueRo92KHAN7BsDZy\nVpXHpqo1Kzg7D3fpaXCf5si7lqqrdJVXH4JC72zxsPehqgi8eIuqOBkiDWmRxAxh\n8yGeRx9AbknHh4Ia\n-----END CERTIFICATE-----\n"
-const privatekeyData = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA4JwpEprZ5n8RIEt6jT2lAh+UDgRgx/4px21gjgywQivYHVxH\nAZexVb/E9pBa9Q2G9B1Q7TCO7YsUVRQy4JMDZVt+McFnWVwexnqBYFNcVjkEmDgA\ngvCYGE0P9d/RwRL4KuLHo+u6fv7P0jXMN+CpOxyLhYZZNa0ZOZDHsSiJSQSj9WGF\nGHrbCf0KVDpKieR1uBqHrRO+mLR5zkX2L58m74kjK4dsBhmjeq/7OAoTmiG2QgJ/\nP2IjyhiA2mRqY+hl55lwEUV/0yHYEkJC8LdGkwwZz2eF77aSPGmi/A2CSKgMwDTx\n9m+P7jcpWreYw6NG9BueGoDIve/tgFKwvVFF6QIDAQABAoIBAA0ktjaTfyrAxsTI\nBezb7Zr5NBW55dvuII299cd6MJo+rI/TRYhvUv48kY8IFXp/hyUjzgeDLunxmIf9\n/Zgsoic9Ol44/g45mMduhcGYPzAAeCdcJ5OB9rR9VfDCXyjYLlN8H8iU0734tTqM\n0V13tQ9zdSqkGPZOIcq/kR/pylbOZaQMe97BTlsAnOMSMKDgnftY4122Lq3GYy+t\nvpr+bKVaQZwvkLoSU3rECCaKaghgwCyX7jft9aEkhdJv+KlwbsGY6WErvxOaLWHd\ncuMQjGapY1Fa/4UD00mvrA260NyKfzrp6+P46RrVMwEYRJMIQ8YBAk6N6Hh7dc0G\n8Z6i1m0CgYEA9HeCJR0TSwbIQ1bDXUrzpftHuidG5BnSBtax/ND9qIPhR/FBW5nj\n22nwLc48KkyirlfIULd0ae4qVXJn7wfYcuX/cJMLDmSVtlM5Dzmi/91xRiFgIzx1\nAsbBzaFjISP2HpSgL+e9FtSXaaqeZVrflitVhYKUpI/AKV31qGHf04sCgYEA6zTV\n99Sb49Wdlns5IgsfnXl6ToRttB18lfEKcVfjAM4frnkk06JpFAZeR+9GGKUXZHqs\nz2qcplw4d/moCC6p3rYPBMLXsrGNEUFZqBlgz72QA6BBq3X0Cg1Bc2ZbK5VIzwkg\nST2SSux6ccROfgULmN5ZiLOtdUKNEZpFF3i3qtsCgYADT/s7dYFlatobz3kmMnXK\nsfTu2MllHdRys0YGHu7Q8biDuQkhrJwhxPW0KS83g4JQym+0aEfzh36bWcl+u6R7\nKhKj+9oSf9pndgk345gJz35RbPJYh+EuAHNvzdgCAvK6x1jETWeKf6btj5pF1U1i\nQ4QNIw/QiwIXjWZeubTGsQKBgQCbduLu2rLnlyyAaJZM8DlHZyH2gAXbBZpxqU8T\nt9mtkJDUS/KRiEoYGFV9CqS0aXrayVMsDfXY6B/S/UuZjO5u7LtklDzqOf1aKG3Q\ndGXPKibknqqJYH+bnUNjuYYNerETV57lijMGHuSYCf8vwLn3oxBfERRX61M/DU8Z\nworz/QKBgQDCTJI2+jdXg26XuYUmM4XXfnocfzAXhXBULt1nENcogNf1fcptAVtu\nBAiz4/HipQKqoWVUYmxfgbbLRKKLK0s0lOWKbYdVjhEm/m2ZU8wtXTagNwkIGoyq\nY/C1Lox4f1ROJnCjc/hfcOjcxX5M8A8peecHWlVtUPKTJgxQ7oMKcw==\n-----END RSA PRIVATE KEY-----\n"
-const nextCertificate = "-----BEGIN CERTIFICATE-----\nMIIBZzCCARGgAwIBAgIBBDANBgkqhkiG9w0BAQsFADAaMRgwFgYDVQQDEw9zZXJ2\naWNlLWFjY291bnQwHhcNMjEwNTAyMjAzMjE3WhcNMzEwNTAyMjAzMjE3WjAaMRgw\nFgYDVQQDEw9zZXJ2aWNlLWFjY291bnQwXDANBgkqhkiG9w0BAQEFAANLADBIAkEA\no4Tridlsf4Yz3UAiup/scSTiG/OqxkUW3Fz7zGKvVcLeYj9GEIKuzoB1VFk1nboD\nq4cCuGLfdzaQdCQKPIsDuwIDAQABo0IwQDAOBgNVHQ8BAf8EBAMCAQYwDwYDVR0T\nAQH/BAUwAwEB/zAdBgNVHQ4EFgQUhPbxEmUbwVOCa+fZgxreFhf67UEwDQYJKoZI\nhvcNAQELBQADQQALMsyK2Q7C/bk27eCvXyZKUfrLvor10hEjwGhv14zsKWDeTj/J\nA1LPYp7U9VtFfgFOkVbkLE9Rstc0ltNrPqxA\n-----END CERTIFICATE-----\n"
+const (
+	certData        = "-----BEGIN CERTIFICATE-----\nMIIC2DCCAcCgAwIBAgIRALJXAkVj964tq67wMSI8oJQwDQYJKoZIhvcNAQELBQAw\nFTETMBEGA1UEAxMKa3ViZXJuZXRlczAeFw0xNzEyMjcyMzUyNDBaFw0yNzEyMjcy\nMzUyNDBaMBUxEzARBgNVBAMTCmt1YmVybmV0ZXMwggEiMA0GCSqGSIb3DQEBAQUA\nA4IBDwAwggEKAoIBAQDgnCkSmtnmfxEgS3qNPaUCH5QOBGDH/inHbWCODLBCK9gd\nXEcBl7FVv8T2kFr1DYb0HVDtMI7tixRVFDLgkwNlW34xwWdZXB7GeoFgU1xWOQSY\nOACC8JgYTQ/139HBEvgq4sej67p+/s/SNcw34Kk7HIuFhlk1rRk5kMexKIlJBKP1\nYYUYetsJ/QpUOkqJ5HW4GoetE76YtHnORfYvnybviSMrh2wGGaN6r/s4ChOaIbZC\nAn8/YiPKGIDaZGpj6GXnmXARRX/TIdgSQkLwt0aTDBnPZ4XvtpI8aaL8DYJIqAzA\nNPH2b4/uNylat5jDo0b0G54agMi97+2AUrC9UUXpAgMBAAGjIzAhMA4GA1UdDwEB\n/wQEAwIBBjAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQBVGR2r\nhzXzRMU5wriPQAJScszNORvoBpXfZoZ09FIupudFxBVU3d4hV9StKnQgPSGA5XQO\nHE97+BxJDuA/rB5oBUsMBjc7y1cde/T6hmi3rLoEYBSnSudCOXJE4G9/0f8byAJe\nrN8+No1r2VgZvZh6p74TEkXv/l3HBPWM7IdUV0HO9JDhSgOVF1fyQKJxRuLJR8jt\nO6mPH2UX0vMwVa4jvwtkddqk2OAdYQvH9rbDjjbzaiW0KnmdueRo92KHAN7BsDZy\nVpXHpqo1Kzg7D3fpaXCf5si7lqqrdJVXH4JC72zxsPehqgi8eIuqOBkiDWmRxAxh\n8yGeRx9AbknHh4Ia\n-----END CERTIFICATE-----\n"
+	privatekeyData  = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA4JwpEprZ5n8RIEt6jT2lAh+UDgRgx/4px21gjgywQivYHVxH\nAZexVb/E9pBa9Q2G9B1Q7TCO7YsUVRQy4JMDZVt+McFnWVwexnqBYFNcVjkEmDgA\ngvCYGE0P9d/RwRL4KuLHo+u6fv7P0jXMN+CpOxyLhYZZNa0ZOZDHsSiJSQSj9WGF\nGHrbCf0KVDpKieR1uBqHrRO+mLR5zkX2L58m74kjK4dsBhmjeq/7OAoTmiG2QgJ/\nP2IjyhiA2mRqY+hl55lwEUV/0yHYEkJC8LdGkwwZz2eF77aSPGmi/A2CSKgMwDTx\n9m+P7jcpWreYw6NG9BueGoDIve/tgFKwvVFF6QIDAQABAoIBAA0ktjaTfyrAxsTI\nBezb7Zr5NBW55dvuII299cd6MJo+rI/TRYhvUv48kY8IFXp/hyUjzgeDLunxmIf9\n/Zgsoic9Ol44/g45mMduhcGYPzAAeCdcJ5OB9rR9VfDCXyjYLlN8H8iU0734tTqM\n0V13tQ9zdSqkGPZOIcq/kR/pylbOZaQMe97BTlsAnOMSMKDgnftY4122Lq3GYy+t\nvpr+bKVaQZwvkLoSU3rECCaKaghgwCyX7jft9aEkhdJv+KlwbsGY6WErvxOaLWHd\ncuMQjGapY1Fa/4UD00mvrA260NyKfzrp6+P46RrVMwEYRJMIQ8YBAk6N6Hh7dc0G\n8Z6i1m0CgYEA9HeCJR0TSwbIQ1bDXUrzpftHuidG5BnSBtax/ND9qIPhR/FBW5nj\n22nwLc48KkyirlfIULd0ae4qVXJn7wfYcuX/cJMLDmSVtlM5Dzmi/91xRiFgIzx1\nAsbBzaFjISP2HpSgL+e9FtSXaaqeZVrflitVhYKUpI/AKV31qGHf04sCgYEA6zTV\n99Sb49Wdlns5IgsfnXl6ToRttB18lfEKcVfjAM4frnkk06JpFAZeR+9GGKUXZHqs\nz2qcplw4d/moCC6p3rYPBMLXsrGNEUFZqBlgz72QA6BBq3X0Cg1Bc2ZbK5VIzwkg\nST2SSux6ccROfgULmN5ZiLOtdUKNEZpFF3i3qtsCgYADT/s7dYFlatobz3kmMnXK\nsfTu2MllHdRys0YGHu7Q8biDuQkhrJwhxPW0KS83g4JQym+0aEfzh36bWcl+u6R7\nKhKj+9oSf9pndgk345gJz35RbPJYh+EuAHNvzdgCAvK6x1jETWeKf6btj5pF1U1i\nQ4QNIw/QiwIXjWZeubTGsQKBgQCbduLu2rLnlyyAaJZM8DlHZyH2gAXbBZpxqU8T\nt9mtkJDUS/KRiEoYGFV9CqS0aXrayVMsDfXY6B/S/UuZjO5u7LtklDzqOf1aKG3Q\ndGXPKibknqqJYH+bnUNjuYYNerETV57lijMGHuSYCf8vwLn3oxBfERRX61M/DU8Z\nworz/QKBgQDCTJI2+jdXg26XuYUmM4XXfnocfzAXhXBULt1nENcogNf1fcptAVtu\nBAiz4/HipQKqoWVUYmxfgbbLRKKLK0s0lOWKbYdVjhEm/m2ZU8wtXTagNwkIGoyq\nY/C1Lox4f1ROJnCjc/hfcOjcxX5M8A8peecHWlVtUPKTJgxQ7oMKcw==\n-----END RSA PRIVATE KEY-----\n"
+	nextCertificate = "-----BEGIN CERTIFICATE-----\nMIIBZzCCARGgAwIBAgIBBDANBgkqhkiG9w0BAQsFADAaMRgwFgYDVQQDEw9zZXJ2\naWNlLWFjY291bnQwHhcNMjEwNTAyMjAzMjE3WhcNMzEwNTAyMjAzMjE3WjAaMRgw\nFgYDVQQDEw9zZXJ2aWNlLWFjY291bnQwXDANBgkqhkiG9w0BAQEFAANLADBIAkEA\no4Tridlsf4Yz3UAiup/scSTiG/OqxkUW3Fz7zGKvVcLeYj9GEIKuzoB1VFk1nboD\nq4cCuGLfdzaQdCQKPIsDuwIDAQABo0IwQDAOBgNVHQ8BAf8EBAMCAQYwDwYDVR0T\nAQH/BAUwAwEB/zAdBgNVHQ4EFgQUhPbxEmUbwVOCa+fZgxreFhf67UEwDQYJKoZI\nhvcNAQELBQADQQALMsyK2Q7C/bk27eCvXyZKUfrLvor10hEjwGhv14zsKWDeTj/J\nA1LPYp7U9VtFfgFOkVbkLE9Rstc0ltNrPqxA\n-----END CERTIFICATE-----\n"
+)
 
 // mock a fake status store.
 type fakeStatusCloud struct {
@@ -72,6 +74,10 @@ func (f fakeStatusCloud) DetachInstance(instance *cloudinstances.CloudInstance) 
 	panic("not implemented")
 }
 
+func (f fakeStatusCloud) DeregisterInstance(instance *cloudinstances.CloudInstance) error {
+	panic("not implemented")
+}
+
 func (f fakeStatusCloud) GetCloudGroups(cluster *kops.Cluster, instancegroups []*kops.InstanceGroup, warnUnmatched bool, nodes []v1.Node) (map[string]*cloudinstances.CloudInstanceGroup, error) {
 	panic("not implemented")
 }
@@ -95,36 +101,32 @@ type fakeKeyStore struct {
 	MirrorToFn func(basedir vfs.Path) error
 }
 
-func (f fakeKeyStore) FindPrimaryKeypair(name string) (*pki.Certificate, *pki.PrivateKey, error) {
-	return fi.FindPrimaryKeypair(f, name)
-}
-
-func (f fakeKeyStore) FindKeyset(name string) (*fi.Keyset, error) {
+// FindKeyset implements KeystoreReader.
+func (f fakeKeyStore) FindKeyset(ctx context.Context, name string) (*fi.Keyset, error) {
 	return f.FindKeysetFn(name)
 }
 
-func (f fakeKeyStore) StoreKeyset(name string, keyset *fi.Keyset) error {
+func (f fakeKeyStore) StoreKeyset(ctx context.Context, name string, keyset *fi.Keyset) error {
 	return f.StoreKeysetFn(name, keyset)
 }
 
-func (f fakeKeyStore) MirrorTo(basedir vfs.Path) error {
+func (f fakeKeyStore) MirrorTo(ctx context.Context, basedir vfs.Path) error {
 	return f.MirrorToFn(basedir)
 }
 
 // build a generic minimal cluster
 func buildMinimalCluster(clusterName string, masterPublicName string, lbCert bool, nlb bool) *kops.Cluster {
-	cluster := testutils.BuildMinimalCluster(clusterName)
-	cluster.Spec.MasterPublicName = masterPublicName
-	cluster.Spec.MasterInternalName = fmt.Sprintf("internal.%v", masterPublicName)
-	cluster.Spec.KubernetesVersion = "1.19.3"
-	cluster.Spec.API = &kops.AccessSpec{
-		LoadBalancer: &kops.LoadBalancerAccessSpec{},
-	}
-	if lbCert {
-		cluster.Spec.API.LoadBalancer.SSLCertificate = "cert-arn"
-	}
-	if nlb {
-		cluster.Spec.API.LoadBalancer.Class = kops.LoadBalancerClassNetwork
+	cluster := testutils.BuildMinimalClusterAWS(clusterName)
+	cluster.Spec.API.PublicName = masterPublicName
+	cluster.Spec.KubernetesVersion = "1.30.0"
+	if lbCert || nlb {
+		cluster.Spec.API.LoadBalancer = &kops.LoadBalancerAccessSpec{}
+		if lbCert {
+			cluster.Spec.API.LoadBalancer.SSLCertificate = "cert-arn"
+		}
+		if nlb {
+			cluster.Spec.API.LoadBalancer.Class = kops.LoadBalancerClassNetwork
+		}
 	}
 	return cluster
 }
@@ -141,27 +143,34 @@ func fakeKeyset() *fi.Keyset {
 
 func TestBuildKubecfg(t *testing.T) {
 	originalPKIDefaultPrivateKeySize := pki.DefaultPrivateKeySize
-	pki.DefaultPrivateKeySize = 512
+	pki.DefaultPrivateKeySize = 2048
 	defer func() {
 		pki.DefaultPrivateKeySize = originalPKIDefaultPrivateKeySize
 	}()
 
 	type args struct {
-		cluster                     *kops.Cluster
-		secretStore                 fi.SecretStore
-		status                      fakeStatusCloud
-		admin                       time.Duration
-		user                        string
-		internal                    bool
-		useKopsAuthenticationPlugin bool
+		CreateKubecfgOptions
+		cluster     *kops.Cluster
+		secretStore fi.SecretStore
+		status      fakeStatusCloud
 	}
 
 	publicCluster := buildMinimalCluster("testcluster", "testcluster.test.com", false, false)
 	emptyMasterPublicNameCluster := buildMinimalCluster("emptyMasterPublicNameCluster", "", false, false)
-	gossipCluster := buildMinimalCluster("testgossipcluster.k8s.local", "", false, false)
+	k8sLocalCluster := buildMinimalCluster("testcluster.k8s.local", "", false, true)
 	certCluster := buildMinimalCluster("testcluster", "testcluster.test.com", true, false)
 	certNLBCluster := buildMinimalCluster("testcluster", "testcluster.test.com", true, true)
-	certGossipNLBCluster := buildMinimalCluster("testgossipcluster.k8s.local", "", true, true)
+	certK8sLocalNLBCluster := buildMinimalCluster("testcluster.k8s.local", "", true, true)
+
+	fakeStatus := fakeStatusCloud{
+		GetApiIngressStatusFn: func(cluster *kops.Cluster) ([]fi.ApiIngressStatus, error) {
+			return []fi.ApiIngressStatus{
+				{
+					Hostname: "elbHostName",
+				},
+			}, nil
+		},
+	}
 
 	tests := []struct {
 		name           string
@@ -174,15 +183,18 @@ func TestBuildKubecfg(t *testing.T) {
 			name: "Test Kube Config Data For Public DNS with admin",
 			args: args{
 				cluster: publicCluster,
-				status:  fakeStatusCloud{},
-				admin:   DefaultKubecfgAdminLifetime,
-				user:    "",
+				status:  fakeStatus,
+				CreateKubecfgOptions: CreateKubecfgOptions{
+					Admin: DefaultKubecfgAdminLifetime,
+					User:  "",
+				},
 			},
 			want: &KubeconfigBuilder{
-				Context: "testcluster",
-				Server:  "https://testcluster.test.com",
-				CACerts: []byte(nextCertificate + certData),
-				User:    "testcluster",
+				Context:       "testcluster",
+				Server:        "https://testcluster.test.com",
+				TLSServerName: "api.internal.testcluster",
+				CACerts:       []byte(nextCertificate + certData),
+				User:          "testcluster",
 			},
 			wantClientCert: true,
 		},
@@ -190,14 +202,17 @@ func TestBuildKubecfg(t *testing.T) {
 			name: "Test Kube Config Data For Public DNS with admin and secondary NLB port",
 			args: args{
 				cluster: certNLBCluster,
-				status:  fakeStatusCloud{},
-				admin:   DefaultKubecfgAdminLifetime,
+				status:  fakeStatus,
+				CreateKubecfgOptions: CreateKubecfgOptions{
+					Admin: DefaultKubecfgAdminLifetime,
+				},
 			},
 			want: &KubeconfigBuilder{
-				Context: "testcluster",
-				Server:  "https://testcluster.test.com:8443",
-				CACerts: []byte(nextCertificate + certData),
-				User:    "testcluster",
+				Context:       "testcluster",
+				Server:        "https://elbHostName:8443",
+				TLSServerName: "api.internal.testcluster",
+				CACerts:       []byte(nextCertificate + certData),
+				User:          "testcluster",
 			},
 			wantClientCert: true,
 		},
@@ -205,14 +220,17 @@ func TestBuildKubecfg(t *testing.T) {
 			name: "Test Kube Config Data For Public DNS with admin and CLB ACM Certificate",
 			args: args{
 				cluster: certCluster,
-				status:  fakeStatusCloud{},
-				admin:   DefaultKubecfgAdminLifetime,
+				status:  fakeStatus,
+				CreateKubecfgOptions: CreateKubecfgOptions{
+					Admin: DefaultKubecfgAdminLifetime,
+				},
 			},
 			want: &KubeconfigBuilder{
-				Context: "testcluster",
-				Server:  "https://testcluster.test.com",
-				CACerts: nil,
-				User:    "testcluster",
+				Context:       "testcluster",
+				Server:        "https://elbHostName",
+				TLSServerName: "api.internal.testcluster",
+				CACerts:       nil,
+				User:          "testcluster",
 			},
 			wantClientCert: true,
 		},
@@ -220,14 +238,17 @@ func TestBuildKubecfg(t *testing.T) {
 			name: "Test Kube Config Data For Public DNS without admin and with ACM certificate",
 			args: args{
 				cluster: certNLBCluster,
-				status:  fakeStatusCloud{},
-				admin:   0,
+				status:  fakeStatus,
+				CreateKubecfgOptions: CreateKubecfgOptions{
+					Admin: 0,
+				},
 			},
 			want: &KubeconfigBuilder{
-				Context: "testcluster",
-				Server:  "https://testcluster.test.com",
-				CACerts: []byte(nextCertificate + certData),
-				User:    "testcluster",
+				Context:       "testcluster",
+				Server:        "https://testcluster.test.com",
+				TLSServerName: "api.internal.testcluster",
+				CACerts:       []byte(nextCertificate + certData),
+				User:          "testcluster",
 			},
 			wantClientCert: false,
 		},
@@ -235,15 +256,18 @@ func TestBuildKubecfg(t *testing.T) {
 			name: "Test Kube Config Data For Public DNS without admin",
 			args: args{
 				cluster: publicCluster,
-				status:  fakeStatusCloud{},
-				admin:   0,
-				user:    "myuser",
+				status:  fakeStatus,
+				CreateKubecfgOptions: CreateKubecfgOptions{
+					Admin: 0,
+					User:  "myuser",
+				},
 			},
 			want: &KubeconfigBuilder{
-				Context: "testcluster",
-				Server:  "https://testcluster.test.com",
-				CACerts: []byte(nextCertificate + certData),
-				User:    "myuser",
+				Context:       "testcluster",
+				Server:        "https://testcluster.test.com",
+				TLSServerName: "api.internal.testcluster",
+				CACerts:       []byte(nextCertificate + certData),
+				User:          "myuser",
 			},
 			wantClientCert: false,
 		},
@@ -251,53 +275,52 @@ func TestBuildKubecfg(t *testing.T) {
 			name: "Test Kube Config Data For Public DNS with Empty Master Name",
 			args: args{
 				cluster: emptyMasterPublicNameCluster,
-				status:  fakeStatusCloud{},
-				admin:   0,
-				user:    "",
+				status:  fakeStatus,
+				CreateKubecfgOptions: CreateKubecfgOptions{
+					Admin: 0,
+					User:  "",
+				},
 			},
 			want: &KubeconfigBuilder{
-				Context: "emptyMasterPublicNameCluster",
-				Server:  "https://api.emptyMasterPublicNameCluster",
-				CACerts: []byte(nextCertificate + certData),
-				User:    "emptyMasterPublicNameCluster",
+				Context:       "emptyMasterPublicNameCluster",
+				Server:        "https://api.emptyMasterPublicNameCluster",
+				TLSServerName: "api.internal.emptyMasterPublicNameCluster",
+				CACerts:       []byte(nextCertificate + certData),
+				User:          "emptyMasterPublicNameCluster",
 			},
 			wantClientCert: false,
 		},
 		{
-			name: "Test Kube Config Data For Gossip cluster",
+			name: "Test Kube Config Data For k8s.local cluster",
 			args: args{
-				cluster: gossipCluster,
-				status: fakeStatusCloud{
-					GetApiIngressStatusFn: func(cluster *kops.Cluster) ([]fi.ApiIngressStatus, error) {
-						return []fi.ApiIngressStatus{
-							{
-								Hostname: "elbHostName",
-							},
-						}, nil
-					},
-				},
+				cluster: k8sLocalCluster,
+				status:  fakeStatus,
 			},
 			want: &KubeconfigBuilder{
-				Context: "testgossipcluster.k8s.local",
-				Server:  "https://elbHostName",
-				CACerts: []byte(nextCertificate + certData),
-				User:    "testgossipcluster.k8s.local",
+				Context:       "testcluster.k8s.local",
+				Server:        "https://elbHostName",
+				TLSServerName: "api.internal.testcluster.k8s.local",
+				CACerts:       []byte(nextCertificate + certData),
+				User:          "testcluster.k8s.local",
 			},
 			wantClientCert: false,
 		},
 		{
 			name: "Public DNS with kops auth plugin",
 			args: args{
-				cluster:                     publicCluster,
-				status:                      fakeStatusCloud{},
-				admin:                       0,
-				useKopsAuthenticationPlugin: true,
+				cluster: publicCluster,
+				status:  fakeStatus,
+				CreateKubecfgOptions: CreateKubecfgOptions{
+					Admin:                       0,
+					UseKopsAuthenticationPlugin: true,
+				},
 			},
 			want: &KubeconfigBuilder{
-				Context: "testcluster",
-				Server:  "https://testcluster.test.com",
-				CACerts: []byte(nextCertificate + certData),
-				User:    "testcluster",
+				Context:       "testcluster",
+				Server:        "https://testcluster.test.com",
+				TLSServerName: "api.internal.testcluster",
+				CACerts:       []byte(nextCertificate + certData),
+				User:          "testcluster",
 				AuthenticationExec: []string{
 					"kops",
 					"helpers",
@@ -311,45 +334,103 @@ func TestBuildKubecfg(t *testing.T) {
 		{
 			name: "Test Kube Config Data For internal DNS name with admin",
 			args: args{
-				cluster:  publicCluster,
-				status:   fakeStatusCloud{},
-				admin:    DefaultKubecfgAdminLifetime,
-				internal: true,
+				cluster: publicCluster,
+				status:  fakeStatus,
+				CreateKubecfgOptions: CreateKubecfgOptions{
+					Admin:    DefaultKubecfgAdminLifetime,
+					Internal: true,
+				},
 			},
 			want: &KubeconfigBuilder{
-				Context: "testcluster",
-				Server:  "https://internal.testcluster.test.com",
-				CACerts: []byte(nextCertificate + certData),
-				User:    "testcluster",
+				Context:       "testcluster",
+				Server:        "https://api.internal.testcluster",
+				TLSServerName: "api.internal.testcluster",
+				CACerts:       []byte(nextCertificate + certData),
+				User:          "testcluster",
 			},
 			wantClientCert: true,
 		},
 		{
-			name: "Test Kube Config Data For Gossip cluster with admin and secondary NLB port",
+			name: "Test Kube Config Data For k8s.local cluster with admin and secondary NLB port",
 			args: args{
-				cluster: certGossipNLBCluster,
-				status: fakeStatusCloud{
-					GetApiIngressStatusFn: func(cluster *kops.Cluster) ([]fi.ApiIngressStatus, error) {
-						return []fi.ApiIngressStatus{
-							{
-								Hostname: "nlbHostName",
-							},
-						}, nil
-					},
+				cluster: certK8sLocalNLBCluster,
+				status:  fakeStatus,
+				CreateKubecfgOptions: CreateKubecfgOptions{
+					Admin: DefaultKubecfgAdminLifetime,
 				},
-				admin: DefaultKubecfgAdminLifetime,
 			},
 			want: &KubeconfigBuilder{
-				Context: "testgossipcluster.k8s.local",
-				Server:  "https://nlbHostName:8443",
-				CACerts: []byte(nextCertificate + certData),
-				User:    "testgossipcluster.k8s.local",
+				Context:       "testcluster.k8s.local",
+				Server:        "https://elbHostName:8443",
+				TLSServerName: "api.internal.testcluster.k8s.local",
+				CACerts:       []byte(nextCertificate + certData),
+				User:          "testcluster.k8s.local",
+			},
+			wantClientCert: true,
+		},
+		{
+			name: "Test Kube Config Data for Public cluster with admin and internal option",
+			args: args{
+				cluster: publicCluster,
+				status:  fakeStatus,
+				CreateKubecfgOptions: CreateKubecfgOptions{
+					Admin:    DefaultKubecfgAdminLifetime,
+					Internal: true,
+				},
+			},
+			want: &KubeconfigBuilder{
+				Context:       "testcluster",
+				Server:        "https://api.internal.testcluster",
+				TLSServerName: "api.internal.testcluster",
+				CACerts:       []byte(nextCertificate + certData),
+				User:          "testcluster",
+			},
+			wantClientCert: true,
+		},
+		{
+			name: "Test Kube Config Data for Public cluster without admin and with internal option",
+			args: args{
+				cluster: publicCluster,
+				status:  fakeStatus,
+				CreateKubecfgOptions: CreateKubecfgOptions{
+					Admin:    0,
+					Internal: true,
+				},
+			},
+			want: &KubeconfigBuilder{
+				Context:       "testcluster",
+				Server:        "https://api.internal.testcluster",
+				TLSServerName: "api.internal.testcluster",
+				CACerts:       []byte(nextCertificate + certData),
+				User:          "testcluster",
+			},
+			wantClientCert: false,
+		},
+		{
+			name: "Test Kube Config Data with APIEndpoint set",
+			args: args{
+				cluster: publicCluster,
+				status:  fakeStatus,
+				CreateKubecfgOptions: CreateKubecfgOptions{
+					Admin:             DefaultKubecfgAdminLifetime,
+					Internal:          true,
+					OverrideAPIServer: "https://api.testcluster.example.com",
+				},
+			},
+			want: &KubeconfigBuilder{
+				Context:       "testcluster",
+				Server:        "https://api.testcluster.example.com",
+				TLSServerName: "api.internal.testcluster",
+				CACerts:       []byte(nextCertificate + certData),
+				User:          "testcluster",
 			},
 			wantClientCert: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.TODO()
+
 			kopsStateStore := "memfs://example-state-store"
 
 			keyStore := fakeKeyStore{
@@ -359,7 +440,7 @@ func TestBuildKubecfg(t *testing.T) {
 				},
 			}
 
-			got, err := BuildKubecfg(tt.args.cluster, keyStore, tt.args.secretStore, tt.args.status, tt.args.admin, tt.args.user, tt.args.internal, kopsStateStore, tt.args.useKopsAuthenticationPlugin)
+			got, err := BuildKubecfg(ctx, tt.args.cluster, keyStore, tt.args.secretStore, tt.args.status, tt.args.CreateKubecfgOptions, kopsStateStore)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("BuildKubecfg() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -376,6 +457,114 @@ func TestBuildKubecfg(t *testing.T) {
 			}
 			if diff := cmp.Diff(got, tt.want); diff != "" {
 				t.Errorf("BuildKubecfg() diff (+got, -want): %s", diff)
+			}
+		})
+	}
+}
+
+func TestBuildKubecfgNLBEndpoint(t *testing.T) {
+	originalPKIDefaultPrivateKeySize := pki.DefaultPrivateKeySize
+	pki.DefaultPrivateKeySize = 2048
+	defer func() {
+		pki.DefaultPrivateKeySize = originalPKIDefaultPrivateKeySize
+	}()
+
+	tests := []struct {
+		name           string
+		sslCertificate bool
+		admin          time.Duration
+		internal       bool
+		wantServer     string
+	}{
+		{
+			name:           "certificate with admin",
+			sslCertificate: true,
+			admin:          DefaultKubecfgAdminLifetime,
+			wantServer:     "https://elbHostName:8443",
+		},
+		{
+			name:           "certificate with admin and internal endpoint",
+			sslCertificate: true,
+			admin:          DefaultKubecfgAdminLifetime,
+			internal:       true,
+			wantServer:     "https://api.internal.testcluster:8443",
+		},
+		{
+			name:           "certificate without admin",
+			sslCertificate: true,
+			wantServer:     "https://testcluster.test.com",
+		},
+		{
+			name:           "certificate without admin and internal endpoint",
+			sslCertificate: true,
+			internal:       true,
+			wantServer:     "https://api.internal.testcluster",
+		},
+		{
+			name:       "no certificate with admin",
+			admin:      DefaultKubecfgAdminLifetime,
+			wantServer: "https://elbHostName",
+		},
+		{
+			name:       "no certificate with admin and internal endpoint",
+			admin:      DefaultKubecfgAdminLifetime,
+			internal:   true,
+			wantServer: "https://api.internal.testcluster",
+		},
+		{
+			name:       "no certificate without admin",
+			wantServer: "https://elbHostName",
+		},
+	}
+
+	endpoints := []struct {
+		name     string
+		override string
+	}{
+		{name: "generated"},
+		{name: "no port", override: "https://proxy.example.com"},
+		{name: "custom port", override: "https://proxy.example.com:9443"},
+		{name: "secondary port", override: "https://proxy.example.com:8443"},
+		{name: "path prefix", override: "https://proxy.example.com/prefix"},
+		{name: "custom port and path prefix", override: "https://proxy.example.com:9443/prefix"},
+		{name: "IPv6", override: "https://[2001:db8::1]:9443/prefix"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cluster := buildMinimalCluster("testcluster", "testcluster.test.com", tt.sslCertificate, true)
+			keyStore := fakeKeyStore{
+				FindKeysetFn: func(name string) (*fi.Keyset, error) {
+					return fakeKeyset(), nil
+				},
+			}
+			for _, endpoint := range endpoints {
+				t.Run(endpoint.name, func(t *testing.T) {
+					cloud := fakeStatusCloud{
+						GetApiIngressStatusFn: func(cluster *kops.Cluster) ([]fi.ApiIngressStatus, error) {
+							if endpoint.override != "" || tt.internal {
+								t.Fatal("unexpected API ingress lookup for an explicit or internal endpoint")
+							}
+							return []fi.ApiIngressStatus{{Hostname: "elbHostName"}}, nil
+						},
+					}
+					options := CreateKubecfgOptions{
+						Admin:             tt.admin,
+						Internal:          tt.internal,
+						OverrideAPIServer: endpoint.override,
+					}
+					got, err := BuildKubecfg(context.Background(), cluster, keyStore, nil, cloud, options, "memfs://example-state-store")
+					if err != nil {
+						t.Fatalf("BuildKubecfg() error = %v", err)
+					}
+					wantServer := tt.wantServer
+					if endpoint.override != "" {
+						wantServer = endpoint.override
+					}
+					if got.Server != wantServer {
+						t.Errorf("BuildKubecfg().Server = %q, want %q", got.Server, wantServer)
+					}
+				})
 			}
 		})
 	}

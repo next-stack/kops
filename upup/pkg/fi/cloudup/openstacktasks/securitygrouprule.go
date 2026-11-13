@@ -19,10 +19,11 @@ package openstacktasks
 import (
 	"fmt"
 
-	sgr "github.com/gophercloud/gophercloud/openstack/networking/v2/extensions/security/rules"
+	sgr "github.com/gophercloud/gophercloud/v2/openstack/networking/v2/extensions/security/rules"
 	"k8s.io/klog/v2"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/openstack"
+	"k8s.io/utils/net"
 )
 
 func Int(v int) *int {
@@ -52,8 +53,8 @@ type SecurityGroupRule struct {
 }
 
 // GetDependencies returns the dependencies of the Instance task
-func (e *SecurityGroupRule) GetDependencies(tasks map[string]fi.Task) []fi.Task {
-	var deps []fi.Task
+func (e *SecurityGroupRule) GetDependencies(tasks map[string]fi.CloudupTask) []fi.CloudupTask {
+	var deps []fi.CloudupTask
 	for _, task := range tasks {
 		if _, ok := task.(*SecurityGroup); ok {
 			deps = append(deps, task)
@@ -62,30 +63,30 @@ func (e *SecurityGroupRule) GetDependencies(tasks map[string]fi.Task) []fi.Task 
 	return deps
 }
 
-var _ fi.CompareWithID = &SecurityGroupRule{}
+var _ fi.CompareWithID = (*SecurityGroupRule)(nil)
 
 func (r *SecurityGroupRule) CompareWithID() *string {
 	return r.ID
 }
 
-func (r *SecurityGroupRule) Find(context *fi.Context) (*SecurityGroupRule, error) {
+func (r *SecurityGroupRule) Find(context *fi.CloudupContext) (*SecurityGroupRule, error) {
 	if r.SecGroup == nil || r.SecGroup.ID == nil {
 		return nil, nil
 	}
 
-	cloud := context.Cloud.(openstack.OpenstackCloud)
+	cloud := context.T.Cloud.(openstack.OpenstackCloud)
 
 	opt := sgr.ListOpts{
-		Direction:      fi.StringValue(r.Direction),
-		EtherType:      fi.StringValue(r.EtherType),
+		Direction:      fi.ValueOf(r.Direction),
+		EtherType:      fi.ValueOf(r.EtherType),
 		PortRangeMax:   IntValue(r.PortRangeMax),
 		PortRangeMin:   IntValue(r.PortRangeMin),
-		Protocol:       fi.StringValue(r.Protocol),
-		RemoteIPPrefix: fi.StringValue(r.RemoteIPPrefix),
-		SecGroupID:     fi.StringValue(r.SecGroup.ID),
+		Protocol:       fi.ValueOf(r.Protocol),
+		RemoteIPPrefix: fi.ValueOf(r.RemoteIPPrefix),
+		SecGroupID:     fi.ValueOf(r.SecGroup.ID),
 	}
 	if r.RemoteGroup != nil {
-		opt.RemoteGroupID = fi.StringValue(r.RemoteGroup.ID)
+		opt.RemoteGroupID = fi.ValueOf(r.RemoteGroup.ID)
 	}
 	rs, err := cloud.ListSecurityGroupRules(opt)
 	if err != nil {
@@ -99,25 +100,25 @@ func (r *SecurityGroupRule) Find(context *fi.Context) (*SecurityGroupRule, error
 	}
 	rule := rs[0]
 	actual := &SecurityGroupRule{
-		ID:             fi.String(rule.ID),
-		Direction:      fi.String(rule.Direction),
-		EtherType:      fi.String(rule.EtherType),
+		ID:             new(rule.ID),
+		Direction:      new(rule.Direction),
+		EtherType:      new(rule.EtherType),
 		PortRangeMax:   Int(rule.PortRangeMax),
 		PortRangeMin:   Int(rule.PortRangeMin),
-		Protocol:       fi.String(rule.Protocol),
-		RemoteIPPrefix: fi.String(rule.RemoteIPPrefix),
+		Protocol:       new(rule.Protocol),
+		RemoteIPPrefix: new(rule.RemoteIPPrefix),
 		RemoteGroup:    r.RemoteGroup,
 		SecGroup:       r.SecGroup,
 		Lifecycle:      r.Lifecycle,
-		Delete:         fi.Bool(false),
+		Delete:         new(false),
 	}
 
 	r.ID = actual.ID
 	return actual, nil
 }
 
-func (r *SecurityGroupRule) Run(context *fi.Context) error {
-	return fi.DefaultDeltaRunMethod(r, context)
+func (r *SecurityGroupRule) Run(context *fi.CloudupContext) error {
+	return fi.CloudupDefaultDeltaRunMethod(r, context)
 }
 
 func (*SecurityGroupRule) CheckChanges(a, e, changes *SecurityGroupRule) error {
@@ -151,26 +152,33 @@ func (*SecurityGroupRule) CheckChanges(a, e, changes *SecurityGroupRule) error {
 func (*SecurityGroupRule) RenderOpenstack(t *openstack.OpenstackAPITarget, a, e, changes *SecurityGroupRule) error {
 	if a == nil {
 		klog.V(2).Infof("Creating SecurityGroupRule")
-
+		etherType := fi.ValueOf(e.EtherType)
+		if e.RemoteIPPrefix != nil {
+			if net.IsIPv4CIDRString(*e.RemoteIPPrefix) {
+				etherType = "IPv4"
+			} else {
+				etherType = "IPv6"
+			}
+		}
 		opt := sgr.CreateOpts{
-			Direction:      sgr.RuleDirection(fi.StringValue(e.Direction)),
-			EtherType:      sgr.RuleEtherType(fi.StringValue(e.EtherType)),
-			SecGroupID:     fi.StringValue(e.SecGroup.ID),
+			Direction:      sgr.RuleDirection(fi.ValueOf(e.Direction)),
+			EtherType:      sgr.RuleEtherType(etherType),
+			SecGroupID:     fi.ValueOf(e.SecGroup.ID),
 			PortRangeMax:   IntValue(e.PortRangeMax),
 			PortRangeMin:   IntValue(e.PortRangeMin),
-			Protocol:       sgr.RuleProtocol(fi.StringValue(e.Protocol)),
-			RemoteIPPrefix: fi.StringValue(e.RemoteIPPrefix),
+			Protocol:       sgr.RuleProtocol(fi.ValueOf(e.Protocol)),
+			RemoteIPPrefix: fi.ValueOf(e.RemoteIPPrefix),
 		}
 		if e.RemoteGroup != nil {
-			opt.RemoteGroupID = fi.StringValue(e.RemoteGroup.ID)
+			opt.RemoteGroupID = fi.ValueOf(e.RemoteGroup.ID)
 		}
 
 		r, err := t.Cloud.CreateSecurityGroupRule(opt)
 		if err != nil {
-			return fmt.Errorf("error creating SecurityGroupRule in SG %s: %v", fi.StringValue(e.SecGroup.GetName()), err)
+			return fmt.Errorf("error creating SecurityGroupRule in SG %s: %v", fi.ValueOf(e.SecGroup.GetName()), err)
 		}
 
-		e.ID = fi.String(r.ID)
+		e.ID = new(r.ID)
 		return nil
 	}
 
@@ -178,7 +186,7 @@ func (*SecurityGroupRule) RenderOpenstack(t *openstack.OpenstackAPITarget, a, e,
 	return nil
 }
 
-var _ fi.HasLifecycle = &SecurityGroupRule{}
+var _ fi.HasLifecycle = (*SecurityGroupRule)(nil)
 
 // GetLifecycle returns the Lifecycle of the object, implementing fi.HasLifecycle
 func (o *SecurityGroupRule) GetLifecycle() fi.Lifecycle {
@@ -190,7 +198,7 @@ func (o *SecurityGroupRule) SetLifecycle(lifecycle fi.Lifecycle) {
 	o.Lifecycle = lifecycle
 }
 
-var _ fi.HasLifecycle = &SecurityGroupRule{}
+var _ fi.HasLifecycle = (*SecurityGroupRule)(nil)
 
 // GetName returns the Name of the object, implementing fi.HasName
 func (o *SecurityGroupRule) GetName() *string {
@@ -200,36 +208,35 @@ func (o *SecurityGroupRule) GetName() *string {
 
 // String is the stringer function for the task, producing readable output using fi.TaskAsString
 func (o *SecurityGroupRule) String() string {
-
 	var dst string
 	if o.RemoteGroup != nil {
-		dst = fi.StringValue(o.RemoteGroup.Name)
-	} else if o.RemoteIPPrefix != nil && fi.StringValue(o.RemoteIPPrefix) != "" {
-		dst = fi.StringValue(o.RemoteIPPrefix)
+		dst = fi.ValueOf(o.RemoteGroup.Name)
+	} else if o.RemoteIPPrefix != nil && fi.ValueOf(o.RemoteIPPrefix) != "" {
+		dst = fi.ValueOf(o.RemoteIPPrefix)
 	} else {
 		dst = "ANY"
 	}
 	var proto string
-	if o.Protocol == nil || fi.StringValue(o.Protocol) == "" {
+	if o.Protocol == nil || fi.ValueOf(o.Protocol) == "" {
 		proto = "AllProtos"
 	} else {
-		proto = fi.StringValue(o.Protocol)
+		proto = fi.ValueOf(o.Protocol)
 	}
 
-	return fmt.Sprintf("%v-%v-%v-from-%v-to-%v-%v-%v", fi.StringValue(o.EtherType), fi.StringValue(o.Direction),
-		proto, fi.StringValue(o.SecGroup.Name), dst, fi.IntValue(o.PortRangeMin), fi.IntValue(o.PortRangeMax))
+	return fmt.Sprintf("%v-%v-%v-from-%v-to-%v-%v-%v", fi.ValueOf(o.EtherType), fi.ValueOf(o.Direction),
+		proto, fi.ValueOf(o.SecGroup.Name), dst, fi.ValueOf(o.PortRangeMin), fi.ValueOf(o.PortRangeMax))
 }
 
-func (o *SecurityGroupRule) FindDeletions(c *fi.Context) ([]fi.Deletion, error) {
-	if !fi.BoolValue(o.Delete) {
+func (o *SecurityGroupRule) FindDeletions(c *fi.CloudupContext) ([]fi.CloudupDeletion, error) {
+	if !fi.ValueOf(o.Delete) {
 		return nil, nil
 	}
-	cloud := c.Cloud.(openstack.OpenstackCloud)
-	rule, err := sgr.Get(cloud.NetworkingClient(), fi.StringValue(o.ID)).Extract()
+	cloud := c.T.Cloud.(openstack.OpenstackCloud)
+	rule, err := sgr.Get(c.Context(), cloud.NetworkingClient(), fi.ValueOf(o.ID)).Extract()
 	if err != nil {
 		return nil, err
 	}
-	return []fi.Deletion{
+	return []fi.CloudupDeletion{
 		&deleteSecurityGroupRule{
 			rule:          *rule,
 			securityGroup: o.SecGroup,

@@ -18,14 +18,19 @@ package cloudup
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
+	"k8s.io/kops/pkg/client/simple/vfsclientset"
+	"k8s.io/kops/util/pkg/vfs"
 	"sigs.k8s.io/yaml"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 	api "k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/diff"
 	"k8s.io/kops/upup/pkg/fi"
+	"k8s.io/kops/util/pkg/architectures"
 )
 
 func TestRemoveSharedPrefix(t *testing.T) {
@@ -80,13 +85,76 @@ func TestCreateEtcdCluster(t *testing.T) {
 	if name != etcd.Name {
 		t.Errorf("Expected: %v, Got: %v", name, etcd.Name)
 	}
+}
 
+func TestSetupKarpenterNodes(t *testing.T) {
+	grid := []struct {
+		desc        string
+		nodeCount   int32
+		nodeSizes   []string
+		static      bool
+		machineType string
+		mixedTypes  []string
+	}{
+		{
+			desc: "dynamic",
+		},
+		{
+			desc:      "static",
+			nodeCount: 4,
+			static:    true,
+		},
+		{
+			desc:        "single node size",
+			nodeSizes:   []string{"m6g.large"},
+			machineType: "m6g.large",
+		},
+		{
+			desc:        "multiple node sizes",
+			nodeSizes:   []string{"m6g.large", "m6gd.large"},
+			machineType: "m6g.large",
+			mixedTypes:  []string{"m6g.large", "m6gd.large"},
+		},
+	}
+
+	for _, g := range grid {
+		t.Run(g.desc, func(t *testing.T) {
+			groups, err := setupKarpenterNodes(&NewClusterOptions{NodeCount: g.nodeCount, NodeSizes: g.nodeSizes})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(groups) != 1 {
+				t.Fatalf("expected one InstanceGroup, got %d", len(groups))
+			}
+
+			ig := groups[0]
+			if ig.Spec.Manager != api.InstanceManagerKarpenter {
+				t.Errorf("expected Karpenter manager, got %q", ig.Spec.Manager)
+			}
+			if g.static {
+				if fi.ValueOf(ig.Spec.MinSize) != g.nodeCount {
+					t.Errorf("expected minSize %d, got %v", g.nodeCount, ig.Spec.MinSize)
+				}
+			} else if ig.Spec.MinSize != nil {
+				t.Errorf("expected minSize to be omitted, got %v", ig.Spec.MinSize)
+			}
+			if ig.Spec.MachineType != g.machineType {
+				t.Errorf("expected machineType %q, got %q", g.machineType, ig.Spec.MachineType)
+			}
+			if g.mixedTypes == nil {
+				if ig.Spec.MixedInstancesPolicy != nil {
+					t.Errorf("expected no MixedInstancesPolicy, got %v", ig.Spec.MixedInstancesPolicy)
+				}
+			} else if !reflect.DeepEqual(ig.Spec.MixedInstancesPolicy.Instances, g.mixedTypes) {
+				t.Errorf("expected mixed instances %v, got %v", g.mixedTypes, ig.Spec.MixedInstancesPolicy.Instances)
+			}
+		})
+	}
 }
 
 func TestSetupNetworking(t *testing.T) {
 	tests := []struct {
 		options  NewClusterOptions
-		actual   api.Cluster
 		expected api.Cluster
 	}{
 		{
@@ -95,7 +163,7 @@ func TestSetupNetworking(t *testing.T) {
 			},
 			expected: api.Cluster{
 				Spec: api.ClusterSpec{
-					Networking: &api.NetworkingSpec{
+					Networking: api.NetworkingSpec{
 						Kubenet: &api.KubenetNetworkingSpec{},
 					},
 				},
@@ -107,7 +175,7 @@ func TestSetupNetworking(t *testing.T) {
 			},
 			expected: api.Cluster{
 				Spec: api.ClusterSpec{
-					Networking: &api.NetworkingSpec{
+					Networking: api.NetworkingSpec{
 						External: &api.ExternalNetworkingSpec{},
 					},
 				},
@@ -119,44 +187,8 @@ func TestSetupNetworking(t *testing.T) {
 			},
 			expected: api.Cluster{
 				Spec: api.ClusterSpec{
-					Networking: &api.NetworkingSpec{
+					Networking: api.NetworkingSpec{
 						CNI: &api.CNINetworkingSpec{},
-					},
-				},
-			},
-		},
-		{
-			options: NewClusterOptions{
-				Networking: "kopeio",
-			},
-			expected: api.Cluster{
-				Spec: api.ClusterSpec{
-					Networking: &api.NetworkingSpec{
-						Kopeio: &api.KopeioNetworkingSpec{},
-					},
-				},
-			},
-		},
-		{
-			options: NewClusterOptions{
-				Networking: "kopeio-vxlan",
-			},
-			expected: api.Cluster{
-				Spec: api.ClusterSpec{
-					Networking: &api.NetworkingSpec{
-						Kopeio: &api.KopeioNetworkingSpec{},
-					},
-				},
-			},
-		},
-		{
-			options: NewClusterOptions{
-				Networking: "weave",
-			},
-			expected: api.Cluster{
-				Spec: api.ClusterSpec{
-					Networking: &api.NetworkingSpec{
-						Weave: &api.WeaveNetworkingSpec{},
 					},
 				},
 			},
@@ -167,7 +199,7 @@ func TestSetupNetworking(t *testing.T) {
 			},
 			expected: api.Cluster{
 				Spec: api.ClusterSpec{
-					Networking: &api.NetworkingSpec{
+					Networking: api.NetworkingSpec{
 						Flannel: &api.FlannelNetworkingSpec{
 							Backend: "vxlan",
 						},
@@ -181,7 +213,7 @@ func TestSetupNetworking(t *testing.T) {
 			},
 			expected: api.Cluster{
 				Spec: api.ClusterSpec{
-					Networking: &api.NetworkingSpec{
+					Networking: api.NetworkingSpec{
 						Flannel: &api.FlannelNetworkingSpec{
 							Backend: "vxlan",
 						},
@@ -195,7 +227,7 @@ func TestSetupNetworking(t *testing.T) {
 			},
 			expected: api.Cluster{
 				Spec: api.ClusterSpec{
-					Networking: &api.NetworkingSpec{
+					Networking: api.NetworkingSpec{
 						Flannel: &api.FlannelNetworkingSpec{
 							Backend: "udp",
 						},
@@ -209,20 +241,8 @@ func TestSetupNetworking(t *testing.T) {
 			},
 			expected: api.Cluster{
 				Spec: api.ClusterSpec{
-					Networking: &api.NetworkingSpec{
+					Networking: api.NetworkingSpec{
 						Calico: &api.CalicoNetworkingSpec{},
-					},
-				},
-			},
-		},
-		{
-			options: NewClusterOptions{
-				Networking: "canal",
-			},
-			expected: api.Cluster{
-				Spec: api.ClusterSpec{
-					Networking: &api.NetworkingSpec{
-						Canal: &api.CanalNetworkingSpec{},
 					},
 				},
 			},
@@ -234,10 +254,10 @@ func TestSetupNetworking(t *testing.T) {
 			expected: api.Cluster{
 				Spec: api.ClusterSpec{
 					KubeProxy: &api.KubeProxyConfig{
-						Enabled: fi.Bool(false),
+						Enabled: new(false),
 					},
-					Networking: &api.NetworkingSpec{
-						Kuberouter: &api.KuberouterNetworkingSpec{},
+					Networking: api.NetworkingSpec{
+						KubeRouter: &api.KuberouterNetworkingSpec{},
 					},
 				},
 			},
@@ -248,7 +268,7 @@ func TestSetupNetworking(t *testing.T) {
 			},
 			expected: api.Cluster{
 				Spec: api.ClusterSpec{
-					Networking: &api.NetworkingSpec{
+					Networking: api.NetworkingSpec{
 						AmazonVPC: &api.AmazonVPCNetworkingSpec{},
 					},
 				},
@@ -260,7 +280,7 @@ func TestSetupNetworking(t *testing.T) {
 			},
 			expected: api.Cluster{
 				Spec: api.ClusterSpec{
-					Networking: &api.NetworkingSpec{
+					Networking: api.NetworkingSpec{
 						AmazonVPC: &api.AmazonVPCNetworkingSpec{},
 					},
 				},
@@ -273,9 +293,9 @@ func TestSetupNetworking(t *testing.T) {
 			expected: api.Cluster{
 				Spec: api.ClusterSpec{
 					KubeProxy: &api.KubeProxyConfig{
-						Enabled: fi.Bool(false),
+						Enabled: new(false),
 					},
-					Networking: &api.NetworkingSpec{
+					Networking: api.NetworkingSpec{
 						Cilium: &api.CiliumNetworkingSpec{
 							EnableNodePort: true,
 						},
@@ -290,9 +310,9 @@ func TestSetupNetworking(t *testing.T) {
 			expected: api.Cluster{
 				Spec: api.ClusterSpec{
 					KubeProxy: &api.KubeProxyConfig{
-						Enabled: fi.Bool(false),
+						Enabled: new(false),
 					},
-					Networking: &api.NetworkingSpec{
+					Networking: api.NetworkingSpec{
 						Cilium: &api.CiliumNetworkingSpec{
 							EnableNodePort: true,
 							EtcdManaged:    true,
@@ -307,8 +327,32 @@ func TestSetupNetworking(t *testing.T) {
 			},
 			expected: api.Cluster{
 				Spec: api.ClusterSpec{
-					Networking: &api.NetworkingSpec{
-						GCE: &api.GCENetworkingSpec{},
+					Networking: api.NetworkingSpec{
+						GCP: &api.GCPNetworkingSpec{},
+					},
+				},
+			},
+		},
+		{
+			options: NewClusterOptions{
+				Networking: "gcp",
+			},
+			expected: api.Cluster{
+				Spec: api.ClusterSpec{
+					Networking: api.NetworkingSpec{
+						GCP: &api.GCPNetworkingSpec{},
+					},
+				},
+			},
+		},
+		{
+			options: NewClusterOptions{
+				Networking: "kindnet",
+			},
+			expected: api.Cluster{
+				Spec: api.ClusterSpec{
+					Networking: api.NetworkingSpec{
+						Kindnet: &api.KindnetNetworkingSpec{},
 					},
 				},
 			},
@@ -333,5 +377,331 @@ func TestSetupNetworking(t *testing.T) {
 			diffString := diff.FormatDiff(string(expectedYaml), string(actualYaml))
 			t.Errorf("unexpected cluster networking setup:\n%s", diffString)
 		}
+	}
+}
+
+func TestSetupTopology(t *testing.T) {
+	tests := []struct {
+		options  NewClusterOptions
+		skeleton api.Cluster
+		expected api.Cluster
+	}{
+		{
+			options: NewClusterOptions{
+				Topology: api.TopologyPrivate,
+				Bastion:  true,
+			},
+			skeleton: api.Cluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test",
+				},
+				Spec: api.ClusterSpec{
+					KubernetesVersion: "v1.32.0",
+					Networking: api.NetworkingSpec{
+						Topology: &api.TopologySpec{
+							DNS: api.DNSTypeNone,
+						},
+					},
+				},
+			},
+			expected: api.Cluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test",
+				},
+				Spec: api.ClusterSpec{
+					KubernetesVersion: "v1.32.0",
+					Networking: api.NetworkingSpec{
+						Topology: &api.TopologySpec{
+							DNS: api.DNSTypeNone,
+						},
+					},
+				},
+			},
+		},
+		{
+			options: NewClusterOptions{
+				Topology: api.TopologyPrivate,
+				DNSType:  string(api.DNSTypePublic),
+				Bastion:  true,
+			},
+			skeleton: api.Cluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test",
+				},
+				Spec: api.ClusterSpec{
+					KubernetesVersion: "v1.32.0",
+					Networking: api.NetworkingSpec{
+						Topology: &api.TopologySpec{
+							DNS: api.DNSTypePublic,
+						},
+					},
+				},
+			},
+			expected: api.Cluster{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test",
+				},
+				Spec: api.ClusterSpec{
+					KubernetesVersion: "v1.32.0",
+					Networking: api.NetworkingSpec{
+						Topology: &api.TopologySpec{
+							DNS: api.DNSTypePublic,
+							Bastion: &api.BastionSpec{
+								PublicName: "bastion.test",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		_, err := setupTopology(&test.options, &test.skeleton, nil)
+		if err != nil {
+			t.Errorf("error during topology setup: %v", err)
+		}
+		expectedYaml, err := yaml.Marshal(test.expected)
+		if err != nil {
+			t.Errorf("error converting expected cluster spec to yaml: %v", err)
+		}
+		actualYaml, err := yaml.Marshal(&test.skeleton)
+		if err != nil {
+			t.Errorf("error converting actual cluster spec to yaml: %v", err)
+		}
+		if string(expectedYaml) != string(actualYaml) {
+			diffString := diff.FormatDiff(string(expectedYaml), string(actualYaml))
+			t.Errorf("unexpected cluster topology setup:\n%s", diffString)
+		}
+	}
+}
+
+func TestNewClusterValidatesKubernetesFeatureGates(t *testing.T) {
+	vfsContext := vfs.NewTestingVFSContext()
+	basePath, err := vfsContext.BuildVfsPath("memfs://tests")
+	if err != nil {
+		t.Fatalf("error building test state store: %v", err)
+	}
+	clientset := vfsclientset.NewVFSClientset(vfsContext, basePath)
+
+	tests := []struct {
+		name    string
+		gates   []string
+		wantErr string
+	}{
+		{
+			name:    "should reject empty feature gate if entry is blank",
+			gates:   []string{""},
+			wantErr: "must not be empty",
+		},
+		{
+			name:    "should reject feature gate if entry is sign only plus",
+			gates:   []string{"+"},
+			wantErr: "must include a feature name",
+		},
+		{
+			name:    "should reject feature gate if entry is sign only minus",
+			gates:   []string{"-"},
+			wantErr: "must include a feature name",
+		},
+		{
+			name:    "should continue past feature gate validation if entry is valid",
+			gates:   []string{"+ReadWriteOncePod"},
+			wantErr: "must specify at least one zone",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			opt := &NewClusterOptions{
+				ClusterName:            "test.example.com",
+				Channel:                "file://tests/channels/channel.yaml",
+				KubernetesVersion:      "v1.32.0",
+				KubernetesFeatureGates: test.gates,
+			}
+
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("NewCluster panicked: %v", r)
+				}
+			}()
+
+			_, err := NewCluster(opt, clientset)
+			if err == nil {
+				t.Fatalf("expected error containing %q", test.wantErr)
+			}
+			if !strings.Contains(err.Error(), test.wantErr) {
+				t.Fatalf("unexpected error %q, expected to contain %q", err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestDefaultImage(t *testing.T) {
+	tests := []struct {
+		cluster      *api.Cluster
+		architecture architectures.Architecture
+		expected     string
+	}{
+		{
+			cluster: &api.Cluster{
+				Spec: api.ClusterSpec{
+					KubernetesVersion: "v1.32.0",
+					CloudProvider: api.CloudProviderSpec{
+						AWS: &api.AWSSpec{},
+					},
+				},
+			},
+			architecture: architectures.ArchitectureAmd64,
+			expected:     "099720109477/ubuntu/images/hvm-ssd-gp3/ubuntu-resolute-26.04-amd64-server-20221018",
+		},
+		{
+			cluster: &api.Cluster{
+				Spec: api.ClusterSpec{
+					KubernetesVersion: "v1.32.0",
+					CloudProvider: api.CloudProviderSpec{
+						AWS: &api.AWSSpec{},
+					},
+				},
+			},
+			architecture: architectures.ArchitectureArm64,
+			expected:     "099720109477/ubuntu/images/hvm-ssd-gp3/ubuntu-resolute-26.04-arm64-server-20221018",
+		},
+		{
+			cluster: &api.Cluster{
+				Spec: api.ClusterSpec{
+					KubernetesVersion: "v1.32.0",
+					CloudProvider: api.CloudProviderSpec{
+						Azure: &api.AzureSpec{},
+					},
+				},
+			},
+			architecture: architectures.ArchitectureAmd64,
+			expected:     "Canonical:ubuntu-26_04-lts:server:26.04.202210180",
+		},
+		{
+			cluster: &api.Cluster{
+				Spec: api.ClusterSpec{
+					KubernetesVersion: "v1.32.0",
+					CloudProvider: api.CloudProviderSpec{
+						GCE: &api.GCESpec{},
+					},
+				},
+			},
+			architecture: architectures.ArchitectureAmd64,
+			expected:     "ubuntu-os-cloud/ubuntu-2604-resolute-amd64-v20221018",
+		},
+		{
+			cluster: &api.Cluster{
+				Spec: api.ClusterSpec{
+					KubernetesVersion: "v1.32.0",
+					CloudProvider: api.CloudProviderSpec{
+						DO: &api.DOSpec{},
+					},
+				},
+			},
+			architecture: architectures.ArchitectureAmd64,
+			expected:     defaultDOImageNoble,
+		},
+		{
+			cluster: &api.Cluster{
+				Spec: api.ClusterSpec{
+					KubernetesVersion: "v1.32.0",
+					CloudProvider: api.CloudProviderSpec{
+						Hetzner: &api.HetznerSpec{},
+					},
+				},
+			},
+			architecture: architectures.ArchitectureAmd64,
+			expected:     defaultHetznerImageNoble,
+		},
+		{
+			cluster: &api.Cluster{
+				Spec: api.ClusterSpec{
+					KubernetesVersion: "v1.32.0",
+					CloudProvider: api.CloudProviderSpec{
+						Scaleway: &api.ScalewaySpec{},
+					},
+				},
+			},
+			architecture: architectures.ArchitectureAmd64,
+			expected:     defaultScalewayImageNoble,
+		},
+		{
+			cluster: &api.Cluster{
+				Spec: api.ClusterSpec{
+					KubernetesVersion: "v1.32.0",
+					CloudProvider: api.CloudProviderSpec{
+						Linode: &api.LinodeSpec{},
+					},
+				},
+			},
+			architecture: architectures.ArchitectureAmd64,
+			expected:     defaultLinodeImageNoble,
+		},
+	}
+
+	channel, err := api.LoadChannel(vfs.NewTestingVFSContext(), "file://tests/channels/channel.yaml")
+	if err != nil {
+		t.Fatalf("unable to load test channel: %v", err)
+	}
+
+	for _, test := range tests {
+		actual, err := defaultImage(test.cluster, channel, test.architecture)
+		if err != nil {
+			t.Error(err)
+			continue
+		}
+		if actual != test.expected {
+			t.Errorf("unexpected default image for cluster %s: expected=%q, actual=%q", fi.DebugAsJsonString(test.cluster.Spec), test.expected, actual)
+		}
+	}
+}
+
+func TestSetupZonesLinodeSingleRegion(t *testing.T) {
+	opt := &NewClusterOptions{Zones: []string{"us-east"}}
+	cluster := &api.Cluster{
+		Spec: api.ClusterSpec{
+			CloudProvider: api.CloudProviderSpec{Linode: &api.LinodeSpec{}},
+		},
+	}
+
+	zones := sets.NewString("us-east")
+	zoneToSubnetsMap, err := setupZones(opt, cluster, zones)
+	if err != nil {
+		t.Fatalf("setupZones returned error: %v", err)
+	}
+
+	subnets := zoneToSubnetsMap["us-east"]
+	if got, want := len(subnets), 1; got != want {
+		t.Fatalf("unexpected subnet count for region: got %d, want %d", got, want)
+	}
+
+	subnet := subnets[0]
+	if got, want := subnet.Name, "us-east"; got != want {
+		t.Fatalf("unexpected subnet name: got %q, want %q", got, want)
+	}
+	if got, want := subnet.Region, "us-east"; got != want {
+		t.Fatalf("unexpected subnet region: got %q, want %q", got, want)
+	}
+	if got, want := subnet.Zone, "us-east"; got != want {
+		t.Fatalf("unexpected subnet zone: got %q, want %q", got, want)
+	}
+}
+
+func TestSetupZonesLinodeSingleRegionOnly(t *testing.T) {
+	opt := &NewClusterOptions{Zones: []string{"us-east", "eu-west"}}
+	cluster := &api.Cluster{
+		Spec: api.ClusterSpec{
+			CloudProvider: api.CloudProviderSpec{Linode: &api.LinodeSpec{}},
+		},
+	}
+
+	_, err := setupZones(opt, cluster, sets.NewString("us-east", "eu-west"))
+	if err == nil {
+		t.Fatalf("expected error when multiple regions are specified for Linode")
+	}
+	if !strings.Contains(err.Error(), "one region only") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

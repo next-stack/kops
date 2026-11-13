@@ -23,7 +23,7 @@ import (
 	"regexp"
 
 	"github.com/google/uuid"
-	"github.com/gophercloud/gophercloud/openstack/compute/v2/flavors"
+	"github.com/gophercloud/gophercloud/v2/openstack/compute/v2/flavors"
 	"k8s.io/kops/upup/pkg/fi"
 )
 
@@ -69,7 +69,6 @@ func (m *MockClient) mockFlavors() {
 }
 
 func (m *MockClient) listFlavors(w http.ResponseWriter) {
-
 	w.WriteHeader(http.StatusOK)
 
 	flavors := make([]flavors.Flavor, 0)
@@ -130,7 +129,7 @@ func (m *MockClient) createFlavor(w http.ResponseWriter, r *http.Request) {
 		Name:  create.Flavor.Name,
 		RAM:   create.Flavor.RAM,
 		VCPUs: create.Flavor.VCPUs,
-		Disk:  fi.IntValue(create.Flavor.Disk),
+		Disk:  fi.ValueOf(create.Flavor.Disk),
 	}
 	m.flavors[flavor.ID] = flavor
 

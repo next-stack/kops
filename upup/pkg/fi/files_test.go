@@ -1,5 +1,4 @@
 //go:build linux || darwin
-// +build linux darwin
 
 /*
 Copyright 2020 The Kubernetes Authors.
@@ -21,7 +20,6 @@ package fi
 
 import (
 	"bytes"
-	"io/ioutil"
 	"os"
 	"path"
 	"syscall"
@@ -32,16 +30,7 @@ func TestWriteFile(t *testing.T) {
 	// Clear the umask so an unusual umask doesn't break our test (for directory mode)
 	syscall.Umask(0)
 
-	tempDir, err := ioutil.TempDir("", "fitest")
-	if err != nil {
-		t.Fatalf("error creating temp dir: %v", err)
-	}
-	defer func() {
-		err := os.RemoveAll(tempDir)
-		if err != nil {
-			t.Errorf("failed to remove temp dir %q: %v", tempDir, err)
-		}
-	}()
+	tempDir := t.TempDir()
 
 	tests := []struct {
 		path     string
@@ -52,8 +41,8 @@ func TestWriteFile(t *testing.T) {
 		{
 			path:     path.Join(tempDir, "SubDir", "test1.tmp"),
 			data:     []byte("test data\nline 1\r\nline 2"),
-			fileMode: 0644,
-			dirMode:  0755,
+			fileMode: 0o644,
+			dirMode:  0o755,
 		},
 	}
 	for _, test := range tests {
@@ -64,7 +53,7 @@ func TestWriteFile(t *testing.T) {
 		}
 
 		// Check file content
-		data, err := ioutil.ReadFile(test.path)
+		data, err := os.ReadFile(test.path)
 		if err != nil {
 			t.Errorf("Error reading file {%s}, error: {%v}", test.path, err)
 			continue

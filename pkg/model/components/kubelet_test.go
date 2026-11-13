@@ -20,39 +20,35 @@ import (
 	"testing"
 
 	"k8s.io/kops/pkg/apis/kops"
-	"k8s.io/kops/pkg/apis/kops/util"
 	"k8s.io/kops/pkg/assets"
+	"k8s.io/kops/util/pkg/vfs"
 )
 
 func buildKubeletTestCluster() *kops.Cluster {
 	return &kops.Cluster{
 		Spec: kops.ClusterSpec{
-			KubernetesVersion:     "1.6.2",
-			ServiceClusterIPRange: "10.10.0.0/16",
-			Kubelet:               &kops.KubeletConfigSpec{},
-			Networking:            &kops.NetworkingSpec{},
+			KubernetesVersion: "1.6.2",
+			Kubelet:           &kops.KubeletConfigSpec{},
+			Networking: kops.NetworkingSpec{
+				ServiceClusterIPRange: "10.10.0.0/16",
+			},
 		},
 	}
 }
 
 func buildOptions(cluster *kops.Cluster) error {
-	ab := assets.NewAssetBuilder(cluster, false)
+	ab := assets.NewAssetBuilder(vfs.Context, cluster.Spec.Assets, false)
 
-	ver, err := util.ParseKubernetesVersion(cluster.Spec.KubernetesVersion)
+	optionsContext, err := NewOptionsContext(cluster, ab, ab.KubeletSupportedVersion)
 	if err != nil {
 		return err
 	}
-
 	builder := KubeletOptionsBuilder{
-		OptionsContext: &OptionsContext{
-			AssetBuilder:      ab,
-			KubernetesVersion: *ver,
-		},
+		OptionsContext: optionsContext,
 	}
 
-	err = builder.BuildOptions(&cluster.Spec)
-	if err != nil {
-		return nil
+	if err := builder.BuildOptions(cluster); err != nil {
+		return err
 	}
 
 	return nil
@@ -86,5 +82,30 @@ func TestFeatureGatesOverride(t *testing.T) {
 	gates := cluster.Spec.Kubelet.FeatureGates
 	if gates["ExperimentalCriticalPodAnnotation"] != "false" {
 		t.Errorf("ExperimentalCriticalPodAnnotation feature should be disalbled")
+	}
+}
+
+func TestCgroupDriverDefault(t *testing.T) {
+	cluster := buildKubeletTestCluster()
+
+	if err := buildOptions(cluster); err != nil {
+		t.Fatal(err)
+	}
+
+	if cluster.Spec.Kubelet.CgroupDriver != "systemd" {
+		t.Errorf("cgroupDriver should default to systemd, got %q", cluster.Spec.Kubelet.CgroupDriver)
+	}
+}
+
+func TestCgroupDriverOverride(t *testing.T) {
+	cluster := buildKubeletTestCluster()
+	cluster.Spec.Kubelet.CgroupDriver = "cgroupfs"
+
+	if err := buildOptions(cluster); err != nil {
+		t.Fatal(err)
+	}
+
+	if cluster.Spec.Kubelet.CgroupDriver != "cgroupfs" {
+		t.Errorf("cgroupDriver should keep the configured value cgroupfs, got %q", cluster.Spec.Kubelet.CgroupDriver)
 	}
 }

@@ -1,0 +1,80 @@
+/*
+Copyright 2021 The Kubernetes Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package components
+
+import (
+	"k8s.io/kops/pkg/apis/kops"
+	"k8s.io/kops/upup/pkg/fi/cloudup/gce/gcenames"
+	"k8s.io/kops/upup/pkg/fi/loader"
+)
+
+type GCPCloudControllerManagerOptionsBuilder struct {
+	*OptionsContext
+}
+
+var _ loader.ClusterOptionsBuilder = (*GCPCloudControllerManagerOptionsBuilder)(nil)
+
+func (b *GCPCloudControllerManagerOptionsBuilder) BuildOptions(cluster *kops.Cluster) error {
+	clusterSpec := &cluster.Spec
+
+	if cluster.GetCloudProvider() != kops.CloudProviderGCE {
+		return nil
+	}
+
+	if clusterSpec.ExternalCloudControllerManager == nil {
+		clusterSpec.ExternalCloudControllerManager = &kops.CloudControllerManagerConfig{}
+	}
+
+	ccmConfig := clusterSpec.ExternalCloudControllerManager
+
+	// No significant downside to always doing a leader election.
+	// Also, having multiple control plane nodes requires leader election.
+	ccmConfig.LeaderElection = &kops.LeaderElectionConfiguration{LeaderElect: new(true)}
+
+	// CCM interacts directly with the GCP API, use the name safe for GCP
+	ccmConfig.ClusterName = gcenames.SafeClusterName(b.ClusterName)
+	ccmConfig.AllocateNodeCIDRs = new(true)
+	ccmConfig.CIDRAllocatorType = new("CloudAllocator")
+	if ccmConfig.ClusterCIDR == "" {
+		ccmConfig.ClusterCIDR = clusterSpec.Networking.PodCIDR
+	}
+
+	if gcenames.UsesIPAliases(cluster) {
+		// We don't need to configure routes if we are using ipalias; these are "real" IPs
+		ccmConfig.ConfigureCloudRoutes = new(false)
+	}
+
+	if ccmConfig.Controllers == nil {
+		changes := []string{"*"}
+
+		// Turn off some controllers if kops-controller is running them
+		if clusterSpec.IsKopsControllerIPAM() {
+			changes = append(changes, "-node-ipam-controller", "-node-route-controller")
+		}
+
+		ccmConfig.Controllers = changes
+	}
+
+	if ccmConfig.Image == "" {
+		switch b.ControlPlaneKubernetesVersion().Minor() {
+		default:
+			ccmConfig.Image = "registry.k8s.io/cloud-provider-gcp/cloud-controller-manager:v37.2.5"
+		}
+	}
+
+	return nil
+}

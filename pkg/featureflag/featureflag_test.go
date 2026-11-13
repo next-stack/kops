@@ -17,7 +17,6 @@ limitations under the License.
 package featureflag
 
 import (
-	"os"
 	"testing"
 
 	"k8s.io/klog/v2"
@@ -49,7 +48,7 @@ func TestSetenv(t *testing.T) {
 		t.Fatalf("Flag did not default true")
 	}
 
-	os.Setenv("KOPS_FEATURE_FLAGS", "-UnitTest2")
+	t.Setenv("KOPS_FEATURE_FLAGS", "-UnitTest2")
 	if !f.Enabled() {
 		t.Fatalf("Flag was reparsed immediately after os.Setenv")
 	}
@@ -57,5 +56,27 @@ func TestSetenv(t *testing.T) {
 	ParseFlags("-UnitTest2")
 	if f.Enabled() {
 		t.Fatalf("Flag was not updated by ParseFlags")
+	}
+}
+
+func TestGetPositive(t *testing.T) {
+	// Find a random existing feature
+	var featureName string
+	for featureName = range flags {
+		break
+	}
+
+	f, err := Get(featureName)
+	if err != nil {
+		t.Errorf("Unexpected error when getting a feature: %s", err)
+	}
+	if f != flags[featureName] {
+		t.Errorf("Unexpected content when getting a feature: expected %+v, got %+v", flags[featureName], f)
+	}
+}
+
+func TestGetNegative(t *testing.T) {
+	if _, err := Get("NonExistingFeature"); err == nil {
+		t.Errorf("Expected Get error on NonExistingFeature, got nil")
 	}
 }

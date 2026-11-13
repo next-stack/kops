@@ -36,7 +36,6 @@ import (
 	"k8s.io/kops/pkg/commands"
 	"k8s.io/kops/pkg/commands/commandutils"
 	"k8s.io/kops/pkg/edit"
-	"k8s.io/kops/pkg/featureflag"
 	"k8s.io/kops/pkg/kopscodecs"
 	"k8s.io/kops/pkg/pretty"
 	"k8s.io/kops/pkg/try"
@@ -104,20 +103,18 @@ func NewCmdEditInstanceGroup(f *util.Factory, out io.Writer) *cobra.Command {
 		},
 		ValidArgsFunction: completeInstanceGroup(f, nil, nil),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return RunEditInstanceGroup(context.TODO(), f, out, options)
+			return RunEditInstanceGroup(cmd.Context(), f, out, options)
 		},
 	}
 
-	if featureflag.SpecOverrideFlag.Enabled() {
-		cmd.Flags().StringSliceVar(&options.Sets, "set", options.Sets, "Directly set values in the spec")
-		cmd.RegisterFlagCompletionFunc("set", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-			return nil, cobra.ShellCompDirectiveNoFileComp
-		})
-		cmd.Flags().StringSliceVar(&options.Unsets, "unset", options.Unsets, "Directly unset values in the spec")
-		cmd.RegisterFlagCompletionFunc("unset", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-			return nil, cobra.ShellCompDirectiveNoFileComp
-		})
-	}
+	LazyQuoteStringSliceVar(cmd.Flags(), &options.Sets, "set", options.Sets, "Directly set values in the spec")
+	cmd.RegisterFlagCompletionFunc("set", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	})
+	cmd.Flags().StringSliceVar(&options.Unsets, "unset", options.Unsets, "Directly unset values in the spec")
+	cmd.RegisterFlagCompletionFunc("unset", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	})
 
 	return cmd
 }
@@ -130,14 +127,14 @@ func RunEditInstanceGroup(ctx context.Context, f *util.Factory, out io.Writer, o
 		return err
 	}
 
-	channel, err := cloudup.ChannelForCluster(cluster)
-	if err != nil {
-		klog.Warningf("%v", err)
-	}
-
-	clientset, err := f.Clientset()
+	clientset, err := f.KopsClient()
 	if err != nil {
 		return err
+	}
+
+	channel, err := cloudup.ChannelForCluster(clientset.VFSContext(), cluster)
+	if err != nil {
+		klog.Warningf("%v", err)
 	}
 
 	oldGroup, err := clientset.InstanceGroupsFor(cluster).Get(ctx, groupName, metav1.GetOptions{})
@@ -167,9 +164,7 @@ func RunEditInstanceGroup(ctx context.Context, f *util.Factory, out io.Writer, o
 		return nil
 	}
 
-	var (
-		editor = editor.NewDefaultEditor(commandutils.EditorEnvs)
-	)
+	editor := editor.NewDefaultEditor(commandutils.EditorEnvs)
 
 	ext := "yaml"
 	raw, err := kopscodecs.ToVersionedYaml(oldGroup)
@@ -244,7 +239,7 @@ func RunEditInstanceGroup(ctx context.Context, f *util.Factory, out io.Writer, o
 			continue
 		}
 
-		extraFields, err := edit.HasExtraFields(string(edited), newObj)
+		extraFields, err := edit.HasExtraFields(string(edited))
 		if err != nil {
 			results = editResults{
 				file: file,
@@ -283,6 +278,10 @@ func RunEditInstanceGroup(ctx context.Context, f *util.Factory, out io.Writer, o
 }
 
 func updateInstanceGroup(ctx context.Context, clientset simple.Clientset, channel *api.Channel, cluster *api.Cluster, oldGroup, newGroup *api.InstanceGroup) (string, error) {
+	if err := validation.ValidateInstanceGroupUpdate(newGroup, oldGroup).ToAggregate(); err != nil {
+		return fmt.Sprintf("validation failed: %s", err), nil
+	}
+
 	cloud, err := cloudup.BuildCloud(cluster)
 	if err != nil {
 		return "", err
@@ -295,23 +294,23 @@ func updateInstanceGroup(ctx context.Context, clientset simple.Clientset, channe
 
 	// We need the full cluster spec to perform deep validation
 	// Note that we don't write it back though
-	err = cloudup.PerformAssignments(cluster, cloud)
+	err = cloudup.PerformAssignments(cluster, clientset.VFSContext(), cloud)
 	if err != nil {
 		return "", fmt.Errorf("error populating configuration: %v", err)
 	}
 
-	assetBuilder := assets.NewAssetBuilder(cluster, false)
-	fullCluster, err := cloudup.PopulateClusterSpec(clientset, cluster, cloud, assetBuilder)
+	assetBuilder := assets.NewAssetBuilder(clientset.VFSContext(), cluster.Spec.Assets, false)
+	fullCluster, err := cloudup.PopulateClusterSpec(ctx, clientset, cluster, []*api.InstanceGroup{newGroup}, cloud, assetBuilder)
 	if err != nil {
 		return fmt.Sprintf("error populating cluster spec: %s", err), nil
 	}
 
-	err = validation.CrossValidateInstanceGroup(fullGroup, fullCluster, cloud).ToAggregate()
+	err = validation.CrossValidateInstanceGroup(fullGroup, fullCluster, cloud, true).ToAggregate()
 	if err != nil {
 		return fmt.Sprintf("validation failed: %s", err), nil
 	}
 
 	// Note we perform as much validation as we can, before writing a bad config
-	_, err = clientset.InstanceGroupsFor(cluster).Update(ctx, fullGroup, metav1.UpdateOptions{})
+	_, err = clientset.InstanceGroupsFor(cluster).Update(ctx, newGroup, metav1.UpdateOptions{})
 	return "", err
 }

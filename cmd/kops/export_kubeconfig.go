@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"time"
 
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -58,12 +57,7 @@ type ExportKubeconfigOptions struct {
 	ClusterName    string
 	KubeConfigPath string
 	all            bool
-	admin          time.Duration
-	user           string
-	internal       bool
-
-	// UseKopsAuthenticationPlugin controls whether we should use the kOps auth helper instead of a static credential
-	UseKopsAuthenticationPlugin bool
+	kubeconfig.CreateKubecfgOptions
 }
 
 func NewCmdExportKubeconfig(f *util.Factory, out io.Writer) *cobra.Command {
@@ -76,7 +70,7 @@ func NewCmdExportKubeconfig(f *util.Factory, out io.Writer) *cobra.Command {
 		Long:    exportKubeconfigLong,
 		Example: exportKubeconfigExample,
 		Args: func(cmd *cobra.Command, args []string) error {
-			if options.admin != 0 && options.user != "" {
+			if options.Admin != 0 && options.User != "" {
 				return fmt.Errorf("cannot use both --admin and --user")
 			}
 			if options.all {
@@ -90,24 +84,27 @@ func NewCmdExportKubeconfig(f *util.Factory, out io.Writer) *cobra.Command {
 		},
 		ValidArgsFunction: commandutils.CompleteClusterName(f, true, false),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return RunExportKubeconfig(context.TODO(), f, out, options, args)
+			return RunExportKubeconfig(cmd.Context(), f, out, options, args)
 		},
 	}
 
 	cmd.Flags().StringVar(&options.KubeConfigPath, "kubeconfig", options.KubeConfigPath, "Filename of the kubeconfig to create")
 	cmd.Flags().BoolVar(&options.all, "all", options.all, "Export all clusters from the kOps state store")
-	cmd.Flags().DurationVar(&options.admin, "admin", options.admin, "Also export a cluster admin user credential with the specified lifetime and add it to the cluster context")
+	cmd.Flags().DurationVar(&options.Admin, "admin", options.Admin, "Also export a cluster admin user credential with the specified lifetime and add it to the cluster context")
 	cmd.Flags().Lookup("admin").NoOptDefVal = kubeconfig.DefaultKubecfgAdminLifetime.String()
-	cmd.Flags().StringVar(&options.user, "user", options.user, "Existing user in kubeconfig file to use")
+	cmd.Flags().StringVar(&options.User, "user", options.User, "Existing user in kubeconfig file to use")
 	cmd.RegisterFlagCompletionFunc("user", completeKubecfgUser)
-	cmd.Flags().BoolVar(&options.internal, "internal", options.internal, "Use the cluster's internal DNS name")
+
+	cmd.Flags().BoolVar(&options.Internal, "internal", options.Internal, "Use the cluster's internal DNS name")
 	cmd.Flags().BoolVar(&options.UseKopsAuthenticationPlugin, "auth-plugin", options.UseKopsAuthenticationPlugin, "Use the kOps authentication plugin")
+
+	options.CreateKubecfgOptions.AddFlagsForExport(cmd.Flags())
 
 	return cmd
 }
 
 func RunExportKubeconfig(ctx context.Context, f *util.Factory, out io.Writer, options *ExportKubeconfigOptions, args []string) error {
-	clientset, err := f.Clientset()
+	clientset, err := f.KopsClient()
 	if err != nil {
 		return err
 	}
@@ -145,15 +142,13 @@ func RunExportKubeconfig(ctx context.Context, f *util.Factory, out io.Writer, op
 			return err
 		}
 		conf, err := kubeconfig.BuildKubecfg(
+			ctx,
 			cluster,
 			keyStore,
 			secretStore,
 			cloud,
-			options.admin,
-			options.user,
-			options.internal,
-			f.KopsStateStore(),
-			options.UseKopsAuthenticationPlugin)
+			options.CreateKubecfgOptions,
+			f.KopsStateStore())
 		if err != nil {
 			return err
 		}

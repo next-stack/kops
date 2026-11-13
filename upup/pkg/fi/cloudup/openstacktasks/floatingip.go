@@ -17,15 +17,14 @@ limitations under the License.
 package openstacktasks
 
 import (
+	"context"
 	"fmt"
-	"strings"
 	"time"
 
-	"github.com/gophercloud/gophercloud/openstack/networking/v2/ports"
-
-	l3floatingip "github.com/gophercloud/gophercloud/openstack/networking/v2/extensions/layer3/floatingips"
+	l3floatingip "github.com/gophercloud/gophercloud/v2/openstack/networking/v2/extensions/layer3/floatingips"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
+	"k8s.io/kops/pkg/wellknownservices"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/openstack"
 	"k8s.io/kops/util/pkg/vfs"
@@ -33,15 +32,18 @@ import (
 
 // +kops:fitask
 type FloatingIP struct {
-	Name         *string
-	ID           *string
-	LB           *LB
-	IP           *string
-	Lifecycle    fi.Lifecycle
-	ForAPIServer bool
+	Name      *string
+	ID        *string
+	LB        *LB
+	IP        *string
+	Lifecycle fi.Lifecycle
+
+	// WellKnownServices indicates which services are supported by this resource.
+	// This field is internal and is not rendered to the cloud.
+	WellKnownServices []wellknownservices.WellKnownService
 }
 
-var _ fi.HasAddress = &FloatingIP{}
+var _ fi.HasAddress = (*FloatingIP)(nil)
 
 var readBackoff = wait.Backoff{
 	Duration: time.Second,
@@ -73,42 +75,44 @@ func findL3Floating(cloud openstack.OpenstackCloud, opts l3floatingip.ListOpts) 
 	return result, nil
 }
 
-func (e *FloatingIP) IsForAPIServer() bool {
-	return e.ForAPIServer
+// GetWellKnownServices implements fi.HasAddress::GetWellKnownServices.
+// It indicates which services we support with this address.
+func (e *FloatingIP) GetWellKnownServices() []wellknownservices.WellKnownService {
+	return e.WellKnownServices
 }
 
-func (e *FloatingIP) FindIPAddress(context *fi.Context) (*string, error) {
+func (e *FloatingIP) FindAddresses(context *fi.CloudupContext) ([]string, error) {
 	if e.ID == nil {
 		if e.LB != nil && e.LB.ID == nil {
 			return nil, nil
 		}
 	}
 
-	cloud := context.Cloud.(openstack.OpenstackCloud)
+	cloud := context.T.Cloud.(openstack.OpenstackCloud)
 	// try to find ip address using LB port
 	if e.ID == nil && e.LB != nil && e.LB.PortID != nil {
 		fips, err := findL3Floating(cloud, l3floatingip.ListOpts{
-			PortID: fi.StringValue(e.LB.PortID),
+			PortID: fi.ValueOf(e.LB.PortID),
 		})
 		if err != nil {
 			return nil, err
 		}
-		if len(fips) == 1 && fips[0].PortID == fi.StringValue(e.LB.PortID) {
-			return &fips[0].FloatingIP, nil
+		if len(fips) == 1 && fips[0].PortID == fi.ValueOf(e.LB.PortID) {
+			return []string{fips[0].FloatingIP}, nil
 		}
-		return nil, fmt.Errorf("Could not find port floatingips port=%s", fi.StringValue(e.LB.PortID))
+		return nil, fmt.Errorf("Could not find port floatingips port=%s", fi.ValueOf(e.LB.PortID))
 	}
 
-	fip, err := cloud.GetL3FloatingIP(fi.StringValue(e.ID))
+	fip, err := cloud.GetL3FloatingIP(fi.ValueOf(e.ID))
 	if err != nil {
 		return nil, err
 	}
-	return &fip.FloatingIP, nil
+	return []string{fip.FloatingIP}, nil
 }
 
 // GetDependencies returns the dependencies of the Instance task
-func (e *FloatingIP) GetDependencies(tasks map[string]fi.Task) []fi.Task {
-	var deps []fi.Task
+func (e *FloatingIP) GetDependencies(tasks map[string]fi.CloudupTask) []fi.CloudupTask {
+	var deps []fi.CloudupTask
 	for _, task := range tasks {
 		if _, ok := task.(*LB); ok {
 			deps = append(deps, task)
@@ -122,20 +126,19 @@ func (e *FloatingIP) GetDependencies(tasks map[string]fi.Task) []fi.Task {
 	return deps
 }
 
-var _ fi.CompareWithID = &FloatingIP{}
+var _ fi.CompareWithID = (*FloatingIP)(nil)
 
 func (e *FloatingIP) CompareWithID() *string {
 	return e.ID
 }
 
-func (e *FloatingIP) Find(c *fi.Context) (*FloatingIP, error) {
+func (e *FloatingIP) Find(c *fi.CloudupContext) (*FloatingIP, error) {
 	if e == nil {
 		return nil, nil
 	}
-	cloud := c.Cloud.(openstack.OpenstackCloud)
+	cloud := c.T.Cloud.(openstack.OpenstackCloud)
 	if e.LB != nil && e.LB.PortID != nil {
-		fip, err := findFipByPortID(cloud, fi.StringValue(e.LB.PortID))
-
+		fip, err := findFipByPortID(cloud, fi.ValueOf(e.LB.PortID))
 		if err != nil {
 			return nil, fmt.Errorf("failed to find floating ip: %v", err)
 		}
@@ -143,15 +146,15 @@ func (e *FloatingIP) Find(c *fi.Context) (*FloatingIP, error) {
 			return nil, nil
 		}
 		actual := &FloatingIP{
-			Name:      fi.String(fip.Description),
-			ID:        fi.String(fip.ID),
+			Name:      new(fip.Description),
+			ID:        new(fip.ID),
 			LB:        e.LB,
 			Lifecycle: e.Lifecycle,
 		}
 		e.ID = actual.ID
 		return actual, nil
 	}
-	fipname := fi.StringValue(e.Name)
+	fipname := fi.ValueOf(e.Name)
 	fips, err := cloud.ListL3FloatingIPs(l3floatingip.ListOpts{
 		Description: fipname,
 	})
@@ -160,53 +163,19 @@ func (e *FloatingIP) Find(c *fi.Context) (*FloatingIP, error) {
 	}
 
 	for _, fip := range fips {
-		if fip.Description == fi.StringValue(e.Name) {
+		if fip.Description == fi.ValueOf(e.Name) {
 			actual := &FloatingIP{
-				ID:        fi.String(fips[0].ID),
+				ID:        new(fips[0].ID),
 				Name:      e.Name,
-				IP:        fi.String(fip.FloatingIP),
+				IP:        new(fip.FloatingIP),
 				Lifecycle: e.Lifecycle,
 			}
 			e.ID = actual.ID
 			e.IP = actual.IP
 			return actual, nil
 		}
-
 	}
 
-	if len(fips) == 0 {
-		//If we fail to find an IP address we need to look for IP addresses attached to a port with similar name
-		//TODO: remove this in kops 1.21 where we can expect that the description field has been added
-		portname := "port-" + strings.TrimPrefix(fipname, "fip-")
-
-		ports, err := cloud.ListPorts(ports.ListOpts{
-			Name: portname,
-		})
-
-		if err != nil {
-			return nil, fmt.Errorf("failed to list ports: %v", err)
-		}
-
-		if len(ports) == 1 {
-
-			fip, err := findFipByPortID(cloud, ports[0].ID)
-
-			if err != nil {
-				return nil, fmt.Errorf("failed to find floating ip: %v", err)
-			}
-			if fip == nil {
-				return nil, nil
-			}
-			actual := &FloatingIP{
-				Name:      fi.String(fip.Description),
-				ID:        fi.String(fip.ID),
-				Lifecycle: e.Lifecycle,
-			}
-			e.ID = actual.ID
-			return actual, nil
-		}
-
-	}
 	return nil, nil
 }
 
@@ -226,8 +195,8 @@ func findFipByPortID(cloud openstack.OpenstackCloud, id string) (fip *l3floating
 	return &fips[0], nil
 }
 
-func (e *FloatingIP) Run(c *fi.Context) error {
-	return fi.DefaultDeltaRunMethod(e, c)
+func (e *FloatingIP) Run(c *fi.CloudupContext) error {
+	return fi.CloudupDefaultDeltaRunMethod(e, c)
 }
 
 func (_ *FloatingIP) CheckChanges(a, e, changes *FloatingIP) error {
@@ -239,12 +208,9 @@ func (_ *FloatingIP) CheckChanges(a, e, changes *FloatingIP) error {
 		if changes.ID != nil {
 			return fi.CannotChangeField("ID")
 		}
-		//TODO: add back into kops 1.21
-		/*
-			if changes.Name != nil && fi.StringValue(a.Name) != "" {
-				return fi.CannotChangeField("Name")
-			}
-		*/
+		if changes.Name != nil && fi.ValueOf(a.Name) != "" {
+			return fi.CannotChangeField("Name")
+		}
 	}
 	return nil
 }
@@ -270,11 +236,11 @@ func (f *FloatingIP) RenderOpenstack(t *openstack.OpenstackAPITarget, a, e, chan
 
 		opts := l3floatingip.CreateOpts{
 			FloatingNetworkID: external.ID,
-			Description:       fi.StringValue(e.Name),
+			Description:       fi.ValueOf(e.Name),
 		}
 
 		if e.LB != nil {
-			opts.PortID = fi.StringValue(e.LB.PortID)
+			opts.PortID = fi.ValueOf(e.LB.PortID)
 		}
 
 		// instance floatingips comes from the same subnet as the kubernetes API floatingip
@@ -290,17 +256,17 @@ func (f *FloatingIP) RenderOpenstack(t *openstack.OpenstackAPITarget, a, e, chan
 			return fmt.Errorf("Failed to create floating IP: %v", err)
 		}
 
-		e.ID = fi.String(fip.ID)
-		e.IP = fi.String(fip.FloatingIP)
+		e.ID = new(fip.ID)
+		e.IP = new(fip.FloatingIP)
 
 		return nil
 	}
 	if changes.Name != nil {
-		_, err := l3floatingip.Update(cloud.NetworkingClient(), fi.StringValue(a.ID), l3floatingip.UpdateOpts{
+		_, err := l3floatingip.Update(context.TODO(), cloud.NetworkingClient(), fi.ValueOf(a.ID), l3floatingip.UpdateOpts{
 			Description: e.Name,
 		}).Extract()
 		if err != nil {
-			return fmt.Errorf("failed to update floating ip %v: %v", fi.StringValue(e.Name), err)
+			return fmt.Errorf("failed to update floating ip %v: %v", fi.ValueOf(e.Name), err)
 		}
 
 	}

@@ -17,6 +17,7 @@ limitations under the License.
 package models
 
 import (
+	"context"
 	"embed"
 	"errors"
 	"io"
@@ -52,17 +53,19 @@ func (p *AssetPath) Join(relativePath ...string) vfs.Path {
 	return &AssetPath{location: joined}
 }
 
-func (p *AssetPath) WriteFile(data io.ReadSeeker, acl vfs.ACL) error {
+func (p *AssetPath) WriteFile(ctx context.Context, data io.ReadSeeker, acl vfs.ACL) error {
 	return ReadOnlyError
 }
 
-func (p *AssetPath) CreateFile(data io.ReadSeeker, acl vfs.ACL) error {
+func (p *AssetPath) CreateFile(ctx context.Context, data io.ReadSeeker, acl vfs.ACL) error {
 	return ReadOnlyError
 }
 
 // WriteTo implements io.WriterTo
 func (p *AssetPath) WriteTo(out io.Writer) (int64, error) {
-	data, err := p.ReadFile()
+	ctx := context.TODO()
+
+	data, err := p.ReadFile(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -71,7 +74,7 @@ func (p *AssetPath) WriteTo(out io.Writer) (int64, error) {
 }
 
 // ReadFile implements Path::ReadFile
-func (p *AssetPath) ReadFile() ([]byte, error) {
+func (p *AssetPath) ReadFile(ctx context.Context) ([]byte, error) {
 	data, err := content.ReadFile(p.location)
 	if _, ok := err.(*fs.PathError); ok {
 		return nil, os.ErrNotExist
@@ -94,16 +97,16 @@ func (p *AssetPath) ReadDir() ([]vfs.Path, error) {
 	return paths, nil
 }
 
-func (p *AssetPath) ReadTree() ([]vfs.Path, error) {
+func (p *AssetPath) ReadTree(ctx context.Context) ([]vfs.Path, error) {
 	var paths []vfs.Path
-	err := readTree(p.location, &paths)
+	err := readTree(ctx, p.location, &paths)
 	if err != nil {
 		return nil, err
 	}
 	return paths, nil
 }
 
-func readTree(base string, dest *[]vfs.Path) error {
+func readTree(ctx context.Context, base string, dest *[]vfs.Path) error {
 	files, err := content.ReadDir(base)
 	if err != nil {
 		if _, ok := err.(*fs.PathError); ok {
@@ -114,7 +117,7 @@ func readTree(base string, dest *[]vfs.Path) error {
 	for _, f := range files {
 		p := path.Join(base, f.Name())
 		if f.IsDir() {
-			childFiles, err := NewAssetPath(p).ReadTree()
+			childFiles, err := NewAssetPath(p).ReadTree(ctx)
 			if err != nil {
 				return err
 			}
@@ -138,10 +141,14 @@ func (p *AssetPath) String() string {
 	return p.Path()
 }
 
-func (p *AssetPath) Remove() error {
+func (p *AssetPath) Remove(ctx context.Context) error {
 	return ReadOnlyError
 }
 
-func (p *AssetPath) RemoveAllVersions() error {
-	return p.Remove()
+func (p *AssetPath) RemoveAll(ctx context.Context) error {
+	return ReadOnlyError
+}
+
+func (p *AssetPath) RemoveAllVersions(ctx context.Context) error {
+	return p.Remove(ctx)
 }

@@ -18,15 +18,18 @@ package vfsclientset
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/klog/v2"
-	"k8s.io/kops/pkg/acls"
 	"k8s.io/kops/pkg/apis/kops"
+	"k8s.io/kops/pkg/apis/kops/validation"
 	"k8s.io/kops/pkg/client/simple"
 	"k8s.io/kops/pkg/kubemanifest"
 	"k8s.io/kops/util/pkg/vfs"
+	"k8s.io/kops/util/pkg/vfs/acls"
 )
 
 type vfsAddonsClient struct {
@@ -56,6 +59,23 @@ func newAddonsVFS(c *VFSClientset, cluster *kops.Cluster) *vfsAddonsClient {
 
 // TODO: Offer partial replacement?
 func (c *vfsAddonsClient) Replace(addons kubemanifest.ObjectList) error {
+	ctx := context.TODO()
+
+	for _, addon := range addons {
+		fieldPath := field.NewPath("addons")
+		if kind := addon.Kind(); kind != "" {
+			fieldPath = fieldPath.Child("kind=" + kind)
+		}
+		if name := addon.GetName(); name != "" {
+			fieldPath = fieldPath.Child("name=" + name)
+		}
+
+		errors := validation.ValidateAdditionalObject(ctx, fieldPath, addon.ToUnstructured())
+		if len(errors) != 0 {
+			return errors.ToAggregate()
+		}
+	}
+
 	b, err := addons.ToYAML()
 	if err != nil {
 		return err
@@ -63,23 +83,23 @@ func (c *vfsAddonsClient) Replace(addons kubemanifest.ObjectList) error {
 
 	configPath := c.basePath.Join("default")
 
-	acl, err := acls.GetACL(configPath, c.cluster)
+	acl, err := acls.GetACL(ctx, configPath, c.cluster)
 	if err != nil {
 		return err
 	}
 
 	rs := bytes.NewReader(b)
-	if err := configPath.WriteFile(rs, acl); err != nil {
+	if err := configPath.WriteFile(ctx, rs, acl); err != nil {
 		return fmt.Errorf("error writing addons file %s: %v", configPath, err)
 	}
 
 	return nil
 }
 
-func (c *vfsAddonsClient) List() (kubemanifest.ObjectList, error) {
+func (c *vfsAddonsClient) List(ctx context.Context) (kubemanifest.ObjectList, error) {
 	configPath := c.basePath.Join("default")
 
-	b, err := configPath.ReadFile()
+	b, err := configPath.ReadFile(ctx)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil

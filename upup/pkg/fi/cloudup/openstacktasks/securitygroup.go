@@ -21,8 +21,8 @@ import (
 	"strconv"
 	"strings"
 
-	sg "github.com/gophercloud/gophercloud/openstack/networking/v2/extensions/security/groups"
-	sgr "github.com/gophercloud/gophercloud/openstack/networking/v2/extensions/security/rules"
+	sg "github.com/gophercloud/gophercloud/v2/openstack/networking/v2/extensions/security/groups"
+	sgr "github.com/gophercloud/gophercloud/v2/openstack/networking/v2/extensions/security/rules"
 	"k8s.io/klog/v2"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/openstack"
@@ -44,17 +44,17 @@ type SecurityGroupsByID []*SecurityGroup
 func (a SecurityGroupsByID) Len() int      { return len(a) }
 func (a SecurityGroupsByID) Swap(i, j int) { a[i], a[j] = a[j], a[i] }
 func (a SecurityGroupsByID) Less(i, j int) bool {
-	return fi.StringValue(a[i].ID) < fi.StringValue(a[j].ID)
+	return fi.ValueOf(a[i].ID) < fi.ValueOf(a[j].ID)
 }
 
-var _ fi.CompareWithID = &SecurityGroup{}
+var _ fi.CompareWithID = (*SecurityGroup)(nil)
 
 func (s *SecurityGroup) CompareWithID() *string {
 	return s.ID
 }
 
-func (s *SecurityGroup) Find(context *fi.Context) (*SecurityGroup, error) {
-	cloud := context.Cloud.(openstack.OpenstackCloud)
+func (s *SecurityGroup) Find(context *fi.CloudupContext) (*SecurityGroup, error) {
+	cloud := context.T.Cloud.(openstack.OpenstackCloud)
 	// avoid creating new group if it has removegroup flag
 	if s.RemoveGroup {
 		return s, nil
@@ -64,7 +64,7 @@ func (s *SecurityGroup) Find(context *fi.Context) (*SecurityGroup, error) {
 
 func getSecurityGroupByName(s *SecurityGroup, cloud openstack.OpenstackCloud) (*SecurityGroup, error) {
 	opt := sg.ListOpts{
-		Name: fi.StringValue(s.Name),
+		Name: fi.ValueOf(s.Name),
 	}
 	gs, err := cloud.ListSecurityGroups(opt)
 	if err != nil {
@@ -74,13 +74,13 @@ func getSecurityGroupByName(s *SecurityGroup, cloud openstack.OpenstackCloud) (*
 	if n == 0 {
 		return nil, nil
 	} else if n != 1 {
-		return nil, fmt.Errorf("found multiple SecurityGroups with name: %s", fi.StringValue(s.Name))
+		return nil, fmt.Errorf("found multiple SecurityGroups with name: %s", fi.ValueOf(s.Name))
 	}
 	g := gs[0]
 	actual := &SecurityGroup{
-		ID:          fi.String(g.ID),
-		Name:        fi.String(g.Name),
-		Description: fi.String(g.Description),
+		ID:          new(g.ID),
+		Name:        new(g.Name),
+		Description: new(g.Description),
 		Lifecycle:   s.Lifecycle,
 	}
 	actual.RemoveExtraRules = s.RemoveExtraRules
@@ -89,8 +89,8 @@ func getSecurityGroupByName(s *SecurityGroup, cloud openstack.OpenstackCloud) (*
 	return actual, nil
 }
 
-func (s *SecurityGroup) Run(context *fi.Context) error {
-	return fi.DefaultDeltaRunMethod(s, context)
+func (s *SecurityGroup) Run(context *fi.CloudupContext) error {
+	return fi.CloudupDefaultDeltaRunMethod(s, context)
 }
 
 func (_ *SecurityGroup) CheckChanges(a, e, changes *SecurityGroup) error {
@@ -111,11 +111,11 @@ func (_ *SecurityGroup) CheckChanges(a, e, changes *SecurityGroup) error {
 
 func (_ *SecurityGroup) RenderOpenstack(t *openstack.OpenstackAPITarget, a, e, changes *SecurityGroup) error {
 	if a == nil {
-		klog.V(2).Infof("Creating SecurityGroup with Name:%q", fi.StringValue(e.Name))
+		klog.V(2).Infof("Creating SecurityGroup with Name:%q", fi.ValueOf(e.Name))
 
 		opt := sg.CreateOpts{
-			Name:        fi.StringValue(e.Name),
-			Description: fi.StringValue(e.Description),
+			Name:        fi.ValueOf(e.Name),
+			Description: fi.ValueOf(e.Description),
 		}
 
 		g, err := t.Cloud.CreateSecurityGroup(opt)
@@ -123,7 +123,7 @@ func (_ *SecurityGroup) RenderOpenstack(t *openstack.OpenstackAPITarget, a, e, c
 			return fmt.Errorf("error creating SecurityGroup: %v", err)
 		}
 
-		e.ID = fi.String(g.ID)
+		e.ID = new(g.ID)
 		return nil
 	}
 
@@ -131,14 +131,14 @@ func (_ *SecurityGroup) RenderOpenstack(t *openstack.OpenstackAPITarget, a, e, c
 	return nil
 }
 
-func (s *SecurityGroup) FindDeletions(c *fi.Context) ([]fi.Deletion, error) {
-	var removals []fi.Deletion
+func (s *SecurityGroup) FindDeletions(c *fi.CloudupContext) ([]fi.CloudupDeletion, error) {
+	var removals []fi.CloudupDeletion
 
 	if len(s.RemoveExtraRules) == 0 && !s.RemoveGroup {
 		return nil, nil
 	}
 
-	cloud := c.Cloud.(openstack.OpenstackCloud)
+	cloud := c.T.Cloud.(openstack.OpenstackCloud)
 	if s.RemoveGroup {
 		sg, err := getSecurityGroupByName(s, cloud)
 		if err != nil {
@@ -169,7 +169,7 @@ func (s *SecurityGroup) FindDeletions(c *fi.Context) ([]fi.Deletion, error) {
 	}
 
 	sgRules, err := cloud.ListSecurityGroupRules(sgr.ListOpts{
-		SecGroupID: fi.StringValue(sg.ID),
+		SecGroupID: fi.ValueOf(sg.ID),
 	})
 	if err != nil {
 		return nil, err
@@ -185,7 +185,7 @@ func (s *SecurityGroup) FindDeletions(c *fi.Context) ([]fi.Deletion, error) {
 			}
 		}
 		if !match {
-			klog.V(4).Infof("Ignoring security group permission %q (did not match removal rules)", permission)
+			klog.V(4).Infof("Ignoring security group permission %v (did not match removal rules)", permission)
 			continue
 		}
 
@@ -211,11 +211,11 @@ func (s *SecurityGroup) FindDeletions(c *fi.Context) ([]fi.Deletion, error) {
 }
 
 func matches(t *SecurityGroupRule, perm sgr.SecGroupRule) bool {
-	if fi.IntValue(t.PortRangeMin) != perm.PortRangeMin {
+	if fi.ValueOf(t.PortRangeMin) != perm.PortRangeMin {
 		return false
 	}
 
-	if fi.IntValue(t.PortRangeMax) != perm.PortRangeMax {
+	if fi.ValueOf(t.PortRangeMax) != perm.PortRangeMax {
 		return false
 	}
 
@@ -223,7 +223,7 @@ func matches(t *SecurityGroupRule, perm sgr.SecGroupRule) bool {
 		return false
 	}
 
-	if perm.RemoteIPPrefix != fi.StringValue(t.RemoteIPPrefix) {
+	if perm.RemoteIPPrefix != fi.ValueOf(t.RemoteIPPrefix) {
 		return false
 	}
 
@@ -234,16 +234,16 @@ type deleteSecurityGroup struct {
 	securityGroup *SecurityGroup
 }
 
-var _ fi.Deletion = &deleteSecurityGroup{}
+var _ fi.CloudupDeletion = (*deleteSecurityGroup)(nil)
 
-func (d *deleteSecurityGroup) Delete(t fi.Target) error {
+func (d *deleteSecurityGroup) Delete(t fi.CloudupTarget) error {
 	klog.V(2).Infof("deleting security group: %v", fi.DebugAsJsonString(d.securityGroup.Name))
 
 	os, ok := t.(*openstack.OpenstackAPITarget)
 	if !ok {
 		return fmt.Errorf("unexpected target type for deletion: %T", t)
 	}
-	err := os.Cloud.DeleteSecurityGroup(fi.StringValue(d.securityGroup.ID))
+	err := os.Cloud.DeleteSecurityGroup(fi.ValueOf(d.securityGroup.ID))
 	if err != nil {
 		return fmt.Errorf("error revoking SecurityGroup: %v", err)
 	}
@@ -255,8 +255,12 @@ func (d *deleteSecurityGroup) TaskName() string {
 }
 
 func (d *deleteSecurityGroup) Item() string {
-	s := fmt.Sprintf("securitygroup=%s", fi.StringValue(d.securityGroup.Name))
+	s := fmt.Sprintf("securitygroup=%s", fi.ValueOf(d.securityGroup.Name))
 	return s
+}
+
+func (d *deleteSecurityGroup) DeferDeletion() bool {
+	return false // TODO: Should we defer deletion?
 }
 
 type deleteSecurityGroupRule struct {
@@ -264,9 +268,9 @@ type deleteSecurityGroupRule struct {
 	securityGroup *SecurityGroup
 }
 
-var _ fi.Deletion = &deleteSecurityGroupRule{}
+var _ fi.CloudupDeletion = (*deleteSecurityGroupRule)(nil)
 
-func (d *deleteSecurityGroupRule) Delete(t fi.Target) error {
+func (d *deleteSecurityGroupRule) Delete(t fi.CloudupTarget) error {
 	klog.V(2).Infof("deleting security group permission: %v", fi.DebugAsJsonString(d.rule))
 
 	os, ok := t.(*openstack.OpenstackAPITarget)
@@ -294,8 +298,12 @@ func (d *deleteSecurityGroupRule) Item() string {
 	}
 	s += " protocol=tcp"
 	s += fmt.Sprintf(" ip=%s", d.rule.RemoteIPPrefix)
-	s += fmt.Sprintf(" securitygroup=%s", fi.StringValue(d.securityGroup.Name))
+	s += fmt.Sprintf(" securitygroup=%s", fi.ValueOf(d.securityGroup.Name))
 	return s
+}
+
+func (d *deleteSecurityGroupRule) DeferDeletion() bool {
+	return false // TODO: Should we defer deletion?
 }
 
 // RemovalRule is a rule that filters the permissions we should remove
@@ -332,7 +340,7 @@ type PortRemovalRule struct {
 	Port int
 }
 
-var _ RemovalRule = &PortRemovalRule{}
+var _ RemovalRule = (*PortRemovalRule)(nil)
 
 func (r *PortRemovalRule) String() string {
 	return fi.DebugAsJsonString(r)

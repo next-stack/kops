@@ -17,12 +17,16 @@ limitations under the License.
 package components
 
 import (
-	"fmt"
 	"strings"
+	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
+
 	"k8s.io/kops/pkg/apis/kops"
+	"k8s.io/kops/pkg/apis/kops/model"
 	"k8s.io/kops/upup/pkg/fi"
+	"k8s.io/kops/upup/pkg/fi/cloudup/gce/gcenames"
 	"k8s.io/kops/upup/pkg/fi/loader"
 )
 
@@ -31,67 +35,72 @@ type KubeletOptionsBuilder struct {
 	*OptionsContext
 }
 
-var _ loader.OptionsBuilder = &KubeletOptionsBuilder{}
+var _ loader.ClusterOptionsBuilder = &KubeletOptionsBuilder{}
 
 // BuildOptions is responsible for filling the defaults for the kubelet
-func (b *KubeletOptionsBuilder) BuildOptions(o interface{}) error {
-	clusterSpec := o.(*kops.ClusterSpec)
-
-	if clusterSpec.Kubelet == nil {
-		clusterSpec.Kubelet = &kops.KubeletConfigSpec{}
+func (b *KubeletOptionsBuilder) BuildOptions(cluster *kops.Cluster) error {
+	if cluster.Spec.Kubelet == nil {
+		cluster.Spec.Kubelet = &kops.KubeletConfigSpec{}
 	}
-	if clusterSpec.MasterKubelet == nil {
-		clusterSpec.MasterKubelet = &kops.KubeletConfigSpec{}
+	if cluster.Spec.ControlPlaneKubelet == nil {
+		cluster.Spec.ControlPlaneKubelet = &kops.KubeletConfigSpec{}
 	}
 
-	if clusterSpec.KubeAPIServer != nil && clusterSpec.KubeAPIServer.EnableBootstrapAuthToken != nil {
-		if *clusterSpec.KubeAPIServer.EnableBootstrapAuthToken {
-			if clusterSpec.Kubelet.BootstrapKubeconfig == "" {
-				clusterSpec.Kubelet.BootstrapKubeconfig = "/var/lib/kubelet/bootstrap-kubeconfig"
-			}
-		}
+	if err := b.configureKubelet(cluster, cluster.Spec.Kubelet, b.NodeKubernetesVersion()); err != nil {
+		return err
+	}
+	if err := b.configureKubelet(cluster, cluster.Spec.ControlPlaneKubelet, b.ControlPlaneKubernetesVersion()); err != nil {
+		return err
 	}
 
+	// We _do_ allow debugging handlers, so we can do logs
+	// This does allow more access than we would like though
+	cluster.Spec.ControlPlaneKubelet.EnableDebuggingHandlers = new(true)
+
+	// IsolateControlPlane enables the legacy behaviour, where master pods on a separate network
+	// In newer versions of kubernetes, most of that functionality has been removed though
+	if fi.ValueOf(cluster.Spec.Networking.IsolateControlPlane) {
+		cluster.Spec.ControlPlaneKubelet.EnableDebuggingHandlers = new(false)
+		cluster.Spec.ControlPlaneKubelet.HairpinMode = "none"
+	}
+
+	return nil
+}
+
+func (b *KubeletOptionsBuilder) configureKubelet(cluster *kops.Cluster, kubelet *kops.KubeletConfigSpec, kubernetesVersion model.KubernetesVersion) error {
 	// Standard options
-	clusterSpec.Kubelet.EnableDebuggingHandlers = fi.Bool(true)
-	clusterSpec.Kubelet.PodManifestPath = "/etc/kubernetes/manifests"
-	clusterSpec.Kubelet.LogLevel = fi.Int32(2)
-	clusterSpec.Kubelet.ClusterDomain = clusterSpec.ClusterDNSDomain
-	clusterSpec.Kubelet.NonMasqueradeCIDR = clusterSpec.NonMasqueradeCIDR
+	kubelet.EnableDebuggingHandlers = new(true)
+	kubelet.PodManifestPath = "/etc/kubernetes/manifests"
+	kubelet.LogLevel = new(int32(2))
+	kubelet.ClusterDomain = cluster.Spec.ClusterDNSDomain
 
 	// AllowPrivileged is deprecated and removed in v1.14.
 	// See https://github.com/kubernetes/kubernetes/pull/71835
-	if clusterSpec.Kubelet.AllowPrivileged != nil {
+	if kubelet.AllowPrivileged != nil {
 		// If it is explicitly set to false, return an error, because this
 		// behavior is no longer supported in v1.14 (the default was true, prior).
-		if !*clusterSpec.Kubelet.AllowPrivileged {
+		if !*kubelet.AllowPrivileged {
 			klog.Warningf("Kubelet's --allow-privileged flag is no longer supported in v1.14.")
 		}
 		// Explicitly set it to nil, so it won't be passed on the command line.
-		clusterSpec.Kubelet.AllowPrivileged = nil
+		kubelet.AllowPrivileged = nil
 	}
 
-	if clusterSpec.Kubelet.ClusterDNS == "" {
-		if clusterSpec.KubeDNS != nil && clusterSpec.KubeDNS.NodeLocalDNS != nil && fi.BoolValue(clusterSpec.KubeDNS.NodeLocalDNS.Enabled) {
-			clusterSpec.Kubelet.ClusterDNS = clusterSpec.KubeDNS.NodeLocalDNS.LocalIP
+	if kubelet.ClusterDNS == "" {
+		if cluster.Spec.KubeDNS != nil && cluster.Spec.KubeDNS.NodeLocalDNS != nil && fi.ValueOf(cluster.Spec.KubeDNS.NodeLocalDNS.Enabled) {
+			kubelet.ClusterDNS = cluster.Spec.KubeDNS.NodeLocalDNS.LocalIP
 		} else {
-			ip, err := WellKnownServiceIP(clusterSpec, 10)
+			ip, err := WellKnownServiceIP(&cluster.Spec.Networking, 10)
 			if err != nil {
 				return err
 			}
-			clusterSpec.Kubelet.ClusterDNS = ip.String()
+			kubelet.ClusterDNS = ip.String()
 		}
 	}
 
-	clusterSpec.MasterKubelet.RegisterSchedulable = fi.Bool(false)
-	// Replace the CIDR with a CIDR allocated by KCM (the default, but included for clarity)
-	// We _do_ allow debugging handlers, so we can do logs
-	// This does allow more access than we would like though
-	clusterSpec.MasterKubelet.EnableDebuggingHandlers = fi.Bool(true)
-
 	{
 		// For pod eviction in low memory or empty disk situations
-		if clusterSpec.Kubelet.EvictionHard == nil {
+		if kubelet.EvictionHard == nil {
 			evictionHard := []string{
 				// TODO: Some people recommend 250Mi, but this would hurt small machines
 				"memory.available<100Mi",
@@ -103,130 +112,61 @@ func (b *KubeletOptionsBuilder) BuildOptions(o interface{}) error {
 				"imagefs.available<10%",
 				"imagefs.inodesFree<5%",
 			}
-			clusterSpec.Kubelet.EvictionHard = fi.String(strings.Join(evictionHard, ","))
+			kubelet.EvictionHard = new(strings.Join(evictionHard, ","))
 		}
 	}
 
 	// use kubeconfig instead of api-servers
 	const kubeconfigPath = "/var/lib/kubelet/kubeconfig"
-	clusterSpec.Kubelet.KubeconfigPath = kubeconfigPath
-	clusterSpec.MasterKubelet.KubeconfigPath = kubeconfigPath
+	kubelet.KubeconfigPath = kubeconfigPath
 
-	// IsolateMasters enables the legacy behaviour, where master pods on a separate network
-	// In newer versions of kubernetes, most of that functionality has been removed though
-	if fi.BoolValue(clusterSpec.IsolateMasters) {
-		clusterSpec.MasterKubelet.EnableDebuggingHandlers = fi.Bool(false)
-		clusterSpec.MasterKubelet.HairpinMode = "none"
-	}
+	kubelet.CgroupRoot = "/"
 
-	cloudProvider := kops.CloudProviderID(clusterSpec.CloudProvider)
-
-	clusterSpec.Kubelet.CgroupRoot = "/"
-
+	cloudProvider := cluster.GetCloudProvider()
 	klog.V(1).Infof("Cloud Provider: %s", cloudProvider)
-	if cloudProvider == kops.CloudProviderAWS {
-		clusterSpec.Kubelet.CloudProvider = "aws"
-
-		// Use the hostname from the AWS metadata service
-		// if hostnameOverride is not set.
-		if clusterSpec.Kubelet.HostnameOverride == "" {
-			clusterSpec.Kubelet.HostnameOverride = "@aws"
-		}
-	}
-
-	if cloudProvider == kops.CloudProviderDO {
-		clusterSpec.Kubelet.CloudProvider = "external"
-		clusterSpec.Kubelet.HostnameOverride = "@digitalocean"
+	if cloudProvider == kops.CloudProviderMetal {
+		// metal does not (yet) have a cloud-controller-manager, so we don't need to set the cloud-provider flag
+		// If we do set it to external, kubelet will taint the node with the node.kops.k8s.io/uninitialized taint
+		// and there is no cloud-controller-manager to remove it
+		kubelet.CloudProvider = ""
+	} else {
+		kubelet.CloudProvider = "external"
 	}
 
 	if cloudProvider == kops.CloudProviderGCE {
-		clusterSpec.Kubelet.CloudProvider = "gce"
-		clusterSpec.Kubelet.HairpinMode = "promiscuous-bridge"
+		kubelet.HairpinMode = "promiscuous-bridge"
 
-		if clusterSpec.CloudConfig == nil {
-			clusterSpec.CloudConfig = &kops.CloudConfiguration{}
+		if cluster.Spec.CloudConfig == nil {
+			cluster.Spec.CloudConfig = &kops.CloudConfiguration{}
 		}
-		clusterSpec.CloudConfig.Multizone = fi.Bool(true)
-		clusterSpec.CloudConfig.NodeTags = fi.String(GCETagForRole(b.ClusterName, kops.InstanceGroupRoleNode))
-
-		// Use the hostname from the GCE metadata service
-		// if hostnameOverride is not set.
-		if clusterSpec.Kubelet.HostnameOverride == "" {
-			clusterSpec.Kubelet.HostnameOverride = "@gce"
-		}
+		cluster.Spec.CloudProvider.GCE.Multizone = new(true)
+		cluster.Spec.CloudProvider.GCE.NodeTags = new(gcenames.TagForRole(b.ClusterName, kops.InstanceGroupRoleNode))
 	}
 
-	if cloudProvider == kops.CloudProviderOpenstack {
-		clusterSpec.Kubelet.CloudProvider = "openstack"
+	// Set systemd as the default cgroup driver for kubelet, unless the user opted in to cgroupfs.
+	// nodeup configures containerd with the same driver (SystemdCgroup in the runc options), so that
+	// a kubelet that detects the driver from the runtime (KubeletCgroupDriverFromCRI) gets the same answer
+	// as the cgroupDriver setting in its own configuration.
+	if kubelet.CgroupDriver == "" {
+		kubelet.CgroupDriver = "systemd"
 	}
 
-	if cloudProvider == kops.CloudProviderALI {
-		clusterSpec.Kubelet.CloudProvider = "alicloud"
-		clusterSpec.Kubelet.HostnameOverride = "@alicloud"
+	if kubelet.ProtectKernelDefaults == nil {
+		kubelet.ProtectKernelDefaults = new(true)
 	}
 
-	if cloudProvider == kops.CloudProviderAzure {
-		clusterSpec.Kubelet.CloudProvider = "azure"
-		// We don't set hostname override in Azure since Azure hostnames are
-		// not always valid characters that can be used for pod names.
-		// More specifically, VMs created from VM Scale Sets contain '_' in their
-		// names, which is not a valid character in pod names. K8s API server will fail
-		// to start as its pod name contains a hostname as suffix (kube-apiserver-<hostname>).
+	// We do not enable graceful shutdown when using amazonaws due to leaking ENIs.
+	// Graceful shutdown is also not available by default on k8s < 1.21
+	if kubelet.ShutdownGracePeriod == nil && cluster.Spec.Networking.AmazonVPC == nil {
+		kubelet.ShutdownGracePeriod = &metav1.Duration{Duration: time.Duration(30 * time.Second)}
+		kubelet.ShutdownGracePeriodCriticalPods = &metav1.Duration{Duration: time.Duration(10 * time.Second)}
+	} else if cluster.Spec.Networking.AmazonVPC != nil {
+		kubelet.ShutdownGracePeriod = &metav1.Duration{Duration: 0}
+		kubelet.ShutdownGracePeriodCriticalPods = &metav1.Duration{Duration: 0}
 	}
 
-	if clusterSpec.ExternalCloudControllerManager != nil {
-		clusterSpec.Kubelet.CloudProvider = "external"
-	}
-
-	if clusterSpec.ContainerRuntime == "docker" || clusterSpec.ContainerRuntime == "" {
-		networking := clusterSpec.Networking
-		if networking == nil {
-			return fmt.Errorf("no networking mode set")
-
-		}
-		if UsesKubenet(networking) {
-			clusterSpec.Kubelet.NetworkPluginName = "kubenet"
-
-			// AWS MTU is 9001
-			clusterSpec.Kubelet.NetworkPluginMTU = fi.Int32(9001)
-		}
-
-		// Specify our pause image
-		image := "k8s.gcr.io/pause:3.5"
-		var err error
-		if image, err = b.AssetBuilder.RemapImage(image); err != nil {
-			return err
-		}
-		clusterSpec.Kubelet.PodInfraContainerImage = image
-	}
-
-	if clusterSpec.Kubelet.FeatureGates == nil {
-		clusterSpec.Kubelet.FeatureGates = make(map[string]string)
-	}
-
-	if clusterSpec.CloudConfig != nil && clusterSpec.CloudConfig.AWSEBSCSIDriver != nil && fi.BoolValue(clusterSpec.CloudConfig.AWSEBSCSIDriver.Enabled) {
-		if _, found := clusterSpec.Kubelet.FeatureGates["CSIMigrationAWS"]; !found {
-			clusterSpec.Kubelet.FeatureGates["CSIMigrationAWS"] = "true"
-		}
-
-		if b.IsKubernetesLT("1.21.0") {
-			if _, found := clusterSpec.Kubelet.FeatureGates["CSIMigrationAWSComplete"]; !found {
-				clusterSpec.Kubelet.FeatureGates["CSIMigrationAWSComplete"] = "true"
-			}
-		} else {
-			if _, found := clusterSpec.Kubelet.FeatureGates["InTreePluginAWSUnregister"]; !found {
-				clusterSpec.Kubelet.FeatureGates["InTreePluginAWSUnregister"] = "true"
-			}
-		}
-	}
-
-	// Set systemd as the default cgroup driver for kubelet from k8s 1.20
-	if b.IsKubernetesGTE("1.20") && clusterSpec.Kubelet.CgroupDriver == "" {
-		clusterSpec.Kubelet.CgroupDriver = "systemd"
-	}
-
-	if b.IsKubernetesGTE("1.22") && clusterSpec.Kubelet.ProtectKernelDefaults == nil {
-		clusterSpec.Kubelet.ProtectKernelDefaults = fi.Bool(true)
+	if kubernetesVersion.IsLT("1.34") {
+		kubelet.RegisterSchedulable = new(true)
 	}
 
 	return nil

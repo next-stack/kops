@@ -27,11 +27,11 @@ type CreatesDir interface {
 	Dir() string
 }
 
-var _ CreatesDir = &File{}
+var _ CreatesDir = (*File)(nil)
 
 // findCreatesDirParents finds the tasks which create parent directories for the given task
-func findCreatesDirParents(p string, tasks map[string]fi.Task) []fi.Task {
-	var deps []fi.Task
+func findCreatesDirParents(p string, tasks map[string]fi.NodeupTask) []fi.NodeupTask {
+	var deps []fi.NodeupTask
 	for _, v := range tasks {
 		if createsDirectory, ok := v.(CreatesDir); ok {
 			dirPath := createsDirectory.Dir()
@@ -54,12 +54,12 @@ func findCreatesDirParents(p string, tasks map[string]fi.Task) []fi.Task {
 }
 
 // findCreatesDirMatching finds the tasks which create the specified directory (matching, non-recursive)
-func findCreatesDirMatching(p string, tasks map[string]fi.Task) []fi.Task {
+func findCreatesDirMatching(p string, tasks map[string]fi.NodeupTask) []fi.NodeupTask {
 	if !strings.HasSuffix(p, "/") {
 		p += "/"
 	}
 
-	var deps []fi.Task
+	var deps []fi.NodeupTask
 	for _, v := range tasks {
 		if createsDirectory, ok := v.(CreatesDir); ok {
 			dirPath := createsDirectory.Dir()

@@ -19,7 +19,6 @@ package model
 import (
 	"strings"
 
-	"k8s.io/kops/pkg/apis/kops/model"
 	"k8s.io/kops/pkg/systemd"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/nodeup/nodetasks"
@@ -33,11 +32,10 @@ type LogrotateBuilder struct {
 	*NodeupModelContext
 }
 
-var _ fi.ModelBuilder = &LogrotateBuilder{}
+var _ fi.NodeupModelBuilder = &LogrotateBuilder{}
 
 // Build is responsible for configuring logrotate
-func (b *LogrotateBuilder) Build(c *fi.ModelBuilderContext) error {
-
+func (b *LogrotateBuilder) Build(c *fi.NodeupModelBuilderContext) error {
 	switch b.Distribution {
 	case distributions.DistributionContainerOS:
 		klog.Infof("Detected ContainerOS; won't install logrotate")
@@ -57,7 +55,8 @@ func (b *LogrotateBuilder) Build(c *fi.ModelBuilderContext) error {
 	b.addLogRotate(c, "kubelet", "/var/log/kubelet.log", logRotateOptions{})
 	b.addLogRotate(c, "etcd", "/var/log/etcd.log", logRotateOptions{})
 	b.addLogRotate(c, "etcd-events", "/var/log/etcd-events.log", logRotateOptions{})
-	if model.UseCiliumEtcd(b.Cluster) {
+	b.addLogRotate(c, "etcd-leases", "/var/log/etcd-leases.log", logRotateOptions{})
+	if b.NodeupConfig.UseCiliumEtcd {
 		b.addLogRotate(c, "etcd-cilium", "/var/log/etcd-cilium.log", logRotateOptions{})
 	}
 
@@ -85,7 +84,7 @@ func (b *LogrotateBuilder) Build(c *fi.ModelBuilderContext) error {
 }
 
 // addLogrotateService creates a logrotate systemd task to act as target for the timer, if one is needed
-func (b *LogrotateBuilder) addLogrotateService(c *fi.ModelBuilderContext) error {
+func (b *LogrotateBuilder) addLogrotateService(c *fi.NodeupModelBuilderContext) error {
 	switch b.Distribution {
 	case distributions.DistributionFlatcar, distributions.DistributionContainerOS:
 		// logrotate service already exists
@@ -111,7 +110,7 @@ type logRotateOptions struct {
 	DateFormat string
 }
 
-func (b *LogrotateBuilder) addLogRotate(c *fi.ModelBuilderContext, name, path string, options logRotateOptions) {
+func (b *LogrotateBuilder) addLogRotate(c *fi.NodeupModelBuilderContext, name, path string, options logRotateOptions) {
 	if options.MaxSize == "" {
 		options.MaxSize = "100M"
 	}

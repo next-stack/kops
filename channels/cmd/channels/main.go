@@ -17,19 +17,35 @@ limitations under the License.
 package main
 
 import (
+	"context"
+	"flag"
 	"fmt"
 	"os"
 
 	"k8s.io/klog/v2"
+
 	"k8s.io/kops/channels/pkg/cmd"
 )
 
 func main() {
-	klog.InitFlags(nil)
-
-	f := &cmd.DefaultFactory{}
-	if err := cmd.Execute(f, os.Stdout); err != nil {
+	if err := run(context.Background()); err != nil {
 		fmt.Fprintf(os.Stderr, "\n%v\n", err)
 		os.Exit(1)
 	}
+}
+
+func run(ctx context.Context) error {
+	klog.InitFlags(nil)
+	// Opt into the new klog behavior so that -stderrthreshold is honored even
+	// when -logtostderr=true (the default).
+	// Ref: kubernetes/klog#212, kubernetes/klog#432
+	flag.Set("legacy_stderr_threshold_behavior", "false") //nolint:errcheck
+	flag.Set("stderrthreshold", "INFO")                   //nolint:errcheck
+
+	f := cmd.NewChannelsFactory()
+
+	if err := cmd.Execute(ctx, f, os.Stdout); err != nil {
+		return err
+	}
+	return nil
 }

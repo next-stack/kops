@@ -27,7 +27,7 @@ import (
 
 // Volume
 
-var _ fi.HasLifecycle = &Volume{}
+var _ fi.HasLifecycle = (*Volume)(nil)
 
 // GetLifecycle returns the Lifecycle of the object, implementing fi.HasLifecycle
 func (o *Volume) GetLifecycle() fi.Lifecycle {
@@ -39,7 +39,7 @@ func (o *Volume) SetLifecycle(lifecycle fi.Lifecycle) {
 	o.Lifecycle = lifecycle
 }
 
-var _ fi.HasName = &Volume{}
+var _ fi.HasName = (*Volume)(nil)
 
 // GetName returns the Name of the object, implementing fi.HasName
 func (o *Volume) GetName() *string {
@@ -48,5 +48,5 @@ func (o *Volume) GetName() *string {
 
 // String is the stringer function for the task, producing readable output using fi.TaskAsString
 func (o *Volume) String() string {
-	return fi.TaskAsString(o)
+	return fi.CloudupTaskAsString(o)
 }

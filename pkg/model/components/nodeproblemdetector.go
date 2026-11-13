@@ -19,7 +19,6 @@ package components
 import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/kops/pkg/apis/kops"
-	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/loader"
 )
 
@@ -28,41 +27,36 @@ type NodeProblemDetectorOptionsBuilder struct {
 	*OptionsContext
 }
 
-var _ loader.OptionsBuilder = &NodeProblemDetectorOptionsBuilder{}
+var _ loader.ClusterOptionsBuilder = &NodeProblemDetectorOptionsBuilder{}
 
-func (b *NodeProblemDetectorOptionsBuilder) BuildOptions(o interface{}) error {
-	clusterSpec := o.(*kops.ClusterSpec)
+func (b *NodeProblemDetectorOptionsBuilder) BuildOptions(o *kops.Cluster) error {
+	clusterSpec := &o.Spec
 	if clusterSpec.NodeProblemDetector == nil {
 		return nil
 	}
 	npd := clusterSpec.NodeProblemDetector
 
 	if npd.Enabled == nil {
-		npd.Enabled = fi.Bool(false)
+		npd.Enabled = new(false)
 	}
 
 	if npd.CPURequest == nil {
-		defaultCPURequest := resource.MustParse("10m")
+		defaultCPURequest := resource.MustParse("20m")
 		npd.CPURequest = &defaultCPURequest
 	}
 
 	if npd.MemoryRequest == nil {
-		defaultMemoryRequest := resource.MustParse("80Mi")
+		defaultMemoryRequest := resource.MustParse("100Mi")
 		npd.MemoryRequest = &defaultMemoryRequest
 	}
 
-	if npd.CPULimit == nil {
-		defaultCPULimit := resource.MustParse("10m")
-		npd.CPULimit = &defaultCPULimit
-	}
-
 	if npd.MemoryLimit == nil {
-		defaultMemoryLimit := resource.MustParse("80Mi")
+		defaultMemoryLimit := resource.MustParse("100Mi")
 		npd.MemoryLimit = &defaultMemoryLimit
 	}
 
 	if npd.Image == nil {
-		npd.Image = fi.String("k8s.gcr.io/node-problem-detector/node-problem-detector:v0.8.8")
+		npd.Image = new("registry.k8s.io/node-problem-detector/node-problem-detector:v0.8.18")
 	}
 
 	return nil

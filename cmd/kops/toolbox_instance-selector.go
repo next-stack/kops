@@ -22,11 +22,11 @@ import (
 	"io"
 	"strings"
 
-	"github.com/aws/amazon-ec2-instance-selector/v2/pkg/cli"
-	"github.com/aws/amazon-ec2-instance-selector/v2/pkg/selector"
+	"github.com/aws/amazon-ec2-instance-selector/v3/pkg/cli"
+	"github.com/aws/amazon-ec2-instance-selector/v3/pkg/selector"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/spf13/cobra"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/kops/cmd/kops/util"
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/client/simple"
 	"k8s.io/kops/pkg/commands/commandutils"
@@ -70,8 +70,6 @@ const (
 	nodeVolumeSize       = "node-volume-size"
 	nodeSecurityGroups   = "node-security-groups"
 	clusterAutoscaler    = "cluster-autoscaler"
-	usageClassSpot       = "spot"
-	usageClassOndemand   = "on-demand"
 	dryRun               = "dry-run"
 	output               = "output"
 	cpuArchitectureAMD64 = "amd64"
@@ -111,7 +109,7 @@ var (
 )
 
 // NewCmdToolboxInstanceSelector defines the cobra command for the instance-selector tool
-func NewCmdToolboxInstanceSelector(f *util.Factory, out io.Writer) *cobra.Command {
+func NewCmdToolboxInstanceSelector(f commandutils.Factory, out io.Writer) *cobra.Command {
 	options := &InstanceSelectorOptions{}
 
 	commandline := cli.New(
@@ -153,14 +151,14 @@ func NewCmdToolboxInstanceSelector(f *util.Factory, out io.Writer) *cobra.Comman
 		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
 	commandline.Command.RunE = func(cmd *cobra.Command, args []string) error {
-		return RunToolboxInstanceSelector(context.TODO(), f, out, &commandline, options)
+		return RunToolboxInstanceSelector(cmd.Context(), f, out, &commandline, options)
 	}
 
 	cpuArchs := []string{cpuArchitectureAMD64, cpuArchitectureARM64}
 	cpuArchDefault := cpuArchitectureAMD64
 	placementGroupStrategies := []string{"cluster", "partition", "spread"}
-	usageClasses := []string{usageClassSpot, usageClassOndemand}
-	usageClassDefault := usageClassOndemand
+	usageClasses := []string{string(ec2types.UsageClassTypeSpot), string(ec2types.UsageClassTypeOnDemand)}
+	usageClassDefault := ec2types.UsageClassTypeOnDemand
 	outputDefault := "yaml"
 	dryRunDefault := false
 	clusterAutoscalerDefault := true
@@ -206,7 +204,8 @@ func NewCmdToolboxInstanceSelector(f *util.Factory, out io.Writer) *cobra.Comman
 	commandline.Command.RegisterFlagCompletionFunc(placementGroupStrategy, func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		return placementGroupStrategies, cobra.ShellCompDirectiveNoFileComp
 	})
-	commandline.StringOptionsFlag(usageClass, nil, &usageClassDefault, fmt.Sprintf("Usage class: [%s]", strings.Join(usageClasses, ", ")), usageClasses)
+	ucDefault := string(usageClassDefault)
+	commandline.StringOptionsFlag(usageClass, nil, &ucDefault, fmt.Sprintf("Usage class: [%s]", strings.Join(usageClasses, ", ")), usageClasses)
 	commandline.Command.RegisterFlagCompletionFunc(usageClass, func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 		return usageClasses, cobra.ShellCompDirectiveNoFileComp
 	})
@@ -233,29 +232,28 @@ func NewCmdToolboxInstanceSelector(f *util.Factory, out io.Writer) *cobra.Comman
 }
 
 // RunToolboxInstanceSelector executes the instance-selector tool to create instance groups with declarative resource specifications
-func RunToolboxInstanceSelector(ctx context.Context, f *util.Factory, out io.Writer, commandline *cli.CommandLineInterface, options *InstanceSelectorOptions) error {
-
+func RunToolboxInstanceSelector(ctx context.Context, f commandutils.Factory, out io.Writer, commandline *cli.CommandLineInterface, options *InstanceSelectorOptions) error {
 	clientset, cluster, channel, err := retrieveClusterRefs(ctx, f, options.ClusterName)
 	if err != nil {
 		return err
 	}
 
-	if kops.CloudProviderID(cluster.Spec.CloudProvider) != kops.CloudProviderAWS {
+	if cluster.GetCloudProvider() != kops.CloudProviderAWS {
 		return fmt.Errorf("cannot select instance types from non-aws cluster")
 	}
 
-	firstClusterSubnet := strings.ReplaceAll(cluster.Spec.Subnets[0].Name, "utility-", "")
+	firstClusterSubnet := strings.ReplaceAll(cluster.Spec.Networking.Subnets[0].Name, "utility-", "")
 	region := firstClusterSubnet[:len(firstClusterSubnet)-1]
 
 	igSubnets := []string{}
-	for _, clusterSubnet := range cluster.Spec.Subnets {
+	for _, clusterSubnet := range cluster.Spec.Networking.Subnets {
 		igSubnets = append(igSubnets, clusterSubnet.Name)
 	}
 
 	if commandline.Flags[subnets] != nil {
 		userSubnets := *commandline.StringSliceMe(commandline.Flags[subnets])
 		dryRun := *commandline.BoolMe(commandline.Flags[dryRun])
-		err := validateUserSubnets(userSubnets, cluster.Spec.Subnets)
+		err := validateUserSubnets(userSubnets, cluster.Spec.Networking.Subnets)
 		if err != nil && !dryRun {
 			return err
 		}
@@ -273,10 +271,10 @@ func RunToolboxInstanceSelector(ctx context.Context, f *util.Factory, out io.Wri
 		return fmt.Errorf("error initializing AWS client: %v", err)
 	}
 
-	instanceSelector := selector.Selector{
-		EC2: cloud.EC2(),
+	instanceSelector, err := selector.New(ctx, cloud.Config())
+	if err != nil {
+		return fmt.Errorf("error initializing instance selector: %v", err)
 	}
-
 	igCount := options.InstanceGroupCount
 	filters := getFilters(commandline, region, zones)
 	mutatedFilters := filters
@@ -294,7 +292,7 @@ func RunToolboxInstanceSelector(ctx context.Context, f *util.Factory, out io.Wri
 		if igCount != 1 {
 			igNameForRun = fmt.Sprintf("%s%d", options.InstanceGroupName, i+1)
 		}
-		selectedInstanceTypes, err := instanceSelector.Filter(mutatedFilters)
+		selectedInstanceTypes, err := instanceSelector.Filter(ctx, mutatedFilters)
 		if err != nil {
 			return fmt.Errorf("error finding matching instance types: %w", err)
 		}
@@ -333,7 +331,7 @@ func RunToolboxInstanceSelector(ctx context.Context, f *util.Factory, out io.Wri
 					return fmt.Errorf("error writing cluster yaml to stdout: %v", err)
 				}
 			case OutputJSON:
-				if err := fullOutputJSON(out, ig); err != nil {
+				if err := fullOutputJSON(out, true, ig); err != nil {
 					return fmt.Errorf("error writing cluster json to stdout: %v", err)
 				}
 			default:
@@ -373,8 +371,8 @@ func processAndValidateFlags(commandline *cli.CommandLineInterface) error {
 	return nil
 }
 
-func retrieveClusterRefs(ctx context.Context, f *util.Factory, clusterName string) (simple.Clientset, *kops.Cluster, *kops.Channel, error) {
-	clientset, err := f.Clientset()
+func retrieveClusterRefs(ctx context.Context, f commandutils.Factory, clusterName string) (simple.Clientset, *kops.Cluster, *kops.Channel, error) {
+	clientset, err := f.KopsClient()
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -384,12 +382,12 @@ func retrieveClusterRefs(ctx context.Context, f *util.Factory, clusterName strin
 		return nil, nil, nil, err
 	}
 
-	channel, err := cloudup.ChannelForCluster(cluster)
+	channel, err := cloudup.ChannelForCluster(clientset.VFSContext(), cluster)
 	if err != nil {
 		return nil, nil, nil, err
 	}
 
-	if len(cluster.Spec.Subnets) == 0 {
+	if len(cluster.Spec.Networking.Subnets) == 0 {
 		return nil, nil, nil, fmt.Errorf("configuration must include Subnets")
 	}
 
@@ -398,21 +396,29 @@ func retrieveClusterRefs(ctx context.Context, f *util.Factory, clusterName strin
 
 func getFilters(commandline *cli.CommandLineInterface, region string, zones []string) selector.Filters {
 	flags := commandline.Flags
+	var cpuArch ec2types.ArchitectureType
+	if v, ok := flags[cpuArchitecture]; ok {
+		cpuArch = ec2types.ArchitectureType(*commandline.StringMe(v))
+	}
+	var uc ec2types.UsageClassType
+	if v, ok := flags[usageClass]; ok {
+		uc = ec2types.UsageClassType(*commandline.StringMe(v))
+	}
 	return selector.Filters{
-		VCpusRange:             commandline.IntRangeMe(flags[vcpus]),
+		VCpusRange:             commandline.Int32RangeMe(flags[vcpus]),
 		MemoryRange:            commandline.ByteQuantityRangeMe(flags[memory]),
 		VCpusToMemoryRatio:     commandline.Float64Me(flags[vcpusToMemoryRatio]),
-		CPUArchitecture:        commandline.StringMe(flags[cpuArchitecture]),
-		GpusRange:              commandline.IntRangeMe(flags[gpus]),
+		CPUArchitecture:        &cpuArch,
+		GpusRange:              commandline.Int32RangeMe(flags[gpus]),
 		GpuMemoryRange:         commandline.ByteQuantityRangeMe(flags[gpuMemory]),
 		PlacementGroupStrategy: commandline.StringMe(flags[placementGroupStrategy]),
-		UsageClass:             commandline.StringMe(flags[usageClass]),
+		UsageClass:             &uc,
 		EnaSupport:             commandline.BoolMe(flags[enaSupport]),
 		Burstable:              commandline.BoolMe(flags[burstSupport]),
 		Region:                 commandline.StringMe(region),
 		AvailabilityZones:      commandline.StringSliceMe(zones),
 		MaxResults:             commandline.IntMe(flags[maxResults]),
-		NetworkInterfaces:      commandline.IntRangeMe(flags[networkInterfaces]),
+		NetworkInterfaces:      commandline.Int32RangeMe(flags[networkInterfaces]),
 		NetworkPerformance:     commandline.IntRangeMe(flags[networkPerformance]),
 		AllowList:              commandline.RegexMe(flags[allowList]),
 		DenyList:               commandline.RegexMe(flags[denyList]),
@@ -501,17 +507,21 @@ func decorateWithInstanceGroupSpecs(instanceGroup *kops.InstanceGroup, instanceG
 	ig := instanceGroup
 	ig.Spec.MinSize = &instanceGroupOpts.NodeCountMin
 	ig.Spec.MaxSize = &instanceGroupOpts.NodeCountMax
-	ig.Spec.RootVolumeSize = instanceGroupOpts.NodeVolumeSize
+	if ig.Spec.RootVolume == nil {
+		ig.Spec.RootVolume = &kops.InstanceRootVolumeSpec{}
+	}
+	ig.Spec.RootVolume.Size = instanceGroupOpts.NodeVolumeSize
 	ig.Spec.AdditionalSecurityGroups = instanceGroupOpts.NodeSecurityGroups
 	return ig
 }
 
 // decorateWithMixedInstancesPolicy adds a mixed instance policy based on usageClass to the instance-group
-func decorateWithMixedInstancesPolicy(instanceGroup *kops.InstanceGroup, usageClass string, instanceSelections []string) (*kops.InstanceGroup, error) {
+func decorateWithMixedInstancesPolicy(instanceGroup *kops.InstanceGroup, usageClass ec2types.UsageClassType, instanceSelections []string) (*kops.InstanceGroup, error) {
 	ig := instanceGroup
 	ig.Spec.MachineType = instanceSelections[0]
 
-	if usageClass == usageClassSpot {
+	switch usageClass {
+	case ec2types.UsageClassTypeSpot:
 		ondemandBase := int64(0)
 		ondemandAboveBase := int64(0)
 		spotAllocationStrategy := "capacity-optimized"
@@ -521,11 +531,11 @@ func decorateWithMixedInstancesPolicy(instanceGroup *kops.InstanceGroup, usageCl
 			OnDemandAboveBase:      &ondemandAboveBase,
 			SpotAllocationStrategy: &spotAllocationStrategy,
 		}
-	} else if usageClass == usageClassOndemand {
+	case ec2types.UsageClassTypeOnDemand:
 		ig.Spec.MixedInstancesPolicy = &kops.MixedInstancesPolicySpec{
 			Instances: instanceSelections,
 		}
-	} else {
+	default:
 		return nil, fmt.Errorf("error node usage class not supported")
 	}
 

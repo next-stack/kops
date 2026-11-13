@@ -17,17 +17,17 @@ limitations under the License.
 package awstasks
 
 import (
+	"context"
 	"fmt"
 
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
-	"k8s.io/kops/upup/pkg/fi/cloudup/cloudformation"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraform"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraformWriter"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/awserr"
-	"github.com/aws/aws-sdk-go/service/iam"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/iam"
+	iamtypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
 	"k8s.io/klog/v2"
 )
 
@@ -42,7 +42,7 @@ type IAMInstanceProfile struct {
 	Shared *bool
 }
 
-var _ fi.CompareWithID = &IAMInstanceProfile{}
+var _ fi.CompareWithID = (*IAMInstanceProfile)(nil)
 
 func (e *IAMInstanceProfile) CompareWithID() *string {
 	return e.Name
@@ -50,14 +50,12 @@ func (e *IAMInstanceProfile) CompareWithID() *string {
 
 // findIAMInstanceProfile retrieves the InstanceProfile with specified name
 // It returns nil,nil if not found
-func findIAMInstanceProfile(cloud awsup.AWSCloud, name string) (*iam.InstanceProfile, error) {
+func findIAMInstanceProfile(ctx context.Context, cloud awsup.AWSCloud, name string) (*iamtypes.InstanceProfile, error) {
 	request := &iam.GetInstanceProfileInput{InstanceProfileName: aws.String(name)}
 
-	response, err := cloud.IAM().GetInstanceProfile(request)
-	if awsErr, ok := err.(awserr.Error); ok {
-		if awsErr.Code() == iam.ErrCodeNoSuchEntityException {
-			return nil, nil
-		}
+	response, err := cloud.IAM().GetInstanceProfile(ctx, request)
+	if awsup.IsIAMNoSuchEntityException(err) {
+		return nil, nil
 	}
 
 	if err != nil {
@@ -67,10 +65,11 @@ func findIAMInstanceProfile(cloud awsup.AWSCloud, name string) (*iam.InstancePro
 	return response.InstanceProfile, nil
 }
 
-func (e *IAMInstanceProfile) Find(c *fi.Context) (*IAMInstanceProfile, error) {
-	cloud := c.Cloud.(awsup.AWSCloud)
+func (e *IAMInstanceProfile) Find(c *fi.CloudupContext) (*IAMInstanceProfile, error) {
+	ctx := c.Context()
+	cloud := awsup.GetCloud(c)
 
-	p, err := findIAMInstanceProfile(cloud, *e.Name)
+	p, err := findIAMInstanceProfile(ctx, cloud, *e.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -95,13 +94,13 @@ func (e *IAMInstanceProfile) Find(c *fi.Context) (*IAMInstanceProfile, error) {
 	return actual, nil
 }
 
-func (e *IAMInstanceProfile) Run(c *fi.Context) error {
-	return fi.DefaultDeltaRunMethod(e, c)
+func (e *IAMInstanceProfile) Run(c *fi.CloudupContext) error {
+	return fi.CloudupDefaultDeltaRunMethod(e, c)
 }
 
 func (s *IAMInstanceProfile) CheckChanges(a, e, changes *IAMInstanceProfile) error {
 	if a != nil {
-		if fi.StringValue(e.Name) == "" && !fi.BoolValue(e.Shared) {
+		if fi.ValueOf(e.Name) == "" && !fi.ValueOf(e.Shared) {
 			return fi.RequiredField("Name")
 		}
 	}
@@ -109,21 +108,34 @@ func (s *IAMInstanceProfile) CheckChanges(a, e, changes *IAMInstanceProfile) err
 }
 
 func (_ *IAMInstanceProfile) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *IAMInstanceProfile) error {
-	if fi.BoolValue(e.Shared) {
+	ctx := context.TODO()
+	if fi.ValueOf(e.Shared) {
 		if a == nil {
-			return fmt.Errorf("instance role profile with id %q not found", fi.StringValue(e.ID))
+			return fmt.Errorf("instance role profile with id %q not found", fi.ValueOf(e.ID))
 		}
 	} else if a == nil {
 		klog.V(2).Infof("Creating IAMInstanceProfile with Name:%q", *e.Name)
 
 		request := &iam.CreateInstanceProfileInput{
 			InstanceProfileName: e.Name,
-			Tags:                mapToIAMTags(e.Tags),
 		}
 
-		response, err := t.Cloud.IAM().CreateInstanceProfile(request)
+		response, err := t.Cloud.IAM().CreateInstanceProfile(ctx, request)
 		if err != nil {
 			return fmt.Errorf("error creating IAMInstanceProfile: %v", err)
+		}
+
+		tagRequest := &iam.TagInstanceProfileInput{
+			InstanceProfileName: e.Name,
+			Tags:                mapToIAMTags(e.Tags),
+		}
+		_, err = t.Cloud.IAM().TagInstanceProfile(ctx, tagRequest)
+		if err != nil {
+			if awsup.AWSErrorCode(err) == awsup.AWSErrCodeInvalidAction {
+				klog.Warningf("Ignoring unsupported IAMInstanceProfile tagging %v", *a.Name)
+			} else {
+				return fmt.Errorf("error tagging IAMInstanceProfile: %v", err)
+			}
 		}
 
 		e.ID = response.InstanceProfile.InstanceProfileId
@@ -131,15 +143,15 @@ func (_ *IAMInstanceProfile) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *IAM
 	} else {
 		if changes.Tags != nil {
 			if len(a.Tags) > 0 {
-				existingTagKeys := make([]*string, 0)
+				existingTagKeys := make([]string, 0)
 				for k := range a.Tags {
-					existingTagKeys = append(existingTagKeys, &k)
+					existingTagKeys = append(existingTagKeys, k)
 				}
 				untagRequest := &iam.UntagInstanceProfileInput{
 					InstanceProfileName: a.Name,
 					TagKeys:             existingTagKeys,
 				}
-				_, err := t.Cloud.IAM().UntagInstanceProfile(untagRequest)
+				_, err := t.Cloud.IAM().UntagInstanceProfile(ctx, untagRequest)
 				if err != nil {
 					return fmt.Errorf("error untagging IAMInstanceProfile: %v", err)
 				}
@@ -149,16 +161,19 @@ func (_ *IAMInstanceProfile) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *IAM
 					InstanceProfileName: a.Name,
 					Tags:                mapToIAMTags(e.Tags),
 				}
-				_, err := t.Cloud.IAM().TagInstanceProfile(tagRequest)
+				_, err := t.Cloud.IAM().TagInstanceProfile(ctx, tagRequest)
 				if err != nil {
-					return fmt.Errorf("error tagging IAMInstanceProfile: %v", err)
+					if awsup.AWSErrorCode(err) == awsup.AWSErrCodeInvalidAction {
+						klog.Warningf("Ignoring unsupported IAMInstanceProfile tagging %v", *a.Name)
+					} else {
+						return fmt.Errorf("error tagging IAMInstanceProfile: %v", err)
+					}
 				}
 			}
 		}
 	}
 
-	// TODO: Should we use path as our tag?
-	return nil // No tags in IAM
+	return nil
 }
 
 func (_ *IAMInstanceProfile) RenderTerraform(t *terraform.TerraformTarget, a, e, changes *IAMInstanceProfile) error {
@@ -167,20 +182,8 @@ func (_ *IAMInstanceProfile) RenderTerraform(t *terraform.TerraformTarget, a, e,
 }
 
 func (e *IAMInstanceProfile) TerraformLink() *terraformWriter.Literal {
-	if fi.BoolValue(e.Shared) {
-		return terraformWriter.LiteralFromStringValue(fi.StringValue(e.Name))
+	if fi.ValueOf(e.Shared) {
+		return terraformWriter.LiteralFromStringValue(fi.ValueOf(e.Name))
 	}
 	return terraformWriter.LiteralProperty("aws_iam_instance_profile", *e.Name, "id")
-}
-
-func (_ *IAMInstanceProfile) RenderCloudformation(t *cloudformation.CloudformationTarget, a, e, changes *IAMInstanceProfile) error {
-	// Done on IAMInstanceProfileRole
-	return nil
-}
-
-func (e *IAMInstanceProfile) CloudformationLink() *cloudformation.Literal {
-	if fi.BoolValue(e.Shared) {
-		return cloudformation.LiteralString(fi.StringValue(e.Name))
-	}
-	return cloudformation.Ref("AWS::IAM::InstanceProfile", fi.StringValue(e.Name))
 }

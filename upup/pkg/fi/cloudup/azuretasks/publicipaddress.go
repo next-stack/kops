@@ -19,8 +19,8 @@ package azuretasks
 import (
 	"context"
 
-	"github.com/Azure/azure-sdk-for-go/services/network/mgmt/2020-06-01/network"
-	"github.com/Azure/go-autorest/autorest/to"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
+	network "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork/v7"
 	"k8s.io/klog/v2"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/azure"
@@ -29,24 +29,38 @@ import (
 // PublicIPAddress is an Azure Cloud Public IP Address
 // +kops:fitask
 type PublicIPAddress struct {
-	Name          *string
-	Lifecycle     fi.Lifecycle
+	Name      *string
+	Lifecycle fi.Lifecycle
+
+	ID            *string
 	ResourceGroup *ResourceGroup
+
+	// IPVersion is the IP version, e.g. network.IPVersionIPv4.
+	IPVersion network.IPVersion
+	// AllocationMethod is the allocation method, e.g. network.IPAllocationMethodStatic.
+	AllocationMethod network.IPAllocationMethod
+	// SKU is the public IP SKU, e.g. network.PublicIPAddressSKUNameStandard.
+	SKU network.PublicIPAddressSKUName
+	// IPAddress is the allocated address. It is output-only, populated by Find and RenderAzure.
+	IPAddress *string
 
 	Tags map[string]*string
 }
 
-var _ fi.Task = &PublicIPAddress{}
-var _ fi.CompareWithID = &PublicIPAddress{}
+var (
+	_ fi.CloudupTask          = &PublicIPAddress{}
+	_ fi.CompareWithID        = &PublicIPAddress{}
+	_ fi.CloudupTaskNormalize = &PublicIPAddress{}
+)
 
 // CompareWithID returns the Name of the Public IP Address
 func (p *PublicIPAddress) CompareWithID() *string {
-	return p.Name
+	return p.ID
 }
 
 // Find discovers the Public IP Address in the cloud provider
-func (p *PublicIPAddress) Find(c *fi.Context) (*PublicIPAddress, error) {
-	cloud := c.Cloud.(azure.AzureCloud)
+func (p *PublicIPAddress) Find(c *fi.CloudupContext) (*PublicIPAddress, error) {
+	cloud := c.T.Cloud.(azure.AzureCloud)
 	l, err := cloud.PublicIPAddress().List(context.TODO(), *p.ResourceGroup.Name)
 	if err != nil {
 		return nil, err
@@ -54,29 +68,50 @@ func (p *PublicIPAddress) Find(c *fi.Context) (*PublicIPAddress, error) {
 	var found *network.PublicIPAddress
 	for _, v := range l {
 		if *v.Name == *p.Name {
-			found = &v
+			found = v
 			break
 		}
 	}
 	if found == nil {
 		return nil, nil
 	}
+	if found.Properties != nil && found.Properties.ProvisioningState != nil && *found.Properties.ProvisioningState == network.ProvisioningStateFailed {
+		klog.Warningf("found public IP address %q in failed provisioning state", *p.Name)
+		return nil, nil
+	}
 
-	return &PublicIPAddress{
+	p.ID = found.ID
+
+	actual := &PublicIPAddress{
 		Name:      p.Name,
 		Lifecycle: p.Lifecycle,
 		ResourceGroup: &ResourceGroup{
 			Name: p.ResourceGroup.Name,
 		},
-
+		ID:   found.ID,
 		Tags: found.Tags,
-	}, nil
+	}
+	if found.Properties != nil {
+		actual.IPVersion = fi.ValueOf(found.Properties.PublicIPAddressVersion)
+		actual.AllocationMethod = fi.ValueOf(found.Properties.PublicIPAllocationMethod)
+		actual.IPAddress = found.Properties.IPAddress
+		// Propagate to the expected task so that dependent tasks can use the address.
+		p.IPAddress = found.Properties.IPAddress
+	}
+	if found.SKU != nil {
+		actual.SKU = fi.ValueOf(found.SKU.Name)
+	}
+	return actual, nil
+}
+
+func (p *PublicIPAddress) Normalize(c *fi.CloudupContext) error {
+	c.T.Cloud.(azure.AzureCloud).AddClusterTags(p.Tags)
+	return nil
 }
 
 // Run implements fi.Task.Run.
-func (p *PublicIPAddress) Run(c *fi.Context) error {
-	c.Cloud.(azure.AzureCloud).AddClusterTags(p.Tags)
-	return fi.DefaultDeltaRunMethod(p, c)
+func (p *PublicIPAddress) Run(c *fi.CloudupContext) error {
+	return fi.CloudupDefaultDeltaRunMethod(p, c)
 }
 
 // CheckChanges returns an error if a change is not allowed.
@@ -99,24 +134,37 @@ func (*PublicIPAddress) CheckChanges(a, e, changes *PublicIPAddress) error {
 // RenderAzure creates or updates a Public IP Address.
 func (*PublicIPAddress) RenderAzure(t *azure.AzureAPITarget, a, e, changes *PublicIPAddress) error {
 	if a == nil {
-		klog.Infof("Creating a new Public IP Address with name: %s", fi.StringValue(e.Name))
+		klog.Infof("Creating a new Public IP Address with name: %s", fi.ValueOf(e.Name))
 	} else {
-		klog.Infof("Updating a Public IP Address with name: %s", fi.StringValue(e.Name))
+		klog.Infof("Updating a Public IP Address with name: %s", fi.ValueOf(e.Name))
 	}
 
 	p := network.PublicIPAddress{
-		Location: to.StringPtr(t.Cloud.Region()),
-		Name:     to.StringPtr(*e.Name),
-		PublicIPAddressPropertiesFormat: &network.PublicIPAddressPropertiesFormat{
-			PublicIPAddressVersion:   network.IPv4,
-			PublicIPAllocationMethod: network.Dynamic,
+		Location: to.Ptr(t.Cloud.Region()),
+		Name:     to.Ptr(*e.Name),
+		Properties: &network.PublicIPAddressPropertiesFormat{
+			PublicIPAddressVersion:   to.Ptr(e.IPVersion),
+			PublicIPAllocationMethod: to.Ptr(e.AllocationMethod),
+		},
+		SKU: &network.PublicIPAddressSKU{
+			Name: to.Ptr(e.SKU),
 		},
 		Tags: e.Tags,
 	}
 
-	return t.Cloud.PublicIPAddress().CreateOrUpdate(
+	pip, err := t.Cloud.PublicIPAddress().CreateOrUpdate(
 		context.TODO(),
 		*e.ResourceGroup.Name,
 		*e.Name,
 		p)
+	if err != nil {
+		return err
+	}
+
+	e.ID = pip.ID
+	if pip.Properties != nil {
+		e.IPAddress = pip.Properties.IPAddress
+	}
+
+	return nil
 }

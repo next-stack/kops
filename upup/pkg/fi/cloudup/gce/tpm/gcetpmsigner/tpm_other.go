@@ -1,5 +1,4 @@
 //go:build !windows
-// +build !windows
 
 /*
 Copyright 2021 The Kubernetes Authors.
@@ -23,7 +22,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/google/go-tpm/tpm2"
+	"github.com/google/go-tpm/legacy/tpm2"
 )
 
 var tpmPath = "/dev/tpm0"

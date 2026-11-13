@@ -22,16 +22,20 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"sort"
 	"testing"
 
-	"github.com/gophercloud/gophercloud"
-	"github.com/gophercloud/gophercloud/openstack/compute/v2/servers"
-	"github.com/gophercloud/gophercloud/openstack/loadbalancer/v2/loadbalancers"
-	l3floatingips "github.com/gophercloud/gophercloud/openstack/networking/v2/extensions/layer3/floatingips"
+	"github.com/gophercloud/gophercloud/v2"
+	"github.com/gophercloud/gophercloud/v2/openstack/compute/v2/servers"
+	"github.com/gophercloud/gophercloud/v2/openstack/loadbalancer/v2/loadbalancers"
+	l3floatingips "github.com/gophercloud/gophercloud/v2/openstack/networking/v2/extensions/layer3/floatingips"
+	"github.com/gophercloud/gophercloud/v2/openstack/networking/v2/ports"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/kops/cloudmock/openstack/mocknetworking"
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/upup/pkg/fi"
+	"k8s.io/kops/util/pkg/vfs/openstackconfig"
 )
 
 func Test_OpenstackCloud_GetApiIngressStatus(t *testing.T) {
@@ -49,9 +53,11 @@ func Test_OpenstackCloud_GetApiIngressStatus(t *testing.T) {
 			desc: "Loadbalancer configured master public name set",
 			cluster: &kops.Cluster{
 				Spec: kops.ClusterSpec{
-					MasterPublicName: "master.k8s.local",
-					CloudConfig: &kops.CloudConfiguration{
-						Openstack: &kops.OpenstackConfiguration{
+					API: kops.APISpec{
+						PublicName: "master.k8s.local",
+					},
+					CloudProvider: kops.CloudProviderSpec{
+						Openstack: &kops.OpenstackSpec{
 							Loadbalancer: &kops.OpenstackLoadbalancerConfig{},
 						},
 					},
@@ -85,9 +91,11 @@ func Test_OpenstackCloud_GetApiIngressStatus(t *testing.T) {
 			desc: "Loadbalancer configured master public name set multiple IPs match",
 			cluster: &kops.Cluster{
 				Spec: kops.ClusterSpec{
-					MasterPublicName: "master.k8s.local",
-					CloudConfig: &kops.CloudConfiguration{
-						Openstack: &kops.OpenstackConfiguration{
+					API: kops.APISpec{
+						PublicName: "master.k8s.local",
+					},
+					CloudProvider: kops.CloudProviderSpec{
+						Openstack: &kops.OpenstackSpec{
 							Loadbalancer: &kops.OpenstackLoadbalancerConfig{},
 						},
 					},
@@ -131,8 +139,8 @@ func Test_OpenstackCloud_GetApiIngressStatus(t *testing.T) {
 			desc: "Loadbalancer configured master public name not set",
 			cluster: &kops.Cluster{
 				Spec: kops.ClusterSpec{
-					CloudConfig: &kops.CloudConfiguration{
-						Openstack: &kops.OpenstackConfiguration{
+					CloudProvider: kops.CloudProviderSpec{
+						Openstack: &kops.OpenstackSpec{
 							Loadbalancer: &kops.OpenstackLoadbalancerConfig{},
 						},
 					},
@@ -147,8 +155,8 @@ func Test_OpenstackCloud_GetApiIngressStatus(t *testing.T) {
 					Name: "cluster.k8s.local",
 				},
 				Spec: kops.ClusterSpec{
-					CloudConfig: &kops.CloudConfiguration{
-						Openstack: &kops.OpenstackConfiguration{},
+					CloudProvider: kops.CloudProviderSpec{
+						Openstack: &kops.OpenstackSpec{},
 					},
 				},
 			},
@@ -157,7 +165,7 @@ func Test_OpenstackCloud_GetApiIngressStatus(t *testing.T) {
 					ID: "master1_no_lb_no_floating",
 					Metadata: map[string]string{
 						"k8s":      "cluster.k8s.local",
-						"KopsRole": "Master",
+						"KopsRole": "ControlPlane",
 					},
 					Addresses: map[string]interface{}{
 						"1": []Address{
@@ -174,7 +182,7 @@ func Test_OpenstackCloud_GetApiIngressStatus(t *testing.T) {
 					ID: "master2_no_lb_no_floating",
 					Metadata: map[string]string{
 						"k8s":      "cluster.k8s.local",
-						"KopsRole": "Master",
+						"KopsRole": "ControlPlane",
 					},
 					Addresses: map[string]interface{}{
 						"1": []Address{
@@ -219,8 +227,8 @@ func Test_OpenstackCloud_GetApiIngressStatus(t *testing.T) {
 					Name: "cluster.k8s.local",
 				},
 				Spec: kops.ClusterSpec{
-					CloudConfig: &kops.CloudConfiguration{
-						Openstack: &kops.OpenstackConfiguration{},
+					CloudProvider: kops.CloudProviderSpec{
+						Openstack: &kops.OpenstackSpec{},
 					},
 				},
 			},
@@ -229,7 +237,7 @@ func Test_OpenstackCloud_GetApiIngressStatus(t *testing.T) {
 					ID: "master1_no_lb_floating",
 					Metadata: map[string]string{
 						"k8s":      "cluster.k8s.local",
-						"KopsRole": "Master",
+						"KopsRole": "ControlPlane",
 					},
 					Addresses: map[string]interface{}{
 						"1": []map[string]interface{}{
@@ -246,7 +254,7 @@ func Test_OpenstackCloud_GetApiIngressStatus(t *testing.T) {
 					ID: "master2_no_lb_floating",
 					Metadata: map[string]string{
 						"k8s":      "cluster.k8s.local",
-						"KopsRole": "Master",
+						"KopsRole": "ControlPlane",
 					},
 					Addresses: map[string]interface{}{
 						"1": []map[string]string{
@@ -476,4 +484,225 @@ func pointersAreBothNil(t *testing.T, name string, actual, expected interface{})
 		t.Fatalf("%s differ: expected is nil, actual is not", name)
 	}
 	return false
+}
+
+func Test_BuildClients(t *testing.T) {
+	tags := map[string]string{
+		TagClusterName: "test.k8s.local",
+	}
+	provider := &gophercloud.ProviderClient{
+		EndpointLocator: func(eo gophercloud.EndpointOpts) (string, error) { return "", nil },
+	}
+
+	grid := []struct {
+		name                  string
+		spec                  *kops.OpenstackSpec
+		expectLB              bool
+		expectedType          string
+		expectFloatingEnabled bool
+		expectError           bool
+		expectedExtNetName    *string
+	}{
+		{
+			name:         "Empty openstack spec means no load balancer",
+			spec:         &kops.OpenstackSpec{},
+			expectLB:     false,
+			expectedType: "",
+		},
+		{
+			name: "When octavia is set, but no router, an error should be returned",
+			spec: &kops.OpenstackSpec{
+				Loadbalancer: &kops.OpenstackLoadbalancerConfig{
+					UseOctavia: new(true),
+				},
+			},
+			expectLB:     true,
+			expectedType: "",
+			expectError:  true,
+		},
+		{
+			name: "When octavia is set, and there is a router, a load-balancer should be returned",
+			spec: &kops.OpenstackSpec{
+				Loadbalancer: &kops.OpenstackLoadbalancerConfig{
+					UseOctavia: new(true),
+				},
+				Router: &kops.OpenstackRouter{},
+			},
+			expectLB:              true,
+			expectedType:          "load-balancer",
+			expectFloatingEnabled: true,
+			expectError:           false,
+		},
+		{
+			name: "When octavia is not set, network should be returned",
+			spec: &kops.OpenstackSpec{
+				Loadbalancer: &kops.OpenstackLoadbalancerConfig{},
+			},
+			expectLB:     true,
+			expectedType: "network",
+			expectError:  false,
+		},
+		{
+			name: "When router is set, but no LB, FIP support should be enabled",
+			spec: &kops.OpenstackSpec{
+				Router: &kops.OpenstackRouter{
+					ExternalNetwork: new("some-ext-net"),
+				},
+			},
+			expectLB:              false,
+			expectedType:          "",
+			expectFloatingEnabled: true,
+			expectedExtNetName:    new("some-ext-net"),
+		}}
+
+	for _, g := range grid {
+
+		t.Run(g.name, func(t *testing.T) {
+
+			cloud, err := buildClients(provider, tags, g.spec, openstackconfig.OpenstackConfig{}, "", false)
+			if g.expectError {
+				if err != nil {
+					return
+				} else {
+					t.Fatalf("expected error, but got nil")
+				}
+			}
+			if err != nil {
+				t.Fatalf("failed to build cloud clients: %v", err)
+			}
+
+			lbClient := cloud.LoadBalancerClient()
+			hasLB := cloud.LoadBalancerClient() != nil
+			if hasLB != g.expectLB {
+				t.Fatalf("did not match expectation. Expected: %v, actual: %v", g.expectLB, hasLB)
+			}
+			if g.expectLB {
+				if lbClient.Type != g.expectedType {
+					t.Fatalf("did not match expectation. Expected: %v, actual: %v", g.expectedType, lbClient.Type)
+				}
+			}
+
+			actualFloatingEnabled := cloud.(*openstackCloud).floatingEnabled
+			if g.expectFloatingEnabled != actualFloatingEnabled {
+				t.Fatalf("did not match expectation. Expected: %v, actual: %v", g.expectFloatingEnabled, actualFloatingEnabled)
+			}
+
+			actualExtNetName := fi.ValueOf(cloud.(*openstackCloud).extNetworkName)
+			expectedExtNetName := fi.ValueOf(g.expectedExtNetName)
+			if expectedExtNetName != actualExtNetName {
+				t.Fatalf("did not match expectation. Expected: %v, actual: %v", expectedExtNetName, actualExtNetName)
+			}
+		})
+	}
+}
+
+func setupMockCloudForDeletePortsTest(portDefinitions map[string]map[string]int) (*MockCloud, error) {
+	cloud := InstallMockOpenstackCloud("mock-central-1")
+	cloud.MockNeutronClient = mocknetworking.CreateClient()
+
+	for clusterName, instanceGroups := range portDefinitions {
+		for instanceGroup, n := range instanceGroups {
+			for i := 0; i < n; i++ {
+				port, err := cloud.CreatePort(ports.CreateOpts{
+					Name:      fmt.Sprintf("port-%s-%d-%s", instanceGroup, i+1, clusterName),
+					NetworkID: "mock-network-id",
+				})
+				if err != nil {
+					return nil, fmt.Errorf("error creating port: %v", err)
+				}
+
+				err = cloud.AppendTag(ResourceTypePort, port.ID, fmt.Sprintf("%s=%s", TagClusterName, clusterName))
+				if err != nil {
+					return nil, fmt.Errorf("error appending tag: %v", err)
+				}
+				err = cloud.AppendTag(ResourceTypePort, port.ID, fmt.Sprintf("%s=%s", TagKopsInstanceGroup, instanceGroup))
+				if err != nil {
+					return nil, fmt.Errorf("error appending tag: %v", err)
+				}
+			}
+		}
+	}
+
+	return cloud, nil
+}
+
+func Test_deletePorts(t *testing.T) {
+	testCases := []struct {
+		description   string
+		clusterName   string
+		instanceGroup string
+		expectedPorts []string
+	}{
+		{
+			description:   "Only delete ports of worker IG of my-cluster",
+			clusterName:   "my-cluster",
+			instanceGroup: "worker",
+			expectedPorts: []string{
+				"port-control-plane-0-1-my-cluster",
+				"port-worker-2-1-my-cluster",
+				"port-worker-2-2-my-cluster",
+				"port-control-plane-0-1-my-cluster-2",
+				"port-worker-1-my-cluster-2",
+				"port-worker-2-my-cluster-2",
+				"port-worker-2-1-my-cluster-2",
+				"port-worker-2-2-my-cluster-2",
+			},
+		},
+		{
+			description:   "Only delete ports of worker-2 IG of my-cluster",
+			clusterName:   "my-cluster",
+			instanceGroup: "worker-2",
+			expectedPorts: []string{
+				"port-control-plane-0-1-my-cluster",
+				"port-worker-1-my-cluster",
+				"port-worker-2-my-cluster",
+				"port-control-plane-0-1-my-cluster-2",
+				"port-worker-1-my-cluster-2",
+				"port-worker-2-my-cluster-2",
+				"port-worker-2-1-my-cluster-2",
+				"port-worker-2-2-my-cluster-2",
+			},
+		},
+	}
+
+	portDefinitions := map[string]map[string]int{
+		"my-cluster": {
+			"control-plane-0": 1,
+			"worker":          2,
+			"worker-2":        2,
+		},
+		"my-cluster-2": {
+			"control-plane-0": 1,
+			"worker":          2,
+			"worker-2":        2,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.description, func(t *testing.T) {
+			cloud, err := setupMockCloudForDeletePortsTest(portDefinitions)
+			if err != nil {
+				t.Errorf("error while setting up test: %v", err)
+			}
+
+			deletePorts(cloud, testCase.instanceGroup, testCase.clusterName)
+
+			allPorts, err := cloud.ListPorts(ports.ListOpts{})
+			if err != nil {
+				t.Errorf("error while listing ports: %v", err)
+			}
+
+			actualPorts := []string{}
+			for _, port := range allPorts {
+				actualPorts = append(actualPorts, port.Name)
+			}
+
+			slices.Sort(actualPorts)
+			slices.Sort(testCase.expectedPorts)
+
+			if !reflect.DeepEqual(actualPorts, testCase.expectedPorts) {
+				t.Errorf("ports differ: expected\n%+#v\n\tgot:\n%+#v\n", testCase.expectedPorts, actualPorts)
+			}
+		})
+	}
 }

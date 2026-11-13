@@ -35,7 +35,6 @@ import (
 	"k8s.io/kops/pkg/commands"
 	"k8s.io/kops/pkg/commands/commandutils"
 	"k8s.io/kops/pkg/edit"
-	"k8s.io/kops/pkg/featureflag"
 	"k8s.io/kops/pkg/kopscodecs"
 	"k8s.io/kops/pkg/pretty"
 	"k8s.io/kops/pkg/try"
@@ -67,6 +66,9 @@ var (
 	editClusterExample = templates.Examples(i18n.T(`
 	# Edit a cluster configuration in AWS.
 	kops edit cluster k8s.cluster.site --state=s3://my-state-store
+
+	# Set cluster spec values.
+	kops edit cluster testcluster.k8s.local --set spec.kubernetesVersion=1.28.4
 	`))
 )
 
@@ -81,20 +83,18 @@ func NewCmdEditCluster(f *util.Factory, out io.Writer) *cobra.Command {
 		Args:              rootCommand.clusterNameArgs(&options.ClusterName),
 		ValidArgsFunction: commandutils.CompleteClusterName(f, true, false),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return RunEditCluster(context.TODO(), f, out, options)
+			return RunEditCluster(cmd.Context(), f, out, options)
 		},
 	}
 
-	if featureflag.SpecOverrideFlag.Enabled() {
-		cmd.Flags().StringSliceVar(&options.Sets, "set", options.Sets, "Directly set values in the spec")
-		cmd.RegisterFlagCompletionFunc("set", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-			return nil, cobra.ShellCompDirectiveNoFileComp
-		})
-		cmd.Flags().StringSliceVar(&options.Unsets, "unset", options.Unsets, "Directly unset values in the spec")
-		cmd.RegisterFlagCompletionFunc("unset", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-			return nil, cobra.ShellCompDirectiveNoFileComp
-		})
-	}
+	LazyQuoteStringSliceVar(cmd.Flags(), &options.Sets, "set", options.Sets, "Directly set values in the spec")
+	cmd.RegisterFlagCompletionFunc("set", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	})
+	cmd.Flags().StringSliceVar(&options.Unsets, "unset", options.Unsets, "Directly unset values in the spec")
+	cmd.RegisterFlagCompletionFunc("unset", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	})
 
 	return cmd
 }
@@ -110,7 +110,7 @@ func RunEditCluster(ctx context.Context, f *util.Factory, out io.Writer, options
 		return err
 	}
 
-	clientset, err := f.Clientset()
+	clientset, err := f.KopsClient()
 	if err != nil {
 		return err
 	}
@@ -139,9 +139,7 @@ func RunEditCluster(ctx context.Context, f *util.Factory, out io.Writer, options
 		return nil
 	}
 
-	var (
-		editor = util_editor.NewDefaultEditor(commandutils.EditorEnvs)
-	)
+	editor := util_editor.NewDefaultEditor(commandutils.EditorEnvs)
 
 	ext := "yaml"
 	raw, err := kopscodecs.ToVersionedYaml(oldCluster)
@@ -216,7 +214,7 @@ func RunEditCluster(ctx context.Context, f *util.Factory, out io.Writer, options
 			continue
 		}
 
-		extraFields, err := edit.HasExtraFields(string(edited), newObj)
+		extraFields, err := edit.HasExtraFields(string(edited))
 		if err != nil {
 			results = editResults{
 				file: file,
@@ -260,18 +258,18 @@ func updateCluster(ctx context.Context, clientset simple.Clientset, oldCluster, 
 		return "", err
 	}
 
-	err = cloudup.PerformAssignments(newCluster, cloud)
+	err = cloudup.PerformAssignments(newCluster, clientset.VFSContext(), cloud)
 	if err != nil {
 		return "", fmt.Errorf("error populating configuration: %v", err)
 	}
 
-	assetBuilder := assets.NewAssetBuilder(newCluster, false)
-	fullCluster, err := cloudup.PopulateClusterSpec(clientset, newCluster, cloud, assetBuilder)
+	assetBuilder := assets.NewAssetBuilder(clientset.VFSContext(), newCluster.Spec.Assets, false)
+	fullCluster, err := cloudup.PopulateClusterSpec(ctx, clientset, newCluster, instanceGroups, cloud, assetBuilder)
 	if err != nil {
 		return fmt.Sprintf("error populating cluster spec: %s", err), nil
 	}
 
-	err = validation.DeepValidate(fullCluster, instanceGroups, true, cloud)
+	err = validation.DeepValidate(fullCluster, instanceGroups, true, clientset.VFSContext(), cloud)
 	if err != nil {
 		return fmt.Sprintf("validation failed: %s", err), nil
 	}

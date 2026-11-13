@@ -23,7 +23,7 @@ import (
 	"regexp"
 
 	"github.com/google/uuid"
-	"github.com/gophercloud/gophercloud/openstack/imageservice/v2/images"
+	"github.com/gophercloud/gophercloud/v2/openstack/image/v2/images"
 )
 
 type imageListResponse struct {
@@ -64,7 +64,6 @@ func (m *MockClient) mockImages() {
 }
 
 func (m *MockClient) listImages(w http.ResponseWriter) {
-
 	w.WriteHeader(http.StatusOK)
 
 	images := make([]images.Image, 0)

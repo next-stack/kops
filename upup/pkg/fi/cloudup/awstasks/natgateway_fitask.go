@@ -27,7 +27,7 @@ import (
 
 // NatGateway
 
-var _ fi.HasLifecycle = &NatGateway{}
+var _ fi.HasLifecycle = (*NatGateway)(nil)
 
 // GetLifecycle returns the Lifecycle of the object, implementing fi.HasLifecycle
 func (o *NatGateway) GetLifecycle() fi.Lifecycle {
@@ -39,7 +39,7 @@ func (o *NatGateway) SetLifecycle(lifecycle fi.Lifecycle) {
 	o.Lifecycle = lifecycle
 }
 
-var _ fi.HasName = &NatGateway{}
+var _ fi.HasName = (*NatGateway)(nil)
 
 // GetName returns the Name of the object, implementing fi.HasName
 func (o *NatGateway) GetName() *string {
@@ -48,5 +48,5 @@ func (o *NatGateway) GetName() *string {
 
 // String is the stringer function for the task, producing readable output using fi.TaskAsString
 func (o *NatGateway) String() string {
-	return fi.TaskAsString(o)
+	return fi.CloudupTaskAsString(o)
 }

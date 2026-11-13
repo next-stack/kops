@@ -80,10 +80,10 @@ func NewCmdTrustKeypair(f *util.Factory, out io.Writer) *cobra.Command {
 			return nil
 		},
 		ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-			return completeTrustKeyset(f, options, args, toComplete)
+			return completeTrustKeyset(cmd.Context(), f, options, args, toComplete)
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := context.TODO()
+			ctx := cmd.Context()
 
 			return RunTrustKeypair(ctx, f, out, options)
 		},
@@ -93,7 +93,7 @@ func NewCmdTrustKeypair(f *util.Factory, out io.Writer) *cobra.Command {
 }
 
 func RunTrustKeypair(ctx context.Context, f *util.Factory, out io.Writer, options *TrustKeypairOptions) error {
-	clientset, err := f.Clientset()
+	clientset, err := f.KopsClient()
 	if err != nil {
 		return err
 	}
@@ -108,9 +108,12 @@ func RunTrustKeypair(ctx context.Context, f *util.Factory, out io.Writer, option
 		return err
 	}
 
-	keyset, err := keyStore.FindKeyset(options.Keyset)
+	keyset, err := keyStore.FindKeyset(ctx, options.Keyset)
 	if err != nil {
 		return err
+	}
+	if keyset == nil {
+		return fmt.Errorf("keyset %q not found", options.Keyset)
 	}
 
 	for _, id := range options.KeypairIDs {
@@ -125,7 +128,7 @@ func RunTrustKeypair(ctx context.Context, f *util.Factory, out io.Writer, option
 
 		item.DistrustTimestamp = nil
 
-		if err := keyStore.StoreKeyset(options.Keyset, keyset); err != nil {
+		if err := keyStore.StoreKeyset(ctx, options.Keyset, keyset); err != nil {
 			return fmt.Errorf("error storing keypair: %w", err)
 		}
 
@@ -135,16 +138,15 @@ func RunTrustKeypair(ctx context.Context, f *util.Factory, out io.Writer, option
 	return nil
 }
 
-func completeTrustKeyset(f commandutils.Factory, options *TrustKeypairOptions, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+func completeTrustKeyset(ctx context.Context, f commandutils.Factory, options *TrustKeypairOptions, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 	commandutils.ConfigureKlogForCompletion()
-	ctx := context.TODO()
 
 	cluster, clientSet, completions, directive := GetClusterForCompletion(ctx, f, nil)
 	if cluster == nil {
 		return completions, directive
 	}
 
-	keyset, _, completions, directive := completeKeyset(cluster, clientSet, args, func(name string, keyset *fi.Keyset) bool {
+	keyset, _, completions, directive := completeKeyset(ctx, cluster, clientSet, args, func(name string, keyset *fi.Keyset) bool {
 		if name == "all" {
 			return false
 		}

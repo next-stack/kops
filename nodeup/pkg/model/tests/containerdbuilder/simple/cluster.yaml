@@ -10,7 +10,7 @@ spec:
   configBase: memfs://clusters.example.com/minimal.example.com
   containerRuntime: containerd
   containerd:
-    version: 1.4.4
+    version: 2.3.4
   etcdClusters:
     - etcdMembers:
         - instanceGroup: master-us-test-1a
@@ -22,8 +22,7 @@ spec:
       name: events
   iam:
     legacy: false
-  kubernetesVersion: v1.19.0
-  masterInternalName: api.internal.minimal.example.com
+  kubernetesVersion: v1.21.0
   masterPublicName: api.minimal.example.com
   networkCIDR: 172.20.0.0/16
   networking:
@@ -31,9 +30,6 @@ spec:
   nonMasqueradeCIDR: 100.64.0.0/10
   sshAccess:
     - 0.0.0.0/0
-  topology:
-    masters: public
-    nodes: public
   subnets:
     - cidr: 172.20.32.0/19
       name: us-test-1a

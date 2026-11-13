@@ -16,10 +16,58 @@ limitations under the License.
 
 package kops
 
-import "k8s.io/apimachinery/pkg/api/resource"
+import (
+	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/klog/v2"
+	"k8s.io/kops/util/pkg/reflectutils"
+)
 
-// NetworkingSpec allows selection and configuration of a networking plugin
+// NetworkingSpec configures networking.
 type NetworkingSpec struct {
+	// NetworkID is the cloud provider's identifier of the existing network (for example, AWS VPC) the cluster should use.
+	// If not specified, kOps will create a new network.
+	NetworkID string `json:"networkID,omitempty"`
+	// NetworkCIDR is the primary IPv4 CIDR used for the cloud provider's network.
+	// It is not required on GCE.
+	// On DO, it maps to the VPC CIDR.
+	NetworkCIDR string `json:"networkCIDR,omitempty"`
+	// AdditionalNetworkCIDRs is a list of additional CIDR used for the AWS VPC
+	// or otherwise allocated to k8s. This is a real CIDR, not the internal k8s network
+	// On AWS, it maps to any additional CIDRs added to a VPC.
+	AdditionalNetworkCIDRs []string `json:"additionalNetworkCIDRs,omitempty"`
+
+	// Subnets are the subnets that the cluster can use.
+	Subnets []ClusterSubnetSpec `json:"subnets,omitempty"`
+	// TagSubnets controls if tags are added to subnets to enable use by load balancers (AWS only). Default: true.
+	TagSubnets *bool `json:"tagSubnets,omitempty"`
+
+	// Topology defines the type of network topology to use on the cluster - default public
+	// This is heavily weighted towards AWS for the time being, but should also be agnostic enough
+	// to port out to GCE later if needed
+	Topology *TopologySpec `json:"topology,omitempty"`
+	// HTTPProxy defines connection information to support use of a private cluster behind an forward HTTP Proxy
+	EgressProxy *EgressProxySpec `json:"egressProxy,omitempty"`
+
+	// NonMasqueradeCIDR is the CIDR for the internal k8s network (for pod IPs)
+	// It cannot overlap ServiceClusterIPRange
+	NonMasqueradeCIDR string `json:"nonMasqueradeCIDR,omitempty"`
+	// PodCIDR is the CIDR from which we allocate IPs for pods
+	PodCIDR string `json:"podCIDR,omitempty"`
+	// ServiceClusterIPRange is the CIDR, from the internal network, where we allocate IPs for services
+	ServiceClusterIPRange string `json:"serviceClusterIPRange,omitempty"`
+	// IsolateControlPlane determines whether we should lock down masters so that they are not on the pod network.
+	// true is the kube-up behaviour, but it is very surprising: it means that daemonsets only work on the master
+	// if they have hostNetwork=true.
+	// false is now the default, and it will:
+	//  * give the master a normal PodCIDR
+	//  * run kube-proxy on the master
+	//  * enable debugging handlers on the master, so kubectl logs works
+	IsolateControlPlane *bool `json:"isolateControlPlane,omitempty"`
+
+	// The following specify the selection and configuration of a networking plugin.
+	// Exactly one of the fields must be non-null.
+
 	Classic    *ClassicNetworkingSpec    `json:"classic,omitempty"`
 	Kubenet    *KubenetNetworkingSpec    `json:"kubenet,omitempty"`
 	External   *ExternalNetworkingSpec   `json:"external,omitempty"`
@@ -29,26 +77,52 @@ type NetworkingSpec struct {
 	Flannel    *FlannelNetworkingSpec    `json:"flannel,omitempty"`
 	Calico     *CalicoNetworkingSpec     `json:"calico,omitempty"`
 	Canal      *CanalNetworkingSpec      `json:"canal,omitempty"`
-	Kuberouter *KuberouterNetworkingSpec `json:"kuberouter,omitempty"`
+	KubeRouter *KuberouterNetworkingSpec `json:"kubeRouter,omitempty"`
 	Romana     *RomanaNetworkingSpec     `json:"romana,omitempty"`
-	AmazonVPC  *AmazonVPCNetworkingSpec  `json:"amazonvpc,omitempty"`
+	AmazonVPC  *AmazonVPCNetworkingSpec  `json:"amazonVPC,omitempty"`
 	Cilium     *CiliumNetworkingSpec     `json:"cilium,omitempty"`
 	LyftVPC    *LyftVPCNetworkingSpec    `json:"lyftvpc,omitempty"`
-	GCE        *GCENetworkingSpec        `json:"gce,omitempty"`
+	GCP        *GCPNetworkingSpec        `json:"gcp,omitempty"`
+	Kindnet    *KindnetNetworkingSpec    `json:"kindnet,omitempty"`
+}
+
+// ConfiguredOptions returns the set of networking options that are configured (non-nil)
+// in the struct.  We only expect a single option to be configured.
+func (n *NetworkingSpec) ConfiguredOptions() sets.Set[string] {
+	options, err := reflectutils.FindSetFields(n, "classic", "kubenet", "external", "cni", "weave", "flannel", "calico", "kubeRouter", "romana", "amazonVPC", "cilium", "lyftvpc", "gcp", "kindnet")
+	if err != nil {
+		klog.Fatalf("error getting set fields: %v", err)
+	}
+	return options
+}
+
+// UsesKubenet returns true if our networking is derived from kubenet
+func (n *NetworkingSpec) UsesKubenet() bool {
+	if n == nil {
+		panic("no networking mode set")
+	}
+	if n.Kubenet != nil {
+		return true
+	} else if n.GCP != nil {
+		// GCP IP Alias networking is based on kubenet
+		return true
+	} else if n.External != nil {
+		// external is based on kubenet
+		return true
+	}
+
+	return false
 }
 
 // ClassicNetworkingSpec is the specification of classic networking mode, integrated into kubernetes.
 // Support been removed since Kubernetes 1.4.
-type ClassicNetworkingSpec struct {
-}
+type ClassicNetworkingSpec struct{}
 
 // KubenetNetworkingSpec is the specification for kubenet networking, largely integrated but intended to replace classic
-type KubenetNetworkingSpec struct {
-}
+type KubenetNetworkingSpec struct{}
 
 // ExternalNetworkingSpec is the specification for networking that is implemented by a user-provided Daemonset that uses the Kubenet kubelet networking plugin.
-type ExternalNetworkingSpec struct {
-}
+type ExternalNetworkingSpec struct{}
 
 // CNINetworkingSpec is the specification for networking that is implemented by a user-provided Daemonset, which uses the CNI kubelet networking plugin.
 type CNINetworkingSpec struct {
@@ -56,8 +130,7 @@ type CNINetworkingSpec struct {
 }
 
 // KopeioNetworkingSpec declares that we want Kopeio networking
-type KopeioNetworkingSpec struct {
-}
+type KopeioNetworkingSpec struct{}
 
 // WeaveNetworkingSpec declares that we want Weave networking
 type WeaveNetworkingSpec struct {
@@ -106,10 +179,17 @@ type CalicoNetworkingSpec struct {
 	// Version overrides the Calico container image tag.
 	Version string `json:"version,omitempty"`
 
-	// AWSSrcDstCheck enables/disables ENI source/destination checks (AWS only)
-	// Options: Disable (default), Enable, or DoNothing
+	// AllowIPForwarding enable ip_forwarding setting within the container namespace.
+	// (default: false)
+	AllowIPForwarding bool `json:"allowIPForwarding,omitempty"`
+	// AWSSrcDstCheck enables/disables ENI source/destination checks (AWS IPv4 only)
+	// Options: Disable (default for IPv4), Enable, or DoNothing
 	AWSSrcDstCheck string `json:"awsSrcDstCheck,omitempty"`
-	// BPFEnabled enables the eBPF dataplane mode.
+	// BPFEnabled enables the eBPF dataplane mode. When set to true, kube-proxy
+	// must be disabled (spec.kubeProxy.enabled=false); kops will default it
+	// at cluster creation. Calico's BPF mode replaces kube-proxy and from
+	// v3.31 binds the kube-proxy healthz port (10256), so running both
+	// produces a port conflict.
 	BPFEnabled bool `json:"bpfEnabled,omitempty"`
 	// BPFExternalServiceMode controls how traffic from outside the cluster to NodePorts and ClusterIPs is handled.
 	// In Tunnel mode, packet is tunneled from the ingress host to the host with the backing pod and back again.
@@ -163,6 +243,9 @@ type CalicoNetworkingSpec struct {
 	LogSeverityScreen string `json:"logSeverityScreen,omitempty"`
 	// MTU to be set in the cni-network-config for calico.
 	MTU *int32 `json:"mtu,omitempty"`
+	// NFTablesMode configures nftables support in Felix
+	// Options: Disabled, Enabled, Auto
+	NFTablesMode string `json:"nftablesMode,omitempty"`
 	// PrometheusMetricsEnabled can be set to enable the experimental Prometheus
 	// metrics server (default: false)
 	PrometheusMetricsEnabled bool `json:"prometheusMetricsEnabled,omitempty"`
@@ -189,7 +272,7 @@ type CalicoNetworkingSpec struct {
 	VXLANMode string `json:"vxlanMode,omitempty"`
 	// WireguardEnabled enables WireGuard encryption for all on-the-wire pod-to-pod traffic
 	// (default: false)
-	WireguardEnabled bool `json:"wireguardEnabled,omitempty"`
+	WireguardEnabled *bool `json:"wireguardEnabled,omitempty"`
 }
 
 // CanalNetworkingSpec declares that we want Canal networking
@@ -204,9 +287,9 @@ type CanalNetworkingSpec struct {
 	// for traffic between pod to host after calico rules have been processed.
 	// Default: ACCEPT (other options: DROP, RETURN)
 	DefaultEndpointToHostAction string `json:"defaultEndpointToHostAction,omitempty"`
-	// DisableFlannelForwardRules configures Flannel to NOT add the
-	// default ACCEPT traffic rules to the iptables FORWARD chain
-	DisableFlannelForwardRules bool `json:"disableFlannelForwardRules,omitempty"`
+	// FlanneldIptablesForwardRules configures Flannel to add the
+	// default ACCEPT traffic rules to the iptables FORWARD chain. (default: true)
+	FlanneldIptablesForwardRules *bool `json:"flanneldIptablesForwardRules,omitempty"`
 	// IptablesBackend controls which variant of iptables binary Felix uses
 	// Default: Auto (other options: Legacy, NFT)
 	IptablesBackend string `json:"iptablesBackend,omitempty"`
@@ -237,6 +320,22 @@ type CanalNetworkingSpec struct {
 
 // KuberouterNetworkingSpec declares that we want Kube-router networking
 type KuberouterNetworkingSpec struct {
+	// UseNFTablesForNetpol makes the network policy controller enforce
+	// NetworkPolicies with nftables instead of iptables and ipsets.
+	// This is experimental upstream and only affects the network policy
+	// controller; the service proxy and router controllers are unchanged.
+	// Default: false
+	UseNFTablesForNetpol *bool `json:"useNFTablesForNetpol,omitempty"`
+	// ExternalIPRanges are the CIDRs from which Service externalIPs are accepted.
+	// Setting this or LoadBalancerIPRanges turns on kube-router's strict external
+	// IP validation, which drops any address outside the configured ranges.
+	// Leaving both empty keeps strict validation off.
+	ExternalIPRanges []string `json:"externalIPRanges,omitempty"`
+	// LoadBalancerIPRanges are the CIDRs from which Service loadBalancerIPs are
+	// accepted. Setting this or ExternalIPRanges turns on kube-router's strict
+	// external IP validation, which drops any address outside the configured
+	// ranges. Leaving both empty keeps strict validation off.
+	LoadBalancerIPRanges []string `json:"loadBalancerIPRanges,omitempty"`
 }
 
 // RomanaNetworkingSpec declares that we want Romana networking
@@ -250,10 +349,15 @@ type RomanaNetworkingSpec struct {
 
 // AmazonVPCNetworkingSpec declares that we want Amazon VPC CNI networking
 type AmazonVPCNetworkingSpec struct {
-	// ImageName is the container image name to use.
-	ImageName string `json:"imageName,omitempty"`
-	// InitImageName is the init container image name to use.
-	InitImageName string `json:"initImageName,omitempty"`
+	// Image is the container image name to use.
+	Image string `json:"image,omitempty"`
+	// InitImage is the init container image name to use.
+	InitImage string `json:"initImage,omitempty"`
+	// NetworkPolicyAgentImage is the container image to use for the network policy agent
+	NetworkPolicyAgentImage string `json:"networkPolicyAgentImage,omitempty"`
+	// EnableNetworkPolicy enables enforcement of Kubernetes NetworkPolicy resources by the
+	// network policy agent. The network policy controller must be deployed separately.
+	EnableNetworkPolicy bool `json:"enableNetworkPolicy,omitempty"`
 	// Env is a list of environment variables to set in the container.
 	Env []EnvVar `json:"env,omitempty"`
 }
@@ -262,11 +366,16 @@ const CiliumIpamEni = "eni"
 
 type CiliumEncryptionType string
 
-const CiliumEncryptionTypeIPSec CiliumEncryptionType = "ipsec"
-const CiliumEncryptionTypeWireguard CiliumEncryptionType = "wireguard"
+const (
+	CiliumEncryptionTypeIPSec     CiliumEncryptionType = "ipsec"
+	CiliumEncryptionTypeWireguard CiliumEncryptionType = "wireguard"
+)
 
 // CiliumNetworkingSpec declares that we want Cilium networking
 type CiliumNetworkingSpec struct {
+	// Registry overrides the default Cilium container registry (quay.io)
+	Registry string `json:"registry,omitempty"`
+
 	// Version is the version of the Cilium agent and the Cilium Operator.
 	Version string `json:"version,omitempty"`
 
@@ -275,56 +384,23 @@ type CiliumNetworkingSpec struct {
 	// CPURequest CPU request of Cilium agent + operator container. (default: 25m)
 	CPURequest *resource.Quantity `json:"cpuRequest,omitempty"`
 
-	// AccessLog is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	AccessLog string `json:"accessLog,omitempty"`
-	// AgentLabels is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	AgentLabels []string `json:"agentLabels,omitempty"`
 	// AgentPrometheusPort is the port to listen to for Prometheus metrics.
 	// Defaults to 9090.
 	AgentPrometheusPort int `json:"agentPrometheusPort,omitempty"`
-	// AllowLocalhost is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	AllowLocalhost string `json:"allowLocalhost,omitempty"`
-	// AutoIpv6NodeRoutes is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	AutoIpv6NodeRoutes bool `json:"autoIpv6NodeRoutes,omitempty"`
-	// BPFRoot is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	BPFRoot string `json:"bpfRoot,omitempty"`
-	// ChainingMode allows to use Cilium in combination with other CNI plugins.
+	// Metrics is a list of metrics to add or remove from the default list of metrics the agent exposes.
+	Metrics []string `json:"metrics,omitempty"`
+
+	// ChainingMode allows using Cilium in combination with other CNI plugins.
 	// With Cilium CNI chaining, the base network connectivity and IP address management is managed
 	// by the non-Cilium CNI plugin, but Cilium attaches eBPF programs to the network devices created
 	// by the non-Cilium plugin to provide L3/L4 network visibility, policy enforcement and other advanced features.
 	// Default: none
 	ChainingMode string `json:"chainingMode,omitempty"`
-	// ContainerRuntime is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	ContainerRuntime []string `json:"containerRuntime,omitempty"`
-	// ContainerRuntimeEndpoint is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	ContainerRuntimeEndpoint map[string]string `json:"containerRuntimeEndpoint,omitempty"`
 	// Debug runs Cilium in debug mode.
 	Debug bool `json:"debug,omitempty"`
-	// DebugVerbose is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	DebugVerbose []string `json:"debugVerbose,omitempty"`
-	// Device is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	Device string `json:"device,omitempty"`
-	// DisableConntrack is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	DisableConntrack bool `json:"disableConntrack,omitempty"`
 	// DisableEndpointCRD disables usage of CiliumEndpoint CRD.
 	// Default: false
 	DisableEndpointCRD bool `json:"disableEndpointCRD,omitempty"`
-	// DisableIpv4 is deprecated: Use EnableIpv4 instead.
-	// Setting this flag has no effect.
-	DisableIpv4 bool `json:"disableIpv4,omitempty"`
-	// DisableK8sServices is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	DisableK8sServices bool `json:"disableK8sServices,omitempty"`
 	// EnablePolicy specifies the policy enforcement mode.
 	// "default": Follows Kubernetes policy enforcement.
 	// "always": Cilium restricts all traffic if no policy is in place.
@@ -334,15 +410,20 @@ type CiliumNetworkingSpec struct {
 	// EnableL7Proxy enables L7 proxy for L7 policy enforcement.
 	// Default: true
 	EnableL7Proxy *bool `json:"enableL7Proxy,omitempty"`
+	// EnableLocalRedirectPolicy that enables pod traffic destined to an IP address and port/protocol
+	// tuple or Kubernetes service to be redirected locally to backend pod(s) within a node, using eBPF.
+	// https://docs.cilium.io/en/stable/network/kubernetes/local-redirect-policy/
+	// Default: false
+	EnableLocalRedirectPolicy *bool `json:"enableLocalRedirectPolicy,omitempty"`
 	// EnableBPFMasquerade enables masquerading packets from endpoints leaving the host with BPF instead of iptables.
 	// Default: false
 	EnableBPFMasquerade *bool `json:"enableBPFMasquerade,omitempty"`
 	// EnableEndpointHealthChecking enables connectivity health checking between virtual endpoints.
 	// Default: true
 	EnableEndpointHealthChecking *bool `json:"enableEndpointHealthChecking,omitempty"`
-	// EnableTracing is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	EnableTracing bool `json:"enableTracing,omitempty"`
+	// EnableHostFirewall enables the host firewall in the Cilium agent.
+	// Default: false
+	EnableHostFirewall *bool `json:"enableHostFirewall,omitempty"`
 	// EnablePrometheusMetrics enables the Cilium "/metrics" endpoint for both the agent and the operator.
 	EnablePrometheusMetrics bool `json:"enablePrometheusMetrics,omitempty"`
 	// EnableEncryption enables Cilium Encryption.
@@ -351,119 +432,27 @@ type CiliumNetworkingSpec struct {
 	// EncryptionType specifies Cilium Encryption method ("ipsec", "wireguard").
 	// Default: ipsec
 	EncryptionType CiliumEncryptionType `json:"encryptionType,omitempty"`
-	// EnvoyLog is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	EnvoyLog string `json:"envoyLog,omitempty"`
+	// NodeEncryption enables encryption for pure node to node traffic.
+	// Default: false
+	NodeEncryption bool `json:"nodeEncryption,omitempty"`
 	// IdentityAllocationMode specifies in which backend identities are stored ("crd", "kvstore").
 	// Default: crd
 	IdentityAllocationMode string `json:"identityAllocationMode,omitempty"`
 	// IdentityChangeGracePeriod specifies the duration to wait before using a changed identity.
 	// Default: 5s
 	IdentityChangeGracePeriod string `json:"identityChangeGracePeriod,omitempty"`
-	// Ipv4ClusterCIDRMaskSize is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	Ipv4ClusterCIDRMaskSize int `json:"ipv4ClusterCidrMaskSize,omitempty"`
-	// Ipv4Node is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	Ipv4Node string `json:"ipv4Node,omitempty"`
-	// Ipv4Range is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	Ipv4Range string `json:"ipv4Range,omitempty"`
-	// Ipv4ServiceRange is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	Ipv4ServiceRange string `json:"ipv4ServiceRange,omitempty"`
-	// Ipv6ClusterAllocCidr is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	Ipv6ClusterAllocCidr string `json:"ipv6ClusterAllocCidr,omitempty"`
-	// Ipv6Node is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	Ipv6Node string `json:"ipv6Node,omitempty"`
-	// Ipv6Range is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	Ipv6Range string `json:"ipv6Range,omitempty"`
-	// Ipv6ServiceRange is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	Ipv6ServiceRange string `json:"ipv6ServiceRange,omitempty"`
-	// K8sAPIServer is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	K8sAPIServer string `json:"k8sApiServer,omitempty"`
-	// K8sKubeconfigPath is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	K8sKubeconfigPath string `json:"k8sKubeconfigPath,omitempty"`
-	// KeepBPFTemplates is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	KeepBPFTemplates bool `json:"keepBpfTemplates,omitempty"`
-	// KeepConfig is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	KeepConfig bool `json:"keepConfig,omitempty"`
-	// LabelPrefixFile is not implemented and may be removed in the future.
-	// Setting this has currently no effect
-	LabelPrefixFile string `json:"labelPrefixFile,omitempty"`
-	// Labels is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	Labels []string `json:"labels,omitempty"`
-	// LB is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	LB string `json:"lb,omitempty"`
-	// LibDir is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	LibDir string `json:"libDir,omitempty"`
-	// LogDrivers is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	LogDrivers []string `json:"logDriver,omitempty"`
-	// LogOpt is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	LogOpt map[string]string `json:"logOpt,omitempty"`
-	// Logstash is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	Logstash bool `json:"logstash,omitempty"`
-	// LogstashAgent is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	LogstashAgent string `json:"logstashAgent,omitempty"`
-	// LogstashProbeTimer is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	LogstashProbeTimer uint32 `json:"logstashProbeTimer,omitempty"`
-	// DisableMasquerade disables masquerading traffic to external destinations behind the node IP.
-	DisableMasquerade *bool `json:"disableMasquerade,omitempty"`
-	// Nat6Range is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	Nat46Range string `json:"nat46Range,omitempty"`
+	// Masquerade enables masquerading IPv4 traffic to external destinations behind the node IP.
+	// Default: false if IPAM is "eni" or in IPv6 mode, otherwise true
+	Masquerade *bool `json:"masquerade,omitempty"`
 	// AgentPodAnnotations makes possible to add additional annotations to cilium agent.
 	// Default: none
 	AgentPodAnnotations map[string]string `json:"agentPodAnnotations,omitempty"`
-	// Pprof is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	Pprof bool `json:"pprof,omitempty"`
-	// PrefilterDevice is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	PrefilterDevice string `json:"prefilterDevice,omitempty"`
-	// PrometheusServeAddr is deprecated. Use EnablePrometheusMetrics and AgentPrometheusPort instead.
-	// Setting this has no effect.
-	PrometheusServeAddr string `json:"prometheusServeAddr,omitempty"`
-	// Restore is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	Restore bool `json:"restore,omitempty"`
-	// SingleClusterRoute is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	SingleClusterRoute bool `json:"singleClusterRoute,omitempty"`
-	// SocketPath is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	SocketPath string `json:"socketPath,omitempty"`
-	// StateDir is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	StateDir string `json:"stateDir,omitempty"`
-	// TracePayloadLen is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	TracePayloadLen int `json:"tracePayloadlen,omitempty"`
+	// OperatorPodAnnotations makes possible to add additional annotations to cilium operator.
+	// Default: none
+	OperatorPodAnnotations map[string]string `json:"operatorPodAnnotations,omitempty"`
 	// Tunnel specifies the Cilium tunnelling mode. Possible values are "vxlan", "geneve", or "disabled".
 	// Default: vxlan
 	Tunnel string `json:"tunnel,omitempty"`
-	// EnableIpv6 is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	EnableIpv6 bool `json:"enableipv6,omitempty"`
-	// EnableIpv4 is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	EnableIpv4 bool `json:"enableipv4,omitempty"`
 	// MonitorAggregation sets the level of packet monitoring. Possible values are "low", "medium", or "maximum".
 	// Default: medium
 	MonitorAggregation string `json:"monitorAggregation,omitempty"`
@@ -491,6 +480,9 @@ type CiliumNetworkingSpec struct {
 	// BPFLBMapMax is the maximum number of entries in bpf lb service, backend and affinity maps.
 	// Default: 65536
 	BPFLBMapMax int `json:"bpfLBMapMax,omitempty"`
+	// BPFLBSock enables socket-based LB for E/W traffic.
+	// Default: false
+	BPFLBSock bool `json:"bpfLBSock,omitempty"`
 	// BPFLBSockHostNSOnly enables skipping socket LB for services when inside a pod namespace,
 	// in favor of service LB at the pod interface. Socket LB is still used when in the host namespace.
 	// Required by service mesh (e.g., Istio, Linkerd).
@@ -505,31 +497,28 @@ type CiliumNetworkingSpec struct {
 	SidecarIstioProxyImage string `json:"sidecarIstioProxyImage,omitempty"`
 	// ClusterName is the name of the cluster. It is only relevant when building a mesh of clusters.
 	ClusterName string `json:"clusterName,omitempty"`
-	// ToFqdnsDNSRejectResponseCode sets the DNS response code for rejecting DNS requests.
+	// ClusterID is the ID of the cluster. It is only relevant when building a mesh of clusters.
+	// Must be a number between 1 and 255.
+	ClusterID uint8 `json:"clusterID,omitempty"`
+	// ToFQDNsDNSRejectResponseCode sets the DNS response code for rejecting DNS requests.
 	// Possible values are "nameError" or "refused".
 	// Default: refused
-	ToFqdnsDNSRejectResponseCode string `json:"toFqdnsDnsRejectResponseCode,omitempty"`
-	// ToFqdnsEnablePoller replaces the DNS proxy-based implementation of FQDN policies
+	ToFQDNsDNSRejectResponseCode string `json:"toFQDNsDNSRejectResponseCode,omitempty"`
+	// ToFQDNsEnablePoller replaces the DNS proxy-based implementation of FQDN policies
 	// with the less powerful legacy implementation.
 	// Default: false
-	ToFqdnsEnablePoller bool `json:"toFqdnsEnablePoller,omitempty"`
-	// ContainerRuntimeLabels enables fetching of container-runtime labels from the specified container runtime and associating them with endpoints.
-	// Supported values are: "none", "containerd", "crio", "docker", "auto"
-	// As of Cilium 1.7.0, Cilium no longer fetches information from the
-	// container runtime and this field is ignored.
-	// Default: none
-	ContainerRuntimeLabels string `json:"containerRuntimeLabels,omitempty"`
-	// Ipam specifies the IP address allocation mode to use.
+	ToFQDNsEnablePoller bool `json:"toFQDNsEnablePoller,omitempty"`
+	// IPAM specifies the IP address allocation mode to use.
 	// Possible values are "crd" and "eni".
 	// "eni" will use AWS native networking for pods. Eni requires masquerade to be set to false.
 	// "crd" will use CRDs for controlling IP address management.
 	// "hostscope" will use hostscope IPAM mode.
 	// "kubernetes" will use addersing based on node pod CIDR.
-	// Empty value will use hostscope for cilum <= 1.7 and "kubernetes" otherwise.
-	Ipam string `json:"ipam,omitempty"`
-	// IPTablesRulesNoinstall disables installing the base IPTables rules used for masquerading and kube-proxy.
-	// Default: false
-	IPTablesRulesNoinstall bool `json:"IPTablesRulesNoinstall,omitempty"`
+	// Default: "kubernetes".
+	IPAM string `json:"ipam,omitempty"`
+	// InstallIptablesRules enables installing the base IPTables rules used for masquerading and kube-proxy.
+	// Default: true
+	InstallIptablesRules *bool `json:"installIptablesRules,omitempty"`
 	// AutoDirectNodeRoutes adds automatic L2 routing between nodes.
 	// Default: false
 	AutoDirectNodeRoutes bool `json:"autoDirectNodeRoutes,omitempty"`
@@ -546,29 +535,70 @@ type CiliumNetworkingSpec struct {
 	// The cluster is operated by cilium-etcd-operator.
 	// Default: false
 	EtcdManaged bool `json:"etcdManaged,omitempty"`
-	// EnableRemoteNodeIdentity enables the remote-node-identity added in Cilium 1.7.0.
+	// EnableRemoteNodeIdentity enables the remote-node-identity.
 	// Default: true
 	EnableRemoteNodeIdentity *bool `json:"enableRemoteNodeIdentity,omitempty"`
+	// EnableUnreachableRoutes enables unreachable routes on pod deletion.
+	// Default: false
+	EnableUnreachableRoutes *bool `json:"enableUnreachableRoutes,omitempty"`
+	// CniExclusive configures whether to remove other CNI configuration files.
+	// Default: true
+	CniExclusive *bool `json:"cniExclusive,omitempty"`
 	// Hubble configures the Hubble service on the Cilium agent.
 	Hubble *HubbleSpec `json:"hubble,omitempty"`
 
-	// RemoveCbrBridge is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	RemoveCbrBridge bool `json:"removeCbrBridge,omitempty"`
-	// RestartPods is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	RestartPods bool `json:"restartPods,omitempty"`
-	// ReconfigureKubelet is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	ReconfigureKubelet bool `json:"reconfigureKubelet,omitempty"`
-	// NodeInitBootstrapFile is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	NodeInitBootstrapFile string `json:"nodeInitBootstrapFile,omitempty"`
-	// CniBinPath is not implemented and may be removed in the future.
-	// Setting this has no effect.
-	CniBinPath string `json:"cniBinPath,omitempty"`
-	// Determines if CNP NodeStatus updates will be sent to the Kubernetes api-server.
+	// DisableCNPStatusUpdates determines if CNP NodeStatus updates will be sent to the Kubernetes api-server.
 	DisableCNPStatusUpdates *bool `json:"disableCNPStatusUpdates,omitempty"`
+
+	// EnableServiceTopology determine if cilium should use topology aware hints.
+	EnableServiceTopology bool `json:"enableServiceTopology,omitempty"`
+
+	// Ingress specifies the configuration for Cilium Ingress settings.
+	Ingress *CiliumIngressSpec `json:"ingress,omitempty"`
+
+	// GatewayAPI specifies the configuration for Cilium Gateway API settings.
+	GatewayAPI *CiliumGatewayAPISpec `json:"gatewayAPI,omitempty"`
+
+	// ExtraConfig is appended to the cilium-config ConfigMap. Keys here override any value
+	// rendered by kops. All values must be strings (e.g. "true", not true).
+	ExtraConfig map[string]string `json:"extraConfig,omitempty"`
+}
+
+// CiliumIngressSpec configures Cilium Ingress settings.
+type CiliumIngressSpec struct {
+	// Enabled specifies whether Cilium Ingress is enabled.
+	Enabled *bool `json:"enabled,omitempty"`
+
+	// EnforceHttps specifies whether HTTPS enforcement is enabled for Ingress traffic.
+	// Default: true
+	EnforceHttps *bool `json:"enforceHttps,omitempty"`
+
+	// EnableSecretsSync specifies whether synchronization of secrets is enabled.
+	// Default: true
+	EnableSecretsSync *bool `json:"enableSecretsSync,omitempty"`
+
+	// LoadBalancerAnnotationPrefixes specifies annotation prefixes for Load Balancer configuration.
+	// Default: "service.beta.kubernetes.io service.kubernetes.io cloud.google.com"
+	LoadBalancerAnnotationPrefixes string `json:"loadBalancerAnnotationPrefixes,omitempty"`
+
+	// DefaultLoadBalancerMode specifies the default load balancer mode.
+	// Possible values: 'shared' or 'dedicated'
+	// Default: dedicated
+	DefaultLoadBalancerMode string `json:"defaultLoadBalancerMode,omitempty"`
+
+	// SharedLoadBalancerServiceName specifies the name of the shared load balancer service.
+	// Default: cilium-ingress
+	SharedLoadBalancerServiceName string `json:"sharedLoadBalancerServiceName,omitempty"`
+}
+
+// CiliumGatewayAPISpec configures Cilium Gateway API settings.
+type CiliumGatewayAPISpec struct {
+	// Enabled specifies whether Cilium Gateway API is enabled.
+	Enabled *bool `json:"enabled,omitempty"`
+
+	// EnableSecretsSync specifies whether synchronization of secrets is enabled.
+	// Default: true
+	EnableSecretsSync *bool `json:"enableSecretsSync,omitempty"`
 }
 
 // HubbleSpec configures the Hubble service on the Cilium agent.
@@ -577,7 +607,7 @@ type HubbleSpec struct {
 	Enabled *bool `json:"enabled,omitempty"`
 
 	// Metrics is a list of metrics to collect. If empty or null, metrics are disabled.
-	// See https://docs.cilium.io/en/stable/configuration/metrics/#hubble-exported-metrics
+	// See https://docs.cilium.io/en/stable/observability/metrics/#hubble-exported-metrics
 	Metrics []string `json:"metrics,omitempty"`
 }
 
@@ -587,6 +617,34 @@ type LyftVPCNetworkingSpec struct {
 	SubnetTags map[string]string `json:"subnetTags,omitempty"`
 }
 
-// GCENetworkingSpec is the specification of GCE's native networking mode, using IP aliases
-type GCENetworkingSpec struct {
+// GCPNetworkingSpec is the specification of GCP's native networking mode, using IP aliases.
+type GCPNetworkingSpec struct{}
+
+// KindnetNetworkingSpec configures Kindnet settings.
+type KindnetNetworkingSpec struct {
+	// Version is the version of the kindnet agent.
+	// Default: v1.8.0
+	Version string `json:"version,omitempty"`
+	// Image is the container image to use for kindnet. When set, it replaces
+	// registry.k8s.io/networking/kindnet:<version> and Version is not used.
+	Image string `json:"image,omitempty"`
+	// Enable network policies
+	NetworkPolicies              *bool `json:"networkPolicies,omitempty"`
+	AdminNetworkPolicies         *bool `json:"adminNetworkPolicies,omitempty"`
+	BaselineAdminNetworkPolicies *bool `json:"baselineAdminNetworkPolicies,omitempty"`
+	// enable dns caching
+	DNSCaching *bool `json:"dnsCaching,omitempty"`
+	// enable nat64 on ipv6 clusters
+	NAT64 *bool `json:"nat64,omitempty"`
+	// number of packets in a connection to offload it to the fast path
+	FastPathThreshold *int32 `json:"fastPathThreshold,omitempty"`
+	// node agent masquerading rules
+	Masquerade *KindnetMasqueradeSpec `json:"masquerade,omitempty"`
+	// log level
+	LogLevel *int32 `json:"logLevel,omitempty"`
+}
+
+type KindnetMasqueradeSpec struct {
+	Enabled            *bool    `json:"enabled,omitempty"`
+	NonMasqueradeCIDRs []string `json:"nonMasqueradeCIDRs,omitempty"`
 }

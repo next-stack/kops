@@ -19,34 +19,38 @@ package mockelbv2
 import (
 	"sync"
 
-	"github.com/aws/aws-sdk-go/service/elbv2"
-	"github.com/aws/aws-sdk-go/service/elbv2/elbv2iface"
+	"k8s.io/kops/cloudmock/aws/mockec2"
+	"k8s.io/kops/util/pkg/awsinterfaces"
+
+	elbv2types "github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2/types"
 )
 
 type MockELBV2 struct {
-	elbv2iface.ELBV2API
+	awsinterfaces.ELBV2API
 
 	mutex sync.Mutex
 
+	EC2           *mockec2.MockEC2
 	LoadBalancers map[string]*loadBalancer
 	lbCount       int
 	TargetGroups  map[string]*targetGroup
 	tgCount       int
 	Listeners     map[string]*listener
 	listenerCount int
-	LBAttributes  map[string][]*elbv2.LoadBalancerAttribute
+	LBAttributes  map[string][]elbv2types.LoadBalancerAttribute
 
-	Tags map[string]*elbv2.TagDescription
+	Tags map[string]elbv2types.TagDescription
 }
 
 type loadBalancer struct {
-	description elbv2.LoadBalancer
+	description elbv2types.LoadBalancer
 }
 
 type targetGroup struct {
-	description elbv2.TargetGroup
+	description elbv2types.TargetGroup
+	attributes  []elbv2types.TargetGroupAttribute
 }
 
 type listener struct {
-	description elbv2.Listener
+	description elbv2types.Listener
 }

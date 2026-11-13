@@ -66,13 +66,13 @@ func (x *awsElastigroupService) Create(ctx context.Context, group InstanceGroup)
 		return "", err
 	}
 
-	return fi.StringValue(output.Group.ID), nil
+	return fi.ValueOf(output.Group.ID), nil
 }
 
 // Read returns an existing InstanceGroup by ID.
 func (x *awsElastigroupService) Read(ctx context.Context, groupID string) (InstanceGroup, error) {
 	input := &awseg.ReadGroupInput{
-		GroupID: fi.String(groupID),
+		GroupID: new(groupID),
 	}
 
 	output, err := x.svc.Read(ctx, input)
@@ -91,13 +91,12 @@ func (x *awsElastigroupService) Update(ctx context.Context, group InstanceGroup)
 
 	_, err := x.svc.Update(ctx, input)
 	return err
-
 }
 
 // Delete deletes an existing InstanceGroup by ID.
 func (x *awsElastigroupService) Delete(ctx context.Context, groupID string) error {
 	input := &awseg.DeleteGroupInput{
-		GroupID: fi.String(groupID),
+		GroupID: new(groupID),
 	}
 
 	_, err := x.svc.Delete(ctx, input)
@@ -107,10 +106,10 @@ func (x *awsElastigroupService) Delete(ctx context.Context, groupID string) erro
 // Detach removes one or more instances from the specified InstanceGroup.
 func (x *awsElastigroupService) Detach(ctx context.Context, groupID string, instanceIDs []string) error {
 	input := &awseg.DetachGroupInput{
-		GroupID:                       fi.String(groupID),
+		GroupID:                       new(groupID),
 		InstanceIDs:                   instanceIDs,
-		ShouldDecrementTargetCapacity: fi.Bool(false),
-		ShouldTerminateInstances:      fi.Bool(true),
+		ShouldDecrementTargetCapacity: new(false),
+		ShouldTerminateInstances:      new(true),
 	}
 
 	_, err := x.svc.Detach(ctx, input)
@@ -120,7 +119,7 @@ func (x *awsElastigroupService) Detach(ctx context.Context, groupID string, inst
 // Instances returns a list of all instances that belong to specified InstanceGroup.
 func (x *awsElastigroupService) Instances(ctx context.Context, groupID string) ([]Instance, error) {
 	input := &awseg.StatusGroupInput{
-		GroupID: fi.String(groupID),
+		GroupID: new(groupID),
 	}
 
 	output, err := x.svc.Status(ctx, input)
@@ -166,13 +165,13 @@ func (x *awsOceanService) Create(ctx context.Context, group InstanceGroup) (stri
 		return "", err
 	}
 
-	return fi.StringValue(output.Cluster.ID), nil
+	return fi.ValueOf(output.Cluster.ID), nil
 }
 
 // Read returns an existing InstanceGroup by ID.
 func (x *awsOceanService) Read(ctx context.Context, clusterID string) (InstanceGroup, error) {
 	input := &awsoc.ReadClusterInput{
-		ClusterID: fi.String(clusterID),
+		ClusterID: new(clusterID),
 	}
 
 	output, err := x.svc.ReadCluster(ctx, input)
@@ -191,13 +190,12 @@ func (x *awsOceanService) Update(ctx context.Context, group InstanceGroup) error
 
 	_, err := x.svc.UpdateCluster(ctx, input)
 	return err
-
 }
 
 // Delete deletes an existing InstanceGroup by ID.
 func (x *awsOceanService) Delete(ctx context.Context, clusterID string) error {
 	input := &awsoc.DeleteClusterInput{
-		ClusterID: fi.String(clusterID),
+		ClusterID: new(clusterID),
 	}
 
 	_, err := x.svc.DeleteCluster(ctx, input)
@@ -207,10 +205,10 @@ func (x *awsOceanService) Delete(ctx context.Context, clusterID string) error {
 // Detach removes one or more instances from the specified InstanceGroup.
 func (x *awsOceanService) Detach(ctx context.Context, clusterID string, instanceIDs []string) error {
 	input := &awsoc.DetachClusterInstancesInput{
-		ClusterID:                     fi.String(clusterID),
+		ClusterID:                     new(clusterID),
 		InstanceIDs:                   instanceIDs,
-		ShouldDecrementTargetCapacity: fi.Bool(false),
-		ShouldTerminateInstances:      fi.Bool(true),
+		ShouldDecrementTargetCapacity: new(false),
+		ShouldTerminateInstances:      new(true),
 	}
 
 	_, err := x.svc.DetachClusterInstances(ctx, input)
@@ -220,7 +218,7 @@ func (x *awsOceanService) Detach(ctx context.Context, clusterID string, instance
 // Instances returns a list of all instances that belong to specified InstanceGroup.
 func (x *awsOceanService) Instances(ctx context.Context, clusterID string) ([]Instance, error) {
 	input := &awsoc.ListClusterInstancesInput{
-		ClusterID: fi.String(clusterID),
+		ClusterID: new(clusterID),
 	}
 
 	output, err := x.svc.ListClusterInstances(ctx, input)
@@ -243,7 +241,7 @@ type awsOceanLaunchSpecService struct {
 // List returns a list of LaunchSpecs.
 func (x *awsOceanLaunchSpecService) List(ctx context.Context, oceanID string) ([]LaunchSpec, error) {
 	input := &awsoc.ListLaunchSpecsInput{
-		OceanID: fi.String(oceanID),
+		OceanID: new(oceanID),
 	}
 
 	output, err := x.svc.ListLaunchSpecs(ctx, input)
@@ -270,13 +268,13 @@ func (x *awsOceanLaunchSpecService) Create(ctx context.Context, spec LaunchSpec)
 		return "", err
 	}
 
-	return fi.StringValue(output.LaunchSpec.ID), nil
+	return fi.ValueOf(output.LaunchSpec.ID), nil
 }
 
 // Read returns an existing LaunchSpec by ID.
 func (x *awsOceanLaunchSpecService) Read(ctx context.Context, specID string) (LaunchSpec, error) {
 	input := &awsoc.ReadLaunchSpecInput{
-		LaunchSpecID: fi.String(specID),
+		LaunchSpecID: new(specID),
 	}
 
 	output, err := x.svc.ReadLaunchSpec(ctx, input)
@@ -295,13 +293,12 @@ func (x *awsOceanLaunchSpecService) Update(ctx context.Context, spec LaunchSpec)
 
 	_, err := x.svc.UpdateLaunchSpec(ctx, input)
 	return err
-
 }
 
 // Delete deletes an existing LaunchSpec by ID.
 func (x *awsOceanLaunchSpecService) Delete(ctx context.Context, specID string) error {
 	input := &awsoc.DeleteLaunchSpecInput{
-		LaunchSpecID: fi.String(specID),
+		LaunchSpecID: new(specID),
 	}
 
 	_, err := x.svc.DeleteLaunchSpec(ctx, input)
@@ -314,7 +311,7 @@ type awsElastigroupInstanceGroup struct {
 
 // Id returns the ID of the InstanceGroup.
 func (x *awsElastigroupInstanceGroup) Id() string {
-	return fi.StringValue(x.obj.ID)
+	return fi.ValueOf(x.obj.ID)
 }
 
 // Type returns the type of the InstanceGroup.
@@ -324,17 +321,17 @@ func (x *awsElastigroupInstanceGroup) Type() InstanceGroupType {
 
 // Name returns the name of the InstanceGroup.
 func (x *awsElastigroupInstanceGroup) Name() string {
-	return fi.StringValue(x.obj.Name)
+	return fi.ValueOf(x.obj.Name)
 }
 
 // MinSize returns the minimum size of the InstanceGroup.
 func (x *awsElastigroupInstanceGroup) MinSize() int {
-	return fi.IntValue(x.obj.Capacity.Minimum)
+	return fi.ValueOf(x.obj.Capacity.Minimum)
 }
 
 // MaxSize returns the maximum size of the InstanceGroup.
 func (x *awsElastigroupInstanceGroup) MaxSize() int {
-	return fi.IntValue(x.obj.Capacity.Maximum)
+	return fi.ValueOf(x.obj.Capacity.Maximum)
 }
 
 // CreatedAt returns the timestamp when the InstanceGroup has been created.
@@ -358,7 +355,7 @@ type awsElastigroupInstance struct {
 
 // Id returns the ID of the instance.
 func (x *awsElastigroupInstance) Id() string {
-	return fi.StringValue(x.obj.ID)
+	return fi.ValueOf(x.obj.ID)
 }
 
 // CreatedAt returns the timestamp when the Instance has been created.
@@ -377,7 +374,7 @@ type awsOceanInstanceGroup struct {
 
 // Id returns the ID of the InstanceGroup.
 func (x *awsOceanInstanceGroup) Id() string {
-	return fi.StringValue(x.obj.ID)
+	return fi.ValueOf(x.obj.ID)
 }
 
 // Type returns the type of the InstanceGroup.
@@ -387,17 +384,17 @@ func (x *awsOceanInstanceGroup) Type() InstanceGroupType {
 
 // Name returns the name of the InstanceGroup.
 func (x *awsOceanInstanceGroup) Name() string {
-	return fi.StringValue(x.obj.Name)
+	return fi.ValueOf(x.obj.Name)
 }
 
 // MinSize returns the minimum size of the InstanceGroup.
 func (x *awsOceanInstanceGroup) MinSize() int {
-	return fi.IntValue(x.obj.Capacity.Minimum)
+	return fi.ValueOf(x.obj.Capacity.Minimum)
 }
 
 // MaxSize returns the maximum size of the InstanceGroup.
 func (x *awsOceanInstanceGroup) MaxSize() int {
-	return fi.IntValue(x.obj.Capacity.Maximum)
+	return fi.ValueOf(x.obj.Capacity.Maximum)
 }
 
 // CreatedAt returns the timestamp when the InstanceGroup has been created.
@@ -421,7 +418,7 @@ type awsOceanInstance struct {
 
 // Id returns the ID of the instance.
 func (x *awsOceanInstance) Id() string {
-	return fi.StringValue(x.obj.ID)
+	return fi.ValueOf(x.obj.ID)
 }
 
 // CreatedAt returns the timestamp when the Instance has been created.
@@ -440,17 +437,17 @@ type awsOceanLaunchSpec struct {
 
 // Id returns the ID of the LaunchSpec.
 func (x *awsOceanLaunchSpec) Id() string {
-	return fi.StringValue(x.obj.ID)
+	return fi.ValueOf(x.obj.ID)
 }
 
 // Name returns the name of the LaunchSpec.
 func (x *awsOceanLaunchSpec) Name() string {
-	return fi.StringValue(x.obj.Name)
+	return fi.ValueOf(x.obj.Name)
 }
 
 // OceanId returns the ID of the Ocean instance group.
 func (x *awsOceanLaunchSpec) OceanId() string {
-	return fi.StringValue(x.obj.OceanID)
+	return fi.ValueOf(x.obj.OceanID)
 }
 
 // CreatedAt returns the timestamp when the LaunchSpec has been created.

@@ -17,10 +17,11 @@ limitations under the License.
 package openstack
 
 import (
+	"context"
 	"fmt"
 
-	"github.com/gophercloud/gophercloud/openstack/dns/v2/recordsets"
-	"github.com/gophercloud/gophercloud/openstack/dns/v2/zones"
+	"github.com/gophercloud/gophercloud/v2/openstack/dns/v2/recordsets"
+	"github.com/gophercloud/gophercloud/v2/openstack/dns/v2/zones"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/kops/util/pkg/vfs"
 )
@@ -34,7 +35,7 @@ func listDNSZones(c OpenstackCloud, opt zones.ListOptsBuilder) ([]zones.Zone, er
 	var zs []zones.Zone
 
 	done, err := vfs.RetryWithBackoff(readBackoff, func() (bool, error) {
-		allPages, err := zones.List(c.DNSClient(), opt).AllPages()
+		allPages, err := zones.List(c.DNSClient(), opt).AllPages(context.TODO())
 		if err != nil {
 			return false, fmt.Errorf("failed to list dns zones: %s", err)
 		}
@@ -54,6 +55,28 @@ func listDNSZones(c OpenstackCloud, opt zones.ListOptsBuilder) ([]zones.Zone, er
 	}
 }
 
+func deleteDNSRecordset(c OpenstackCloud, zoneID string, rrsetID string) error {
+	done, err := vfs.RetryWithBackoff(writeBackoff, func() (bool, error) {
+		err := recordsets.Delete(context.TODO(), c.DNSClient(), zoneID, rrsetID).ExtractErr()
+		if err != nil {
+			return false, fmt.Errorf("failed to delete dns recordset: %s", err)
+		}
+		return true, nil
+	})
+	if err != nil {
+		return err
+	} else if done {
+		return nil
+	} else {
+		return wait.ErrWaitTimeout
+	}
+}
+
+// DeleteDNSRecordset will delete single DNS recordset in zone
+func (c *openstackCloud) DeleteDNSRecordset(zoneID string, rrsetID string) error {
+	return deleteDNSRecordset(c, zoneID, rrsetID)
+}
+
 // ListDNSRecordsets will list DNS recordsets
 func (c *openstackCloud) ListDNSRecordsets(zoneID string, opt recordsets.ListOptsBuilder) ([]recordsets.RecordSet, error) {
 	return listDNSRecordsets(c, zoneID, opt)
@@ -63,7 +86,7 @@ func listDNSRecordsets(c OpenstackCloud, zoneID string, opt recordsets.ListOptsB
 	var rrs []recordsets.RecordSet
 
 	done, err := vfs.RetryWithBackoff(readBackoff, func() (bool, error) {
-		allPages, err := recordsets.ListByZone(c.DNSClient(), zoneID, opt).AllPages()
+		allPages, err := recordsets.ListByZone(c.DNSClient(), zoneID, opt).AllPages(context.TODO())
 		if err != nil {
 			return false, fmt.Errorf("failed to list dns recordsets: %s", err)
 		}

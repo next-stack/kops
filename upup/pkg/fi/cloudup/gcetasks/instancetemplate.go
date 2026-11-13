@@ -51,21 +51,24 @@ type InstanceTemplate struct {
 
 	Lifecycle fi.Lifecycle
 
-	Network *Network
-	Tags    []string
-	//Labels      map[string]string
-	Preemptible *bool
+	Network              *Network
+	Tags                 []string
+	Labels               map[string]string
+	Preemptible          *bool
+	GCPProvisioningModel *string
 
-	BootDiskImage  *string
-	BootDiskSizeGB *int64
-	BootDiskType   *string
+	BootDiskImage      *string
+	BootDiskSizeGB     *int64
+	BootDiskType       *string
+	BootDiskIOPS       *int64
+	BootDiskThroughput *int64
 
 	CanIPForward  *bool
 	Subnet        *Subnet
 	AliasIPRanges map[string]string
 
 	Scopes          []string
-	ServiceAccounts []string
+	ServiceAccounts []*ServiceAccount
 
 	Metadata    map[string]fi.Resource
 	MachineType *string
@@ -73,19 +76,26 @@ type InstanceTemplate struct {
 	// HasExternalIP is set to true when an external IP is allocated to an instance.
 	HasExternalIP *bool
 
+	// StackType indicates the address families supported (IPV4_IPV6 or IPV4_ONLY)
+	StackType *string
+
 	// ID is the actual name
 	ID *string
+
+	GuestAccelerators []AcceleratorConfig
 }
 
-var _ fi.Task = &InstanceTemplate{}
-var _ fi.CompareWithID = &InstanceTemplate{}
+var (
+	_ fi.CloudupTask   = &InstanceTemplate{}
+	_ fi.CompareWithID = &InstanceTemplate{}
+)
 
 func (e *InstanceTemplate) CompareWithID() *string {
 	return e.ID
 }
 
-func (e *InstanceTemplate) Find(c *fi.Context) (*InstanceTemplate, error) {
-	cloud := c.Cloud.(gce.GCECloud)
+func (e *InstanceTemplate) Find(c *fi.CloudupContext) (*InstanceTemplate, error) {
+	cloud := c.T.Cloud.(gce.GCECloud)
 
 	templates, err := cloud.Compute().InstanceTemplates().List(context.Background(), cloud.Project())
 	if err != nil {
@@ -101,7 +111,7 @@ func (e *InstanceTemplate) Find(c *fi.Context) (*InstanceTemplate, error) {
 	}
 
 	for _, r := range templates {
-		if !strings.HasPrefix(r.Name, fi.StringValue(e.NamePrefix)+"-") {
+		if !strings.HasPrefix(r.Name, fi.ValueOf(e.NamePrefix)+"-") {
 			continue
 		}
 
@@ -114,23 +124,34 @@ func (e *InstanceTemplate) Find(c *fi.Context) (*InstanceTemplate, error) {
 		p := r.Properties
 
 		actual.Tags = append(actual.Tags, p.Tags.Items...)
-		actual.MachineType = fi.String(lastComponent(p.MachineType))
+		actual.Labels = p.Labels
+		actual.MachineType = new(lastComponent(p.MachineType))
 		actual.CanIPForward = &p.CanIpForward
 
 		bootDiskImage, err := ShortenImageURL(cloud.Project(), p.Disks[0].InitializeParams.SourceImage)
 		if err != nil {
 			return nil, fmt.Errorf("error parsing source image URL: %v", err)
 		}
-		actual.BootDiskImage = fi.String(bootDiskImage)
+		actual.BootDiskImage = new(bootDiskImage)
 		actual.BootDiskType = &p.Disks[0].InitializeParams.DiskType
 		actual.BootDiskSizeGB = &p.Disks[0].InitializeParams.DiskSizeGb
+		if p.Disks[0].InitializeParams.ProvisionedIops > 0 {
+			actual.BootDiskIOPS = &p.Disks[0].InitializeParams.ProvisionedIops
+		}
+		if p.Disks[0].InitializeParams.ProvisionedThroughput > 0 {
+			actual.BootDiskThroughput = &p.Disks[0].InitializeParams.ProvisionedThroughput
+		}
 
 		if p.Scheduling != nil {
 			actual.Preemptible = &p.Scheduling.Preemptible
+			actual.GCPProvisioningModel = &p.Scheduling.ProvisioningModel
 		}
 		if len(p.NetworkInterfaces) != 0 {
 			ni := p.NetworkInterfaces[0]
-			actual.Network = &Network{Name: fi.String(lastComponent(ni.Network))}
+			actual.Network = &Network{Name: new(lastComponent(ni.Network))}
+			if ni.StackType != "" {
+				actual.StackType = &ni.StackType
+			}
 
 			if len(ni.AliasIpRanges) != 0 {
 				actual.AliasIPRanges = make(map[string]string)
@@ -140,7 +161,7 @@ func (e *InstanceTemplate) Find(c *fi.Context) (*InstanceTemplate, error) {
 			}
 
 			if ni.Subnetwork != "" {
-				actual.Subnet = &Subnet{Name: fi.String(lastComponent(ni.Subnetwork))}
+				actual.Subnet = &Subnet{Name: new(lastComponent(ni.Subnetwork))}
 			}
 
 			acs := ni.AccessConfigs
@@ -151,9 +172,9 @@ func (e *InstanceTemplate) Find(c *fi.Context) (*InstanceTemplate, error) {
 				if acs[0].Type != accessConfigOneToOneNAT {
 					return nil, fmt.Errorf("unexpected access type in template %q: %s", *actual.Name, acs[0].Type)
 				}
-				actual.HasExternalIP = fi.Bool(true)
+				actual.HasExternalIP = new(true)
 			} else {
-				actual.HasExternalIP = fi.Bool(false)
+				actual.HasExternalIP = new(false)
 			}
 		}
 
@@ -161,7 +182,9 @@ func (e *InstanceTemplate) Find(c *fi.Context) (*InstanceTemplate, error) {
 			for _, scope := range serviceAccount.Scopes {
 				actual.Scopes = append(actual.Scopes, scopeToShortForm(scope))
 			}
-			actual.ServiceAccounts = append(actual.ServiceAccounts, serviceAccount.Email)
+			actual.ServiceAccounts = append(actual.ServiceAccounts, &ServiceAccount{
+				Email: &serviceAccount.Email,
+			})
 		}
 
 		// When we deal with additional disks (local disks), we'll need to map them like this...
@@ -182,7 +205,7 @@ func (e *InstanceTemplate) Find(c *fi.Context) (*InstanceTemplate, error) {
 		//			if err != nil {
 		//				return nil, fmt.Errorf("unable to parse image URL: %q", d.SourceImage)
 		//			}
-		//			actual.Image = fi.String(imageURL.Project + "/" + imageURL.Name)
+		//			actual.Image = new(imageURL.Project + "/" + imageURL.Name)
 		//		}
 		//	}
 		//}
@@ -190,7 +213,7 @@ func (e *InstanceTemplate) Find(c *fi.Context) (*InstanceTemplate, error) {
 		if p.Metadata != nil {
 			actual.Metadata = make(map[string]fi.Resource)
 			for _, meta := range p.Metadata.Items {
-				actual.Metadata[meta.Key] = fi.NewStringResource(fi.StringValue(meta.Value))
+				actual.Metadata[meta.Key] = fi.NewStringResource(fi.ValueOf(meta.Value))
 			}
 		}
 
@@ -206,44 +229,102 @@ func (e *InstanceTemplate) Find(c *fi.Context) (*InstanceTemplate, error) {
 		// System fields
 		actual.Lifecycle = e.Lifecycle
 
+		actual.GuestAccelerators = []AcceleratorConfig{}
+		for _, accelerator := range p.GuestAccelerators {
+			actual.GuestAccelerators = append(actual.GuestAccelerators, AcceleratorConfig{
+				AcceleratorCount: accelerator.AcceleratorCount,
+				AcceleratorType:  accelerator.AcceleratorType,
+			})
+		}
+
 		return actual, nil
 	}
 
 	return nil, nil
 }
 
-func (e *InstanceTemplate) Run(c *fi.Context) error {
-	return fi.DefaultDeltaRunMethod(e, c)
+func (e *InstanceTemplate) Run(c *fi.CloudupContext) error {
+	return fi.CloudupDefaultDeltaRunMethod(e, c)
 }
 
-func (_ *InstanceTemplate) CheckChanges(a, e, changes *InstanceTemplate) error {
-	if fi.StringValue(e.BootDiskImage) == "" {
+func (*InstanceTemplate) CheckChanges(a, e, changes *InstanceTemplate) error {
+	if fi.ValueOf(e.BootDiskImage) == "" {
 		return fi.RequiredField("BootDiskImage")
 	}
-	if fi.StringValue(e.MachineType) == "" {
+	if fi.ValueOf(e.MachineType) == "" {
 		return fi.RequiredField("MachineType")
 	}
 	return nil
 }
 
-func (e *InstanceTemplate) mapToGCE(project string, region string) (*compute.InstanceTemplate, error) {
-	// TODO: This is similar to Instance...
+type MachineTypeInfo struct {
+	SupportsMigration bool
+}
+
+func buildScheduling(machineTypeInfo *MachineTypeInfo, preemptible *bool, gcpProvisioningModel *string, guestAccelerators []AcceleratorConfig) *compute.Scheduling {
 	var scheduling *compute.Scheduling
 
-	if fi.BoolValue(e.Preemptible) {
+	if fi.ValueOf(preemptible) {
 		scheduling = &compute.Scheduling{
-			AutomaticRestart:  fi.Bool(false),
+			AutomaticRestart:  new(false),
 			OnHostMaintenance: "TERMINATE",
+			ProvisioningModel: fi.ValueOf(gcpProvisioningModel),
 			Preemptible:       true,
 		}
 	} else {
+		// We default to allowing migration, as it gives higher uptime.
+		// However, if we figure out that the instance does not support migration, we will set this to TERMINATE (so we can create the instance at all).
 		scheduling = &compute.Scheduling{
-			AutomaticRestart: fi.Bool(true),
-			// TODO: Migrate or terminate?
+			AutomaticRestart:  new(true),
 			OnHostMaintenance: "MIGRATE",
+			ProvisioningModel: "STANDARD",
 			Preemptible:       false,
 		}
 	}
+
+	if len(guestAccelerators) > 0 {
+		// Instances with accelerators cannot be migrated.
+		scheduling.OnHostMaintenance = "TERMINATE"
+	}
+
+	if machineTypeInfo != nil {
+		if !machineTypeInfo.SupportsMigration {
+			scheduling.OnHostMaintenance = "TERMINATE"
+		}
+	}
+	return scheduling
+}
+
+// guessMachineTypeInfo returns information about the machine type, such as whether it supports live migration.
+// We use this to determine the correct scheduling options for non-preemptible VMs.
+// If the machine type is not found, we return placeholder information, as we want to be tolerant of missing machine types, and just default to the safest scheduling options.
+func guessMachineTypeInfo(machineType string) (*MachineTypeInfo, error) {
+	machineTypeInfo := &MachineTypeInfo{
+		SupportsMigration: true,
+	}
+	if machineType == "" {
+		return machineTypeInfo, nil
+	}
+
+	family := strings.Split(machineType, "-")[0]
+
+	switch family {
+	case "a4x", "a4", "a3", "a2", "g2", "g4":
+		// VMs with GPUs attached do not support live migration.
+		// https://docs.cloud.google.com/compute/docs/instances/live-migration-process#limitations
+		machineTypeInfo.SupportsMigration = false
+	}
+
+	return machineTypeInfo, nil
+}
+
+func (e *InstanceTemplate) mapToGCE(project string, region string) (*compute.InstanceTemplate, error) {
+	machineTypeInfo, err := guessMachineTypeInfo(fi.ValueOf(e.MachineType))
+	if err != nil {
+		return nil, fmt.Errorf("getting machine type info: %w", err)
+	}
+
+	scheduling := buildScheduling(machineTypeInfo, e.Preemptible, e.GCPProvisioningModel, e.GuestAccelerators)
 
 	var disks []*compute.AttachedDisk
 	disks = append(disks, &compute.AttachedDisk{
@@ -261,6 +342,14 @@ func (e *InstanceTemplate) mapToGCE(project string, region string) (*compute.Ins
 		Type:       "PERSISTENT",
 	})
 
+	if e.BootDiskIOPS != nil {
+		disks[0].InitializeParams.ProvisionedIops = *e.BootDiskIOPS
+	}
+
+	if e.BootDiskThroughput != nil {
+		disks[0].InitializeParams.ProvisionedThroughput = *e.BootDiskThroughput
+	}
+
 	var tags *compute.Tags
 	if e.Tags != nil {
 		tags = &compute.Tags{
@@ -269,11 +358,17 @@ func (e *InstanceTemplate) mapToGCE(project string, region string) (*compute.Ins
 	}
 
 	var networkInterfaces []*compute.NetworkInterface
+
+	networkProject := project
+	if e.Network.Project != nil {
+		networkProject = *e.Network.Project
+	}
+
 	ni := &compute.NetworkInterface{
 		Kind:    "compute#networkInterface",
-		Network: e.Network.URL(project),
+		Network: e.Network.URL(networkProject),
 	}
-	if fi.BoolValue(e.HasExternalIP) {
+	if fi.ValueOf(e.HasExternalIP) {
 		ni.AccessConfigs = []*compute.AccessConfig{
 			{
 				Kind:        "compute#accessConfig",
@@ -282,9 +377,12 @@ func (e *InstanceTemplate) mapToGCE(project string, region string) (*compute.Ins
 			},
 		}
 	}
+	if e.StackType != nil {
+		ni.StackType = fi.ValueOf(e.StackType)
+	}
 
 	if e.Subnet != nil {
-		ni.Subnetwork = e.Subnet.URL(project, region)
+		ni.Subnetwork = e.Subnet.URL(networkProject, region)
 	}
 	if e.AliasIPRanges != nil {
 		for k, v := range e.AliasIPRanges {
@@ -303,25 +401,14 @@ func (e *InstanceTemplate) mapToGCE(project string, region string) (*compute.Ins
 			scopes = append(scopes, s)
 		}
 	}
-	serviceAccounts := []*compute.ServiceAccount{
-		{
-			Email:  e.ServiceAccounts[0],
+
+	var serviceAccounts []*compute.ServiceAccount
+	for _, sa := range e.ServiceAccounts {
+		serviceAccounts = append(serviceAccounts, &compute.ServiceAccount{
+			Email:  fi.ValueOf(sa.Email),
 			Scopes: scopes,
-		},
+		})
 	}
-	// if e.ServiceAccounts != nil {
-	//	for _, s := range e.ServiceAccounts {
-	//		serviceAccounts = append(serviceAccounts, &compute.ServiceAccount{
-	//			Email:  s,
-	//			Scopes: scopes,
-	//		})
-	//	}
-	// } else {
-	//	serviceAccounts = append(serviceAccounts, &compute.ServiceAccount{
-	//		Email:  "default",
-	//		Scopes: scopes,
-	//	})
-	// }
 
 	var metadataItems []*compute.MetadataItems
 	for key, r := range e.Metadata {
@@ -331,8 +418,19 @@ func (e *InstanceTemplate) mapToGCE(project string, region string) (*compute.Ins
 		}
 		metadataItems = append(metadataItems, &compute.MetadataItems{
 			Key:   key,
-			Value: fi.String(v),
+			Value: new(v),
 		})
+	}
+
+	var accelerators []*compute.AcceleratorConfig
+	if len(e.GuestAccelerators) > 0 {
+		accelerators = []*compute.AcceleratorConfig{}
+		for _, accelerator := range e.GuestAccelerators {
+			accelerators = append(accelerators, &compute.AcceleratorConfig{
+				AcceleratorCount: accelerator.AcceleratorCount,
+				AcceleratorType:  accelerator.AcceleratorType,
+			})
+		}
 	}
 
 	i := &compute.InstanceTemplate{
@@ -341,6 +439,8 @@ func (e *InstanceTemplate) mapToGCE(project string, region string) (*compute.Ins
 			CanIpForward: *e.CanIPForward,
 
 			Disks: disks,
+
+			GuestAccelerators: accelerators,
 
 			MachineType: *e.MachineType,
 
@@ -355,7 +455,8 @@ func (e *InstanceTemplate) mapToGCE(project string, region string) (*compute.Ins
 
 			ServiceAccounts: serviceAccounts,
 
-			Tags: tags,
+			Labels: e.Labels,
+			Tags:   tags,
 		},
 	}
 
@@ -399,8 +500,8 @@ func matches(l, r *compute.InstanceTemplate) bool {
 		if klog.V(10).Enabled() {
 			ls := fi.DebugAsJsonStringIndent(normalizedL)
 			rs := fi.DebugAsJsonStringIndent(normalizedR)
-			klog.V(10).Infof("Not equal")
-			klog.V(10).Infof(diff.FormatDiff(ls, rs))
+			klog.V(10).Info("Not equal")
+			klog.V(10).Info(diff.FormatDiff(ls, rs))
 		}
 		return false
 	}
@@ -427,7 +528,7 @@ func (_ *InstanceTemplate) RenderGCE(t *gce.GCEAPITarget, a, e, changes *Instanc
 	if a == nil {
 		klog.V(4).Infof("Creating InstanceTemplate %v", i)
 
-		name := fi.StringValue(e.NamePrefix) + "-" + strconv.FormatInt(time.Now().Unix(), 10)
+		name := fi.ValueOf(e.NamePrefix) + "-" + strconv.FormatInt(time.Now().Unix(), 10)
 		e.ID = &name
 		i.Name = name
 
@@ -447,64 +548,77 @@ func (_ *InstanceTemplate) RenderGCE(t *gce.GCEAPITarget, a, e, changes *Instanc
 }
 
 type terraformInstanceTemplate struct {
-	NamePrefix            string                                   `json:"name_prefix" cty:"name_prefix"`
-	CanIPForward          bool                                     `json:"can_ip_forward" cty:"can_ip_forward"`
-	MachineType           string                                   `json:"machine_type,omitempty" cty:"machine_type"`
-	ServiceAccount        *terraformServiceAccount                 `json:"service_account,omitempty" cty:"service_account"`
-	Scheduling            *terraformScheduling                     `json:"scheduling,omitempty" cty:"scheduling"`
-	Disks                 []*terraformInstanceTemplateAttachedDisk `json:"disk,omitempty" cty:"disk"`
-	NetworkInterfaces     []*terraformNetworkInterface             `json:"network_interface,omitempty" cty:"network_interface"`
-	Metadata              map[string]*terraformWriter.Literal      `json:"metadata,omitempty" cty:"metadata"`
-	MetadataStartupScript *terraformWriter.Literal                 `json:"metadata_startup_script,omitempty" cty:"metadata_startup_script"`
-	Tags                  []string                                 `json:"tags,omitempty" cty:"tags"`
+	Lifecycle             *terraform.Lifecycle                     `cty:"lifecycle"`
+	NamePrefix            string                                   `cty:"name_prefix"`
+	CanIPForward          bool                                     `cty:"can_ip_forward"`
+	MachineType           string                                   `cty:"machine_type"`
+	ServiceAccounts       []*terraformTemplateServiceAccount       `cty:"service_account"`
+	Scheduling            *terraformScheduling                     `cty:"scheduling"`
+	Disks                 []*terraformInstanceTemplateAttachedDisk `cty:"disk"`
+	Labels                map[string]string                        `cty:"labels"`
+	NetworkInterfaces     []*terraformNetworkInterface             `cty:"network_interface"`
+	Metadata              map[string]*terraformWriter.Literal      `cty:"metadata"`
+	MetadataStartupScript *terraformWriter.Literal                 `cty:"metadata_startup_script"`
+	Tags                  []string                                 `cty:"tags"`
+	GuestAccelerator      []*terraformGuestAccelerator             `cty:"guest_accelerator"`
 }
 
-type terraformServiceAccount struct {
-	Email  string   `json:"email" cty:"email"`
-	Scopes []string `json:"scopes" cty:"scopes"`
+type terraformTemplateServiceAccount struct {
+	Email  *terraformWriter.Literal `cty:"email"`
+	Scopes []string                 `cty:"scopes"`
 }
 
 type terraformScheduling struct {
-	AutomaticRestart  bool   `json:"automatic_restart" cty:"automatic_restart"`
-	OnHostMaintenance string `json:"on_host_maintenance,omitempty" cty:"on_host_maintenance"`
-	Preemptible       bool   `json:"preemptible" cty:"preemptible"`
+	AutomaticRestart  bool   `cty:"automatic_restart"`
+	OnHostMaintenance string `cty:"on_host_maintenance"`
+	Preemptible       bool   `cty:"preemptible"`
+	ProvisioningModel string `cty:"provisioning_model"`
 }
 
 type terraformInstanceTemplateAttachedDisk struct {
-	AutoDelete bool   `json:"auto_delete,omitempty" cty:"auto_delete"`
-	DeviceName string `json:"device_name,omitempty" cty:"device_name"`
+	AutoDelete bool   `cty:"auto_delete"`
+	DeviceName string `cty:"device_name"`
 
 	// scratch vs persistent
-	Type        string `json:"type,omitempty" cty:"type"`
-	Boot        bool   `json:"boot,omitempty" cty:"boot"`
-	DiskName    string `json:"disk_name,omitempty" cty:"disk_name"`
-	SourceImage string `json:"source_image,omitempty" cty:"source_image"`
-	Source      string `json:"source,omitempty" cty:"source"`
-	Interface   string `json:"interface,omitempty" cty:"interface"`
-	Mode        string `json:"mode,omitempty" cty:"mode"`
-	DiskType    string `json:"disk_type,omitempty" cty:"disk_type"`
-	DiskSizeGB  int64  `json:"disk_size_gb,omitempty" cty:"disk_size_gb"`
+	Type                  string `cty:"type"`
+	Boot                  bool   `cty:"boot"`
+	DiskName              string `cty:"disk_name"`
+	SourceImage           string `cty:"source_image"`
+	Source                string `cty:"source"`
+	Interface             string `cty:"interface"`
+	Mode                  string `cty:"mode"`
+	DiskType              string `cty:"disk_type"`
+	DiskSizeGB            int64  `cty:"disk_size_gb"`
+	ProvisionedIops       int64  `cty:"provisioned_iops"`
+	ProvisionedThroughput int64  `cty:"provisioned_throughput"`
 }
 
 type terraformNetworkInterface struct {
-	Network      *terraformWriter.Literal `json:"network,omitempty" cty:"network"`
-	Subnetwork   *terraformWriter.Literal `json:"subnetwork,omitempty" cty:"subnetwork"`
-	AccessConfig []*terraformAccessConfig `json:"access_config" cty:"access_config"`
+	Network      *terraformWriter.Literal `cty:"network"`
+	Subnetwork   *terraformWriter.Literal `cty:"subnetwork"`
+	AccessConfig []*terraformAccessConfig `cty:"access_config"`
+	StackType    *string                  `cty:"stack_type"`
 }
 
 type terraformAccessConfig struct {
-	NatIP *terraformWriter.Literal `json:"nat_ip,omitempty" cty:"nat_ip"`
+	NatIP *terraformWriter.Literal `cty:"nat_ip"`
 }
 
-func addNetworks(network *Network, subnet *Subnet, networkInterfaces []*compute.NetworkInterface) []*terraformNetworkInterface {
+type terraformGuestAccelerator struct {
+	Type  string `cty:"type"`
+	Count int64  `cty:"count"`
+}
+
+func addNetworks(stackType *string, network *Network, subnet *Subnet, networkInterfaces []*compute.NetworkInterface) []*terraformNetworkInterface {
 	ni := make([]*terraformNetworkInterface, 0)
 	for _, g := range networkInterfaces {
 		tf := &terraformNetworkInterface{}
+		tf.StackType = stackType
 		if network != nil {
-			tf.Network = network.TerraformName()
+			tf.Network = network.TerraformLink()
 		}
 		if subnet != nil {
-			tf.Subnetwork = subnet.TerraformName()
+			tf.Subnetwork = subnet.TerraformLink()
 		}
 		for _, gac := range g.AccessConfigs {
 			tac := &terraformAccessConfig{}
@@ -527,7 +641,7 @@ func addMetadata(target *terraform.TerraformTarget, name string, metadata *compu
 	}
 	m := make(map[string]*terraformWriter.Literal)
 	for _, g := range metadata.Items {
-		val := fi.StringValue(g.Value)
+		val := fi.ValueOf(g.Value)
 		if strings.Contains(val, "\n") {
 			tfResource, err := target.AddFileBytes("google_compute_instance_template", name, "metadata_"+g.Key, []byte(val), false)
 			if err != nil {
@@ -541,23 +655,25 @@ func addMetadata(target *terraform.TerraformTarget, name string, metadata *compu
 	return m, nil
 }
 
-func addServiceAccounts(serviceAccounts []*compute.ServiceAccount) *terraformServiceAccount {
-	// there's an inconsistency here- GCP only lets you have one service account per VM
-	// terraform gets it right, but the golang api doesn't. womp womp :(
-	if len(serviceAccounts) != 1 {
-		klog.Fatal("Instances can only have 1 service account assigned.")
+func mapServiceAccountsToTerraform(serviceAccounts []*ServiceAccount, saScopes []string) []*terraformTemplateServiceAccount {
+	var scopes []string
+	for _, s := range saScopes {
+		s = scopeToLongForm(s)
+		scopes = append(scopes, s)
 	}
-	klog.Infof("adding csa: %v", serviceAccounts[0].Email)
-	csa := serviceAccounts[0]
-	tsa := &terraformServiceAccount{
-		Email:  csa.Email,
-		Scopes: csa.Scopes,
+	// Note that GCE currently only allows one service account per VM,
+	// but the model in both the API and terraform allows more.
+	var out []*terraformTemplateServiceAccount
+	for _, serviceAccount := range serviceAccounts {
+		tsa := &terraformTemplateServiceAccount{
+			Email:  serviceAccount.TerraformLink_Email(),
+			Scopes: scopes,
+		}
+		out = append(out, tsa)
 	}
-	// for _, scope := range csa.Scopes {
-	//	tsa.Scopes = append(tsa.Scopes, scope)
-	// }
-	return tsa
+	return out
 }
+
 func (_ *InstanceTemplate) RenderTerraform(t *terraform.TerraformTarget, a, e, changes *InstanceTemplate) error {
 	project := t.Project
 
@@ -566,18 +682,19 @@ func (_ *InstanceTemplate) RenderTerraform(t *terraform.TerraformTarget, a, e, c
 		return err
 	}
 
-	name := fi.StringValue(e.Name)
+	name := fi.ValueOf(e.Name)
 
 	tf := &terraformInstanceTemplate{
-		NamePrefix: fi.StringValue(e.NamePrefix) + "-",
+		Lifecycle:  &terraform.Lifecycle{CreateBeforeDestroy: new(true)},
+		NamePrefix: fi.ValueOf(e.NamePrefix) + "-",
 	}
 
 	tf.CanIPForward = i.Properties.CanIpForward
 	tf.MachineType = lastComponent(i.Properties.MachineType)
-	//tf.Zone = i.Properties.Zone
+	tf.Labels = i.Properties.Labels
 	tf.Tags = i.Properties.Tags.Items
 
-	tf.ServiceAccount = addServiceAccounts(i.Properties.ServiceAccounts)
+	tf.ServiceAccounts = mapServiceAccountsToTerraform(e.ServiceAccounts, e.Scopes)
 
 	for _, d := range i.Properties.Disks {
 		tfd := &terraformInstanceTemplateAttachedDisk{
@@ -593,10 +710,17 @@ func (_ *InstanceTemplate) RenderTerraform(t *terraform.TerraformTarget, a, e, c
 			DiskSizeGB:  d.InitializeParams.DiskSizeGb,
 			Type:        d.Type,
 		}
+		if d.InitializeParams.ProvisionedIops > 0 {
+			tfd.ProvisionedIops = d.InitializeParams.ProvisionedIops
+		}
+
+		if d.InitializeParams.ProvisionedThroughput > 0 {
+			tfd.ProvisionedThroughput = d.InitializeParams.ProvisionedThroughput
+		}
 		tf.Disks = append(tf.Disks, tfd)
 	}
 
-	tf.NetworkInterfaces = addNetworks(e.Network, e.Subnet, i.Properties.NetworkInterfaces)
+	tf.NetworkInterfaces = addNetworks(e.StackType, e.Network, e.Subnet, i.Properties.NetworkInterfaces)
 
 	metadata, err := addMetadata(t, name, i.Properties.Metadata)
 	if err != nil {
@@ -606,9 +730,20 @@ func (_ *InstanceTemplate) RenderTerraform(t *terraform.TerraformTarget, a, e, c
 
 	if i.Properties.Scheduling != nil {
 		tf.Scheduling = &terraformScheduling{
-			AutomaticRestart:  fi.BoolValue(i.Properties.Scheduling.AutomaticRestart),
+			AutomaticRestart:  fi.ValueOf(i.Properties.Scheduling.AutomaticRestart),
 			OnHostMaintenance: i.Properties.Scheduling.OnHostMaintenance,
 			Preemptible:       i.Properties.Scheduling.Preemptible,
+			ProvisioningModel: i.Properties.Scheduling.ProvisioningModel,
+		}
+	}
+
+	if len(i.Properties.GuestAccelerators) > 0 {
+		tf.GuestAccelerator = []*terraformGuestAccelerator{}
+		for _, accelerator := range i.Properties.GuestAccelerators {
+			tf.GuestAccelerator = append(tf.GuestAccelerator, &terraformGuestAccelerator{
+				Count: accelerator.AcceleratorCount,
+				Type:  accelerator.AcceleratorType,
+			})
 		}
 	}
 

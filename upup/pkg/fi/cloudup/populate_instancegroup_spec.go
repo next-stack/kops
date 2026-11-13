@@ -18,39 +18,48 @@ package cloudup
 
 import (
 	"fmt"
+	"strings"
 
-	"github.com/aws/aws-sdk-go/service/ec2"
-	"github.com/blang/semver/v4"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
+
 	"k8s.io/kops/pkg/apis/kops"
-	"k8s.io/kops/pkg/apis/kops/util"
 	"k8s.io/kops/pkg/apis/kops/validation"
 	"k8s.io/kops/pkg/featureflag"
+	"k8s.io/kops/pkg/nodelabels"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
 	"k8s.io/kops/upup/pkg/fi/cloudup/openstack"
-	"k8s.io/kops/util/pkg/architectures"
 	"k8s.io/kops/util/pkg/reflectutils"
 )
 
 // Default Machine types for various types of instance group machine
 const (
-	defaultNodeMachineTypeGCE   = "n1-standard-2"
-	defaultNodeMachineTypeDO    = "s-2vcpu-4gb"
-	defaultNodeMachineTypeALI   = "ecs.n2.medium"
-	defaultNodeMachineTypeAzure = "Standard_B2ms"
+	defaultNodeMachineTypeGCE      = "e2-medium"
+	defaultNodeMachineTypeDO       = "s-2vcpu-4gb-amd"
+	defaultNodeMachineTypeAzure    = "Standard_B2s"
+	defaultNodeMachineTypeHetzner  = "cx23"
+	defaultNodeMachineTypeScaleway = "DEV1-M"
+	defaultNodeMachineTypeLinode   = "g6-standard-2"
 
-	defaultBastionMachineTypeGCE   = "f1-micro"
-	defaultBastionMachineTypeALI   = "ecs.n2.small"
-	defaultBastionMachineTypeAzure = "Standard_B2ms"
+	defaultBastionMachineTypeGCE     = "e2-micro"
+	defaultBastionMachineTypeAzure   = "Standard_B2s"
+	defaultBastionMachineTypeHetzner = "cx23"
+	defaultBastionMachineTypeLinode  = "g6-standard-1"
 
-	defaultMasterMachineTypeGCE   = "n1-standard-1"
-	defaultMasterMachineTypeDO    = "s-2vcpu-4gb"
-	defaultMasterMachineTypeALI   = "ecs.n2.medium"
-	defaultMasterMachineTypeAzure = "Standard_B2ms"
+	defaultMasterMachineTypeGCE      = "e2-medium"
+	defaultMasterMachineTypeDO       = "s-2vcpu-4gb-amd"
+	defaultMasterMachineTypeAzure    = "Standard_B2s"
+	defaultMasterMachineTypeHetzner  = "cx23"
+	defaultMasterMachineTypeScaleway = "DEV1-M"
+	defaultMasterMachineTypeLinode   = "g6-standard-2"
 
-	defaultDONodeImage  = "ubuntu-20-04-x64"
-	defaultALINodeImage = "centos_7_04_64_20G_alibase_201701015.vhd"
+	defaultDOImageNoble       = "ubuntu-24-04-x64"
+	defaultHetznerImageNoble  = "ubuntu-24.04"
+	defaultScalewayImageNoble = "ubuntu_noble"
+	defaultLinodeImageNoble   = "linode/ubuntu24.04"
 )
 
 // TODO: this hardcoded list can be replaced with DescribeInstanceTypes' DedicatedHostsSupported field
@@ -64,33 +73,37 @@ var awsDedicatedInstanceExceptions = map[string]bool{
 }
 
 // PopulateInstanceGroupSpec sets default values in the InstanceGroup
-// The InstanceGroup is simpler than the cluster spec, so we just populate in place (like the rest of k8s)
 func PopulateInstanceGroupSpec(cluster *kops.Cluster, input *kops.InstanceGroup, cloud fi.Cloud, channel *kops.Channel) (*kops.InstanceGroup, error) {
+	klog.V(2).Infof("Populating instance group spec for %q", input.GetName())
+
 	var err error
-	err = validation.ValidateInstanceGroup(input, nil).ToAggregate()
+	// TODO: Pass in `cloud` to shift validation to ValidateInstanceGroup
+	err = validation.ValidateInstanceGroup(input, nil, false).ToAggregate()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed validating input specs: %w", err)
 	}
 
 	ig := &kops.InstanceGroup{}
 	reflectutils.JSONMergeStruct(ig, input)
 
+	igSpec := &ig.Spec
+
 	// TODO: Clean up
-	if ig.IsMaster() {
+	if ig.IsControlPlane() {
 		if ig.Spec.MachineType == "" {
 			ig.Spec.MachineType, err = defaultMachineType(cloud, cluster, ig)
 			if err != nil {
-				return nil, fmt.Errorf("error assigning default machine type for masters: %v", err)
+				return nil, fmt.Errorf("assigning default machine type for control-plane nodes: %v", err)
 			}
 
 		}
 		if ig.Spec.MinSize == nil {
-			ig.Spec.MinSize = fi.Int32(1)
+			ig.Spec.MinSize = new(int32(1))
 		}
 		if ig.Spec.MaxSize == nil {
-			ig.Spec.MaxSize = fi.Int32(1)
+			ig.Spec.MaxSize = new(int32(1))
 		}
-	} else if ig.Spec.Role == kops.InstanceGroupRoleBastion {
+	} else if ig.Spec.Role.HasBastion() {
 		if ig.Spec.MachineType == "" {
 			ig.Spec.MachineType, err = defaultMachineType(cloud, cluster, ig)
 			if err != nil {
@@ -98,14 +111,24 @@ func PopulateInstanceGroupSpec(cluster *kops.Cluster, input *kops.InstanceGroup,
 			}
 		}
 		if ig.Spec.MinSize == nil {
-			ig.Spec.MinSize = fi.Int32(1)
+			ig.Spec.MinSize = new(int32(1))
 		}
 		if ig.Spec.MaxSize == nil {
-			ig.Spec.MaxSize = fi.Int32(1)
+			ig.Spec.MaxSize = new(int32(1))
 		}
 	} else {
 		if ig.IsAPIServerOnly() && !featureflag.APIServerNodes.Enabled() {
 			return nil, fmt.Errorf("apiserver nodes requires the APIServerNodes feature flag to be enabled")
+		}
+		if !featureflag.ExperimentalRoles.Enabled() {
+			switch {
+			case ig.Spec.Role.HasEtcd():
+				return nil, fmt.Errorf("etcd nodes requires the ExperimentalNodes feature flag to be enabled")
+			case ig.Spec.Role.HasScheduler():
+				return nil, fmt.Errorf("scheduler nodes requires the ExperimentalNodes feature flag to be enabled")
+			case ig.Spec.Role.HasKubeControllerManager():
+				return nil, fmt.Errorf("kube-controller-manager nodes requires the ExperimentalNodes feature flag to be enabled")
+			}
 		}
 		if ig.Spec.MachineType == "" {
 			ig.Spec.MachineType, err = defaultMachineType(cloud, cluster, ig)
@@ -113,11 +136,13 @@ func PopulateInstanceGroupSpec(cluster *kops.Cluster, input *kops.InstanceGroup,
 				return nil, fmt.Errorf("error assigning default machine type for nodes: %v", err)
 			}
 		}
-		if ig.Spec.MinSize == nil {
-			ig.Spec.MinSize = fi.Int32(2)
-		}
-		if ig.Spec.MaxSize == nil {
-			ig.Spec.MaxSize = fi.Int32(2)
+		if ig.Spec.Manager != kops.InstanceManagerKarpenter {
+			if ig.Spec.MinSize == nil {
+				ig.Spec.MinSize = new(int32(2))
+			}
+			if ig.Spec.MaxSize == nil {
+				ig.Spec.MaxSize = new(int32(2))
+			}
 		}
 	}
 
@@ -126,14 +151,14 @@ func PopulateInstanceGroupSpec(cluster *kops.Cluster, input *kops.InstanceGroup,
 		if err != nil {
 			return nil, fmt.Errorf("unable to determine machine architecture for InstanceGroup %q: %v", ig.ObjectMeta.Name, err)
 		}
-		ig.Spec.Image = defaultImage(cluster, channel, architecture)
-		if ig.Spec.Image == "" {
-			return nil, fmt.Errorf("unable to determine default image for InstanceGroup %s", ig.ObjectMeta.Name)
+		ig.Spec.Image, err = defaultImage(cluster, channel, architecture)
+		if err != nil {
+			return nil, fmt.Errorf("unable to determine default image for instance group %q: %v", ig.ObjectMeta.Name, err)
 		}
 	}
 
 	if ig.Spec.Tenancy != "" && ig.Spec.Tenancy != "default" {
-		switch kops.CloudProviderID(cluster.Spec.CloudProvider) {
+		switch cluster.GetCloudProvider() {
 		case kops.CloudProviderAWS:
 			if _, ok := awsDedicatedInstanceExceptions[ig.Spec.MachineType]; ok {
 				return nil, fmt.Errorf("invalid dedicated instance type: %s", ig.Spec.MachineType)
@@ -143,13 +168,29 @@ func PopulateInstanceGroupSpec(cluster *kops.Cluster, input *kops.InstanceGroup,
 		}
 	}
 
-	if ig.IsMaster() {
+	if ig.IsControlPlane() {
 		if len(ig.Spec.Subnets) == 0 {
-			return nil, fmt.Errorf("master InstanceGroup %s did not specify any Subnets", ig.ObjectMeta.Name)
+			return nil, fmt.Errorf("control-plane InstanceGroup %s did not specify any Subnets", ig.ObjectMeta.Name)
+		}
+	} else if ig.IsAPIServerOnly() && cluster.Spec.IsIPv6Only() {
+		if len(ig.Spec.Subnets) == 0 {
+			for _, subnet := range cluster.Spec.Networking.Subnets {
+				if subnet.Type != kops.SubnetTypePrivate && subnet.Type != kops.SubnetTypeUtility {
+					ig.Spec.Subnets = append(ig.Spec.Subnets, subnet.Name)
+				}
+			}
 		}
 	} else {
 		if len(ig.Spec.Subnets) == 0 {
-			for _, subnet := range cluster.Spec.Subnets {
+			for _, subnet := range cluster.Spec.Networking.Subnets {
+				if subnet.Type != kops.SubnetTypeDualStack && subnet.Type != kops.SubnetTypeUtility {
+					ig.Spec.Subnets = append(ig.Spec.Subnets, subnet.Name)
+				}
+			}
+		}
+
+		if len(ig.Spec.Subnets) == 0 {
+			for _, subnet := range cluster.Spec.Networking.Subnets {
 				if subnet.Type != kops.SubnetTypeUtility {
 					ig.Spec.Subnets = append(ig.Spec.Subnets, subnet.Name)
 				}
@@ -161,29 +202,146 @@ func PopulateInstanceGroupSpec(cluster *kops.Cluster, input *kops.InstanceGroup,
 		return nil, fmt.Errorf("unable to infer any Subnets for InstanceGroup %s ", ig.ObjectMeta.Name)
 	}
 
-	if cluster.Spec.Containerd != nil && cluster.Spec.Containerd.NvidiaGPU != nil && fi.BoolValue(cluster.Spec.Containerd.NvidiaGPU.Enabled) {
-		switch kops.CloudProviderID(cluster.Spec.CloudProvider) {
-		case kops.CloudProviderAWS:
-			mt, err := awsup.GetMachineTypeInfo(cloud.(awsup.AWSCloud), ig.Spec.MachineType)
+	hasGPU := false
+	clusterNvidia := cluster.Spec.Containerd != nil && cluster.Spec.Containerd.NvidiaGPU != nil && fi.ValueOf(cluster.Spec.Containerd.NvidiaGPU.Enabled)
+	igNvidia := ig.Spec.Containerd != nil && ig.Spec.Containerd.NvidiaGPU != nil && fi.ValueOf(ig.Spec.Containerd.NvidiaGPU.Enabled)
+
+	switch cluster.GetCloudProvider() {
+	case kops.CloudProviderAWS:
+		if clusterNvidia || igNvidia {
+			mt, err := awsup.GetMachineTypeInfo(cloud.(awsup.AWSCloud), ec2types.InstanceType(ig.Spec.MachineType))
 			if err != nil {
 				return ig, fmt.Errorf("error looking up machine type info: %v", err)
 			}
-			if mt.GPU {
-				if ig.Spec.NodeLabels == nil {
-					ig.Spec.NodeLabels = make(map[string]string)
-				}
-				ig.Spec.NodeLabels["kops.k8s.io/gpu"] = "1"
-				ig.Spec.Taints = append(ig.Spec.Taints, "nvidia.com/gpu:NoSchedule")
-			}
+			hasGPU = mt.GPU
+		}
+	case kops.CloudProviderOpenstack:
+		if igNvidia {
+			hasGPU = true
 		}
 	}
+
+	if hasGPU {
+		if ig.Spec.NodeLabels == nil {
+			ig.Spec.NodeLabels = make(map[string]string)
+		}
+		ig.Spec.NodeLabels["kops.k8s.io/gpu"] = "1"
+		hasNvidiaTaint := false
+		for _, taint := range ig.Spec.Taints {
+			if strings.HasPrefix(taint, "nvidia.com/gpu") {
+				hasNvidiaTaint = true
+			}
+		}
+		if !hasNvidiaTaint {
+			ig.Spec.Taints = append(ig.Spec.Taints, "nvidia.com/gpu:NoSchedule")
+		}
+	}
+
+	// Label nodes that have gVisor enabled so the RuntimeClass nodeSelector works.
+	if ig.HasGVisor() {
+		if ig.Spec.NodeLabels == nil {
+			ig.Spec.NodeLabels = make(map[string]string)
+		}
+		ig.Spec.NodeLabels["kops.k8s.io/gvisor"] = "1"
+	}
+
+	if ig.Spec.Manager == "" {
+		ig.Spec.Manager = kops.InstanceManagerCloudGroup
+	}
+
+	if igSpec.Kubelet == nil {
+		igSpec.Kubelet = &kops.KubeletConfigSpec{}
+	}
+
+	var igKubeletConfig *kops.KubeletConfigSpec
+	// Start with the cluster kubelet config
+	if ig.IsControlPlane() {
+		if cluster.Spec.ControlPlaneKubelet != nil {
+			igKubeletConfig = cluster.Spec.ControlPlaneKubelet.DeepCopy()
+		} else {
+			igKubeletConfig = &kops.KubeletConfigSpec{}
+		}
+		// A few settings in Kubelet override those in ControlPlaneKubelet. I'm not sure why.
+		if cluster.Spec.Kubelet != nil && cluster.Spec.Kubelet.AnonymousAuth != nil && !*cluster.Spec.Kubelet.AnonymousAuth {
+			igKubeletConfig.AnonymousAuth = new(false)
+		}
+	} else {
+		if cluster.Spec.Kubelet != nil {
+			igKubeletConfig = cluster.Spec.Kubelet.DeepCopy()
+		} else {
+			igKubeletConfig = &kops.KubeletConfigSpec{}
+		}
+	}
+
+	// We include the NodeLabels in the userdata even for Kubernetes 1.16 and later so that
+	// rolling update will still replace nodes when they change.
+	nodeLabels, err := nodelabels.BuildNodeLabels(cluster, ig)
+	if err != nil {
+		return nil, fmt.Errorf("error building node labels: %w", err)
+	}
+	igKubeletConfig.NodeLabels = nodeLabels
+
+	useSecureKubelet := fi.ValueOf(igKubeletConfig.AnonymousAuth)
+
+	// While slices are overridden in most cases, taints are explicitly merged
+	taints := sets.NewString(igKubeletConfig.Taints...)
+	taints.Insert(igSpec.Taints...)
+	if ig.Spec.Kubelet != nil {
+		taints.Insert(igSpec.Kubelet.Taints...)
+	}
+	if cluster.Spec.Kubelet != nil {
+		taints.Insert(cluster.Spec.Kubelet.Taints...)
+	}
+	if ig.Spec.Kubelet != nil {
+		reflectutils.JSONMergeStruct(igKubeletConfig, ig.Spec.Kubelet)
+	}
+
+	{
+		if ig.IsControlPlane() {
+			// (Even though the value is empty, we still expect <Key>=<Value>:<Effect>)
+			taints.Insert(nodelabels.RoleLabelControlPlane20 + "=:" + string(v1.TaintEffectNoSchedule))
+		}
+		if ig.IsAPIServerOnly() {
+			// (Even though the value is empty, we still expect <Key>=<Value>:<Effect>)
+			taints.Insert(nodelabels.RoleLabelAPIServer16 + "=:" + string(v1.TaintEffectNoSchedule))
+		}
+		if ig.IsEtcdOnly() {
+			// (Even though the value is empty, we still expect <Key>=<Value>:<Effect>)
+			taints.Insert(nodelabels.RoleLabelEtcd + "=:" + string(v1.TaintEffectNoSchedule))
+		}
+		if ig.IsKubeControllerManagerOnly() {
+			// (Even though the value is empty, we still expect <Key>=<Value>:<Effect>)
+			taints.Insert(nodelabels.RoleLabelKubeControllerManager + "=:" + string(v1.TaintEffectNoSchedule))
+		}
+		if ig.IsSchedulerOnly() {
+			// (Even though the value is empty, we still expect <Key>=<Value>:<Effect>)
+			taints.Insert(nodelabels.RoleLabelScheduler + "=:" + string(v1.TaintEffectNoSchedule))
+		}
+		if ig.Spec.Manager == kops.InstanceManagerKarpenter {
+			// Karpenter v1 expects its nodes to register with this taint as a race guard; it removes the taint once
+			// the NodeClaim is synced. The empty value still requires the <Key>=<Value>:<Effect> form.
+			taints.Insert("karpenter.sh/unregistered=:" + string(v1.TaintEffectNoExecute))
+		}
+	}
+
+	igKubeletConfig.Taints = taints.List()
+
+	if useSecureKubelet {
+		igKubeletConfig.AnonymousAuth = new(false)
+	}
+
+	ig.Spec.Kubelet = igKubeletConfig
+
 	return ig, nil
 }
 
 // defaultMachineType returns the default MachineType for the instance group, based on the cloudprovider
 func defaultMachineType(cloud fi.Cloud, cluster *kops.Cluster, ig *kops.InstanceGroup) (string, error) {
-	switch kops.CloudProviderID(cluster.Spec.CloudProvider) {
+	switch cluster.GetCloudProvider() {
 	case kops.CloudProviderAWS:
+		if ig.Spec.Manager == kops.InstanceManagerKarpenter {
+			return "", nil
+		}
 
 		instanceType, err := cloud.(awsup.AWSCloud).DefaultInstanceType(cluster, ig)
 		if err != nil {
@@ -192,25 +350,37 @@ func defaultMachineType(cloud fi.Cloud, cluster *kops.Cluster, ig *kops.Instance
 		return instanceType, nil
 
 	case kops.CloudProviderGCE:
-		switch ig.Spec.Role {
-		case kops.InstanceGroupRoleMaster:
+		switch {
+		case ig.Spec.Role.IsControlPlaneType():
 			return defaultMasterMachineTypeGCE, nil
 
-		case kops.InstanceGroupRoleNode:
+		case ig.Spec.Role.HasNode():
 			return defaultNodeMachineTypeGCE, nil
 
-		case kops.InstanceGroupRoleBastion:
+		case ig.Spec.Role.HasBastion():
 			return defaultBastionMachineTypeGCE, nil
 		}
 
 	case kops.CloudProviderDO:
-		switch ig.Spec.Role {
-		case kops.InstanceGroupRoleMaster:
+		switch {
+		case ig.Spec.Role.IsControlPlaneType():
 			return defaultMasterMachineTypeDO, nil
 
-		case kops.InstanceGroupRoleNode:
+		case ig.Spec.Role.HasNode():
 			return defaultNodeMachineTypeDO, nil
 
+		}
+
+	case kops.CloudProviderHetzner:
+		switch {
+		case ig.Spec.Role.IsControlPlaneType():
+			return defaultMasterMachineTypeHetzner, nil
+
+		case ig.Spec.Role.HasNode():
+			return defaultNodeMachineTypeHetzner, nil
+
+		case ig.Spec.Role.HasBastion():
+			return defaultBastionMachineTypeHetzner, nil
 		}
 
 	case kops.CloudProviderOpenstack:
@@ -220,89 +390,40 @@ func defaultMachineType(cloud fi.Cloud, cluster *kops.Cluster, ig *kops.Instance
 		}
 		return instanceType, nil
 
-	case kops.CloudProviderALI:
-		switch ig.Spec.Role {
-		case kops.InstanceGroupRoleMaster:
-			return defaultMasterMachineTypeALI, nil
-
-		case kops.InstanceGroupRoleNode:
-			return defaultNodeMachineTypeALI, nil
-
-		case kops.InstanceGroupRoleBastion:
-			return defaultBastionMachineTypeALI, nil
-		}
-
 	case kops.CloudProviderAzure:
-		switch ig.Spec.Role {
-		case kops.InstanceGroupRoleMaster:
+		switch {
+		case ig.Spec.Role.IsControlPlaneType():
 			return defaultMasterMachineTypeAzure, nil
 
-		case kops.InstanceGroupRoleNode:
+		case ig.Spec.Role.HasNode():
 			return defaultNodeMachineTypeAzure, nil
 
-		case kops.InstanceGroupRoleBastion:
+		case ig.Spec.Role.HasBastion():
 			return defaultBastionMachineTypeAzure, nil
 		}
+
+	case kops.CloudProviderScaleway:
+		switch {
+		case ig.Spec.Role.IsControlPlaneType():
+			return defaultMasterMachineTypeScaleway, nil
+
+		case ig.Spec.Role.HasNode():
+			return defaultNodeMachineTypeScaleway, nil
+		}
+
+	case kops.CloudProviderLinode:
+		switch {
+		case ig.Spec.Role.IsControlPlaneType():
+			return defaultMasterMachineTypeLinode, nil
+
+		case ig.Spec.Role.HasNode():
+			return defaultNodeMachineTypeLinode, nil
+
+		case ig.Spec.Role.HasBastion():
+			return defaultBastionMachineTypeLinode, nil
+		}
 	}
 
-	klog.V(2).Infof("Cannot set default MachineType for CloudProvider=%q, Role=%q", cluster.Spec.CloudProvider, ig.Spec.Role)
+	klog.V(2).Infof("Cannot set default MachineType for CloudProvider=%q, Role=%q", cluster.GetCloudProvider(), ig.Spec.Role)
 	return "", nil
-}
-
-// defaultImage returns the default Image, based on the cloudprovider
-func defaultImage(cluster *kops.Cluster, channel *kops.Channel, architecture architectures.Architecture) string {
-	if channel != nil {
-		var kubernetesVersion *semver.Version
-		if cluster.Spec.KubernetesVersion != "" {
-			var err error
-			kubernetesVersion, err = util.ParseKubernetesVersion(cluster.Spec.KubernetesVersion)
-			if err != nil {
-				klog.Warningf("cannot parse KubernetesVersion %q in cluster", cluster.Spec.KubernetesVersion)
-			}
-		}
-		if kubernetesVersion != nil {
-			image := channel.FindImage(kops.CloudProviderID(cluster.Spec.CloudProvider), *kubernetesVersion, architecture)
-			if image != nil {
-				return image.Name
-			}
-		}
-	}
-
-	switch kops.CloudProviderID(cluster.Spec.CloudProvider) {
-	case kops.CloudProviderDO:
-		return defaultDONodeImage
-	case kops.CloudProviderALI:
-		return defaultALINodeImage
-	}
-	klog.Infof("Cannot set default Image for CloudProvider=%q", cluster.Spec.CloudProvider)
-	return ""
-}
-
-func MachineArchitecture(cloud fi.Cloud, machineType string) (architectures.Architecture, error) {
-	switch cloud.ProviderID() {
-	case kops.CloudProviderAWS:
-		info, err := cloud.(awsup.AWSCloud).DescribeInstanceType(machineType)
-		if err != nil {
-			return "", fmt.Errorf("error finding instance info for instance type %q: %v", machineType, err)
-		}
-		if info.ProcessorInfo == nil || len(info.ProcessorInfo.SupportedArchitectures) == 0 {
-			return "", fmt.Errorf("error finding architecture info for instance type %q", machineType)
-		}
-		var unsupported []string
-		for _, arch := range info.ProcessorInfo.SupportedArchitectures {
-			// Return the first found supported architecture, in order of popularity
-			switch fi.StringValue(arch) {
-			case ec2.ArchitectureTypeX8664:
-				return architectures.ArchitectureAmd64, nil
-			case ec2.ArchitectureTypeArm64:
-				return architectures.ArchitectureArm64, nil
-			default:
-				unsupported = append(unsupported, fi.StringValue(arch))
-			}
-		}
-		return "", fmt.Errorf("unsupported architecture for instance type %q: %v", machineType, unsupported)
-	default:
-		// No other clouds are known to support any other architectures at this time
-		return architectures.ArchitectureAmd64, nil
-	}
 }

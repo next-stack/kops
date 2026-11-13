@@ -16,13 +16,31 @@ limitations under the License.
 
 package fi
 
-type ProducesDeletions interface {
-	FindDeletions(*Context) ([]Deletion, error)
+type DeletionProcessingMode string
+
+const (
+	// DeletionProcessingModeIgnore will ignore all deletion tasks.
+	// This is typically used when the target implements pruning directly (e.g. terraform)
+	DeletionProcessingModeIgnore DeletionProcessingMode = "Ignore"
+	// DeletionProcessingModeDeleteIfNotDeferrred will delete resources only if they are not marked for deferred-deletion.
+	// This corresponds to a cluster update with --prune=false.
+	DeletionProcessingModeDeleteIfNotDeferrred DeletionProcessingMode = "IfNotDeferred"
+	// DeletionProcessingModeDeleteIncludingDeferrred will delete resources including those marked for deferred-deletion.
+	// This corresponds to a cluster update with --prune=true.
+	DeletionProcessingModeDeleteIncludingDeferred DeletionProcessingMode = "DeleteIncludingDeferred"
+)
+
+type ProducesDeletions[T SubContext] interface {
+	FindDeletions(*Context[T]) ([]Deletion[T], error)
 }
 
-type Deletion interface {
-	Delete(target Target) error
+type CloudupProducesDeletions = ProducesDeletions[CloudupSubContext]
 
+type Deletion[T SubContext] interface {
+	Delete(target Target[T]) error
 	TaskName() string
 	Item() string
+	DeferDeletion() bool
 }
+
+type CloudupDeletion = Deletion[CloudupSubContext]

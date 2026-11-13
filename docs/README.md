@@ -64,7 +64,7 @@ For a better viewing experience please check out our live documentation site at 
 * [`kops` updating](operations/updates_and_upgrades.md#updating-kops)
 * [Label management](labels.md)
     * for cluster nodes
-* [Secret management](secrets.md)
+* [Service Account Issuer (SAI) migration](operations/service_account_issuer_migration.md)
 * [Service Account Token Volume Projection](operations/service_account_token_volumes.md)
 * [Moving from a Single Master to Multiple HA Masters](single-to-multi-master.md)
 * [Upgrading Kubernetes](tutorial/upgrading-kubernetes.md)
@@ -89,7 +89,7 @@ For a better viewing experience please check out our live documentation site at 
 ## Security
 
 * [Bastion setup](bastion.md)
-* [IAM roles](iam_roles.md)
+* [Instance IAM roles](iam_roles.md)
 * [MFA setup](mfa.md)
     * how to set up MFA for `kops`
 * [Security](security.md)
@@ -112,8 +112,7 @@ For a better viewing experience please check out our live documentation site at 
 * [Hack Directory](contributing/hack.md)
 * [How to update `kops` API](contributing/api_updates.md)
 * [Low level description on how kops works](contributing/how_it_works.md)
-* [Notes on Gossip design](contributing/gossip.md)
 * [Notes on master instance sizing](contributing/instancesizes.md)
-* [Our release process](contributing/release.md)
+* [Our release process](contributing/release-process.md)
 * [Releasing with Homebrew](contributing/homebrew.md)
-* [Rolling Update Diagrams](contributing/rolling_update.md)
+* [Rolling Updates](operations/rolling-update.md)

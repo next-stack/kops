@@ -27,30 +27,23 @@ import (
 
 	channelsapi "k8s.io/kops/channels/pkg/api"
 	"k8s.io/kops/pkg/kubemanifest"
+	"k8s.io/kops/pkg/model/components/addonmanifests"
 )
 
-func (b *BootstrapChannelBuilder) addPruneDirectives(addons *AddonList) error {
-	for _, addon := range addons.Items {
-		if !addon.BuildPrune {
-			continue
-		}
-
-		id := *addon.Spec.Name
-
-		if err := b.addPruneDirectivesForAddon(addon); err != nil {
-			return fmt.Errorf("failed to configure pruning for %s: %w", id, err)
-		}
-	}
-	return nil
+// karpenterInstanceGroupKinds are the kinds of the objects that kOps generates for each Karpenter
+// instance group, named after the instance group.
+var karpenterInstanceGroupKinds = []schema.GroupKind{
+	{Group: "karpenter.k8s.aws", Kind: "EC2NodeClass"},
+	{Group: "karpenter.sh", Kind: "NodePool"},
 }
 
-func (b *BootstrapChannelBuilder) addPruneDirectivesForAddon(addon *Addon) error {
-	addon.Spec.Prune = &channelsapi.PruneSpec{}
+func buildPruneDirectives(spec *channelsapi.AddonSpec, manifestData []byte) error {
+	spec.Prune = &channelsapi.PruneSpec{}
 
 	// We add these labels to all objects we manage, so we reuse them for pruning.
 	selectorMap := map[string]string{
-		"app.kubernetes.io/managed-by": "kops",
-		"addon.kops.k8s.io/name":       *addon.Spec.Name,
+		"app.kubernetes.io/managed-by":   "kops",
+		addonmanifests.KopsAddonLabelKey: *spec.Name,
 	}
 	selector, err := labels.ValidatedSelectorFromSet(selectorMap)
 	if err != nil {
@@ -63,14 +56,22 @@ func (b *BootstrapChannelBuilder) addPruneDirectivesForAddon(addon *Addon) error
 		{Group: "", Kind: "ConfigMap"},
 		{Group: "", Kind: "Service"},
 		{Group: "", Kind: "ServiceAccount"},
+		{Group: "admissionregistration.k8s.io", Kind: "MutatingWebhookConfiguration"},
+		{Group: "admissionregistration.k8s.io", Kind: "ValidatingWebhookConfiguration"},
+		{Group: "apiregistration.k8s.io", Kind: "APIService"},
 		{Group: "apps", Kind: "Deployment"},
 		{Group: "apps", Kind: "DaemonSet"},
 		{Group: "apps", Kind: "StatefulSet"},
+		{Group: "networking.k8s.io", Kind: "IngressClass"},
 		{Group: "rbac.authorization.k8s.io", Kind: "ClusterRole"},
 		{Group: "rbac.authorization.k8s.io", Kind: "ClusterRoleBinding"},
 		{Group: "rbac.authorization.k8s.io", Kind: "Role"},
 		{Group: "rbac.authorization.k8s.io", Kind: "RoleBinding"},
 		{Group: "policy", Kind: "PodDisruptionBudget"},
+		{Group: "storage.k8s.io", Kind: "CSIDriver"},
+	}
+	if *spec.Name == "karpenter.sh" {
+		alwaysPruneGroupKinds = append(alwaysPruneGroupKinds, karpenterInstanceGroupKinds...)
 	}
 	pruneGroupKind := make(map[schema.GroupKind]bool)
 	for _, gk := range alwaysPruneGroupKinds {
@@ -88,7 +89,7 @@ func (b *BootstrapChannelBuilder) addPruneDirectivesForAddon(addon *Addon) error
 	}
 
 	// Parse the manifest; we use this to scope pruning to namespaces
-	objects, err := kubemanifest.LoadObjectsFrom(addon.ManifestData)
+	objects, err := kubemanifest.LoadObjectsFrom(manifestData)
 	if err != nil {
 		return fmt.Errorf("failed to parse manifest: %w", err)
 	}
@@ -144,7 +145,7 @@ func (b *BootstrapChannelBuilder) addPruneDirectivesForAddon(addon *Addon) error
 
 		pruneSpec.LabelSelector = selector.String()
 
-		addon.Spec.Prune.Kinds = append(addon.Spec.Prune.Kinds, pruneSpec)
+		spec.Prune.Kinds = append(spec.Prune.Kinds, pruneSpec)
 	}
 
 	return nil

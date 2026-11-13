@@ -58,6 +58,8 @@ type UpgradeClusterOptions struct {
 	ClusterName string
 	Yes         bool
 	Channel     string
+	// KubernetesVersion is the k8s version to use for upgrade.
+	KubernetesVersion string
 }
 
 func NewCmdUpgradeCluster(f *util.Factory, out io.Writer) *cobra.Command {
@@ -71,7 +73,7 @@ func NewCmdUpgradeCluster(f *util.Factory, out io.Writer) *cobra.Command {
 		Args:              rootCommand.clusterNameArgs(&options.ClusterName),
 		ValidArgsFunction: commandutils.CompleteClusterName(f, true, false),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := context.TODO()
+			ctx := cmd.Context()
 
 			return RunUpgradeCluster(ctx, f, out, options)
 		},
@@ -80,6 +82,8 @@ func NewCmdUpgradeCluster(f *util.Factory, out io.Writer) *cobra.Command {
 	cmd.Flags().BoolVarP(&options.Yes, "yes", "y", false, "Apply update")
 	cmd.Flags().StringVar(&options.Channel, "channel", "", "Channel to use for upgrade")
 	cmd.RegisterFlagCompletionFunc("channel", completeChannel)
+	cmd.Flags().StringVar(&options.KubernetesVersion, "kubernetes-version", "", "Kubernetes version to use for upgrade")
+	cmd.RegisterFlagCompletionFunc("kubernetes-version", completeKubernetesVersion)
 
 	return cmd
 }
@@ -99,7 +103,7 @@ func RunUpgradeCluster(ctx context.Context, f *util.Factory, out io.Writer, opti
 		return err
 	}
 
-	clientset, err := f.Clientset()
+	clientset, err := f.KopsClient()
 	if err != nil {
 		return err
 	}
@@ -134,7 +138,7 @@ func RunUpgradeCluster(ctx context.Context, f *util.Factory, out io.Writer, opti
 		})
 	}
 
-	channel, err := kopsapi.LoadChannel(channelLocation)
+	channel, err := kopsapi.LoadChannel(f.VFSContext(), channelLocation)
 	if err != nil {
 		return fmt.Errorf("error loading channel %q: %v", channelLocation, err)
 	}
@@ -149,12 +153,58 @@ func RunUpgradeCluster(ctx context.Context, f *util.Factory, out io.Writer, opti
 		}
 	}
 
-	proposedKubernetesVersion := kopsapi.RecommendedKubernetesVersion(channel, kops.Version)
+	var proposedKubernetesVersion *semver.Version
+	if options.KubernetesVersion != "" {
+		proposedKubernetesVersion, err = kopsutil.ParseKubernetesVersion(options.KubernetesVersion)
+		if err != nil {
+			klog.Warningf("error parsing KubernetesVersion %q", cluster.Spec.KubernetesVersion)
+		}
+	}
+
+	// Check if there is an upgraded kubernetes version recommended by the channel
+	if proposedKubernetesVersion == nil {
+		if currentKubernetesVersion != nil {
+			versionInfo := kopsapi.FindKubernetesVersionSpec(channel.Spec.KubernetesVersions, *currentKubernetesVersion)
+			if versionInfo == nil {
+				klog.Warningf("unable to find version information for kubernetes version %v in channel", *currentKubernetesVersion)
+			} else {
+				proposedKubernetesVersion, err = kopsutil.ParseKubernetesVersion(versionInfo.RecommendedVersion)
+				if err != nil {
+					klog.Warningf("error parsing KubernetesVersion %q", versionInfo.RecommendedVersion)
+				}
+				// Try a minor version upgrade
+				minorUpgradeVersion := semver.Version{
+					Major: proposedKubernetesVersion.Major,
+					Minor: proposedKubernetesVersion.Minor + 1,
+					Patch: 0,
+				}
+				kopsVersion, err := semver.ParseTolerant(kops.Version)
+				if err != nil {
+					klog.Warningf("error parsing kOps version %q", kops.Version)
+				}
+				if minorUpgradeVersion.LTE(kopsVersion) {
+					minorUpgradeInfo := kopsapi.FindKubernetesVersionSpec(channel.Spec.KubernetesVersions, minorUpgradeVersion)
+					if minorUpgradeInfo != nil {
+						proposedMinorUpgradeVersion, err := kopsutil.ParseKubernetesVersion(minorUpgradeInfo.RecommendedVersion)
+						if err != nil {
+							klog.Warningf("error parsing KubernetesVersion %q", minorUpgradeInfo.RecommendedVersion)
+						} else {
+							proposedKubernetesVersion = proposedMinorUpgradeVersion
+						}
+					}
+				}
+			}
+		} else {
+			// fallback to recommended version by kOps version, but this is not the usual path
+			proposedKubernetesVersion = kopsapi.RecommendedKubernetesVersion(channel, kops.Version)
+			klog.V(2).Infof("kubernetes version %q is recommended by channel %q", channelLocation, proposedKubernetesVersion)
+		}
+	}
 
 	// We won't propose a downgrade
 	// TODO: What if a kubernetes version is bad?
 	if currentKubernetesVersion != nil && proposedKubernetesVersion != nil && currentKubernetesVersion.GT(*proposedKubernetesVersion) {
-		klog.Warningf("cluster version %q is greater than recommended version %q", *currentKubernetesVersion, *proposedKubernetesVersion)
+		klog.Warningf("cluster version %q is greater than the desired version %q", *currentKubernetesVersion, *proposedKubernetesVersion)
 		proposedKubernetesVersion = currentKubernetesVersion
 	}
 
@@ -193,7 +243,7 @@ func RunUpgradeCluster(ctx context.Context, f *util.Factory, out io.Writer, opti
 				klog.Warningf("No matching images specified in channel; cannot prompt for upgrade")
 				continue
 			}
-			if channel.HasUpstreamImagePrefix(ig.Spec.Image) {
+			if ig.Spec.Image == "" || channel.HasUpstreamImagePrefix(ig.Spec.Image) {
 				if ig.Spec.Image != image.Name {
 					target := ig
 					actions = append(actions, &upgradeAction{

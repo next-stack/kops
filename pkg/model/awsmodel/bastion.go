@@ -19,26 +19,21 @@ package awsmodel
 import (
 	"fmt"
 	"sort"
-	"time"
+
+	elbv2types "github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2/types"
 
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awstasks"
-	"k8s.io/kops/upup/pkg/fi/utils"
-)
-
-const (
-	BastionELBSecurityGroupPrefix = "bastion"
-	BastionELBDefaultIdleTimeout  = 5 * time.Minute
 )
 
 // BastionModelBuilder adds model objects to support bastions
 //
 // Bastion instances live in the utility subnets created in the private topology.
 // All traffic goes through an ELB, and the ELB has port 22 open to SSHAccess.
-// Bastion instances have access to all internal master and node instances.
+// Bastion instances have access to all internal control-plane and node instances.
 
 type BastionModelBuilder struct {
 	*AWSModelContext
@@ -46,12 +41,14 @@ type BastionModelBuilder struct {
 	SecurityLifecycle fi.Lifecycle
 }
 
-var _ fi.ModelBuilder = &BastionModelBuilder{}
+var _ fi.CloudupModelBuilder = &BastionModelBuilder{}
 
-func (b *BastionModelBuilder) Build(c *fi.ModelBuilderContext) error {
+func (b *BastionModelBuilder) Build(c *fi.CloudupModelBuilderContext) error {
+	// The bastions are reached through the load balancer and security groups built here,
+	// including when the bastion instance groups are not being updated.
 	var bastionInstanceGroups []*kops.InstanceGroup
-	for _, ig := range b.InstanceGroups {
-		if ig.Spec.Role == kops.InstanceGroupRoleBastion {
+	for _, ig := range b.AllInstanceGroups {
+		if ig.Spec.Role.HasBastion() {
 			bastionInstanceGroups = append(bastionInstanceGroups, ig)
 		}
 	}
@@ -68,7 +65,7 @@ func (b *BastionModelBuilder) Build(c *fi.ModelBuilderContext) error {
 	if err != nil {
 		return err
 	}
-	masterGroups, err := b.GetSecurityGroups(kops.InstanceGroupRoleMaster)
+	masterGroups, err := b.GetSecurityGroups(kops.InstanceGroupRoleControlPlane)
 	if err != nil {
 		return err
 	}
@@ -83,21 +80,21 @@ func (b *BastionModelBuilder) Build(c *fi.ModelBuilderContext) error {
 		// Allow traffic from bastion instances to egress freely
 		{
 			t := &awstasks.SecurityGroupRule{
-				Name:          fi.String("ipv4-bastion-egress" + src.Suffix),
+				Name:          new("ipv4-bastion-egress" + src.Suffix),
 				Lifecycle:     b.SecurityLifecycle,
 				SecurityGroup: src.Task,
-				Egress:        fi.Bool(true),
-				CIDR:          fi.String("0.0.0.0/0"),
+				Egress:        new(true),
+				CIDR:          new("0.0.0.0/0"),
 			}
 			AddDirectionalGroupRule(c, t)
 		}
 		{
 			t := &awstasks.SecurityGroupRule{
-				Name:          fi.String("ipv6-bastion-egress" + src.Suffix),
+				Name:          new("ipv6-bastion-egress" + src.Suffix),
 				Lifecycle:     b.SecurityLifecycle,
 				SecurityGroup: src.Task,
-				Egress:        fi.Bool(true),
-				IPv6CIDR:      fi.String("::/0"),
+				Egress:        new(true),
+				IPv6CIDR:      new("::/0"),
 			}
 			AddDirectionalGroupRule(c, t)
 		}
@@ -105,20 +102,20 @@ func (b *BastionModelBuilder) Build(c *fi.ModelBuilderContext) error {
 
 	var bastionLoadBalancerType kops.LoadBalancerType
 	{
-		// Check if we requested a public or internal ELB
-		if b.Cluster.Spec.Topology != nil && b.Cluster.Spec.Topology.Bastion != nil && b.Cluster.Spec.Topology.Bastion.LoadBalancer != nil {
-			if b.Cluster.Spec.Topology.Bastion.LoadBalancer.Type != "" {
-				switch b.Cluster.Spec.Topology.Bastion.LoadBalancer.Type {
+		// Check if we requested a public or internal NLB
+		if b.Cluster.Spec.Networking.Topology != nil && b.Cluster.Spec.Networking.Topology.Bastion != nil && b.Cluster.Spec.Networking.Topology.Bastion.LoadBalancer != nil {
+			if b.Cluster.Spec.Networking.Topology.Bastion.LoadBalancer.Type != "" {
+				switch b.Cluster.Spec.Networking.Topology.Bastion.LoadBalancer.Type {
 				case kops.LoadBalancerTypeInternal:
 					bastionLoadBalancerType = "Internal"
 				case kops.LoadBalancerTypePublic:
 					bastionLoadBalancerType = "Public"
 				default:
-					return fmt.Errorf("unhandled bastion LoadBalancer type %q", b.Cluster.Spec.Topology.Bastion.LoadBalancer.Type)
+					return fmt.Errorf("unhandled bastion LoadBalancer type %q", b.Cluster.Spec.Networking.Topology.Bastion.LoadBalancer.Type)
 				}
 			} else {
 				// Default to Public
-				b.Cluster.Spec.Topology.Bastion.LoadBalancer.Type = kops.LoadBalancerTypePublic
+				b.Cluster.Spec.Networking.Topology.Bastion.LoadBalancer.Type = kops.LoadBalancerTypePublic
 				bastionLoadBalancerType = "Public"
 			}
 		} else {
@@ -127,32 +124,17 @@ func (b *BastionModelBuilder) Build(c *fi.ModelBuilderContext) error {
 		}
 	}
 
-	// Allow incoming SSH traffic to bastions, through the ELB
-	// TODO: Could we get away without an ELB here?  Tricky to fix if dns-controller breaks though...
-	for _, dest := range bastionGroups {
-		t := &awstasks.SecurityGroupRule{
-			Name:          fi.String("ssh-elb-to-bastion" + dest.Suffix),
-			Lifecycle:     b.SecurityLifecycle,
-			SecurityGroup: dest.Task,
-			SourceGroup:   b.LinkToELBSecurityGroup(BastionELBSecurityGroupPrefix),
-			Protocol:      fi.String("tcp"),
-			FromPort:      fi.Int64(22),
-			ToPort:        fi.Int64(22),
-		}
-		AddDirectionalGroupRule(c, t)
-	}
-
-	// Allow bastion nodes to SSH to masters
+	// Allow bastion nodes to SSH to control plane
 	for _, src := range bastionGroups {
 		for _, dest := range masterGroups {
 			t := &awstasks.SecurityGroupRule{
-				Name:          fi.String("bastion-to-master-ssh" + JoinSuffixes(src, dest)),
+				Name:          new("bastion-to-master-ssh" + JoinSuffixes(src, dest)),
 				Lifecycle:     b.SecurityLifecycle,
 				SecurityGroup: dest.Task,
 				SourceGroup:   src.Task,
-				Protocol:      fi.String("tcp"),
-				FromPort:      fi.Int64(22),
-				ToPort:        fi.Int64(22),
+				Protocol:      new("tcp"),
+				FromPort:      new(int32(22)),
+				ToPort:        new(int32(22)),
 			}
 			AddDirectionalGroupRule(c, t)
 		}
@@ -162,77 +144,63 @@ func (b *BastionModelBuilder) Build(c *fi.ModelBuilderContext) error {
 	for _, src := range bastionGroups {
 		for _, dest := range nodeGroups {
 			t := &awstasks.SecurityGroupRule{
-				Name:          fi.String("bastion-to-node-ssh" + JoinSuffixes(src, dest)),
+				Name:          new("bastion-to-node-ssh" + JoinSuffixes(src, dest)),
 				Lifecycle:     b.SecurityLifecycle,
 				SecurityGroup: dest.Task,
 				SourceGroup:   src.Task,
-				Protocol:      fi.String("tcp"),
-				FromPort:      fi.Int64(22),
-				ToPort:        fi.Int64(22),
+				Protocol:      new("tcp"),
+				FromPort:      new(int32(22)),
+				ToPort:        new(int32(22)),
 			}
 			AddDirectionalGroupRule(c, t)
 		}
 	}
 
-	// Create security group for bastion ELB
+	var lbSG *awstasks.SecurityGroup
 	{
-		t := &awstasks.SecurityGroup{
-			Name:             fi.String(b.ELBSecurityGroupName(BastionELBSecurityGroupPrefix)),
+		lbSG = &awstasks.SecurityGroup{
+			Name:             new(b.ELBSecurityGroupName("bastion")),
 			Lifecycle:        b.SecurityLifecycle,
-			VPC:              b.LinkToVPC(),
-			Description:      fi.String("Security group for bastion ELB"),
+			Description:      new("Security group for bastion ELB"),
 			RemoveExtraRules: []string{"port=22"},
+			VPC:              b.LinkToVPC(),
 		}
-		t.Tags = b.CloudTags(*t.Name, false)
-		c.AddTask(t)
+		lbSG.Tags = b.CloudTags(*lbSG.Name, false)
+
+		c.AddTask(lbSG)
 	}
 
-	// Allow traffic from ELB to egress freely
+	// Allow traffic from NLB to egress freely
 	{
-		t := &awstasks.SecurityGroupRule{
-			Name:          fi.String("ipv4-bastion-elb-egress"),
-			Lifecycle:     b.SecurityLifecycle,
-			SecurityGroup: b.LinkToELBSecurityGroup(BastionELBSecurityGroupPrefix),
-			Egress:        fi.Bool(true),
-			CIDR:          fi.String("0.0.0.0/0"),
+		{
+			t := &awstasks.SecurityGroupRule{
+				Name:          new("ipv4-bastion-elb-egress"),
+				Lifecycle:     b.SecurityLifecycle,
+				CIDR:          new("0.0.0.0/0"),
+				Egress:        new(true),
+				SecurityGroup: lbSG,
+			}
+			AddDirectionalGroupRule(c, t)
 		}
-		AddDirectionalGroupRule(c, t)
-	}
-	{
-		t := &awstasks.SecurityGroupRule{
-			Name:          fi.String("ipv6-bastion-elb-egress"),
-			Lifecycle:     b.SecurityLifecycle,
-			SecurityGroup: b.LinkToELBSecurityGroup(BastionELBSecurityGroupPrefix),
-			Egress:        fi.Bool(true),
-			IPv6CIDR:      fi.String("::/0"),
+		{
+			t := &awstasks.SecurityGroupRule{
+				Name:          new("ipv6-bastion-elb-egress"),
+				Lifecycle:     b.SecurityLifecycle,
+				IPv6CIDR:      new("::/0"),
+				Egress:        new(true),
+				SecurityGroup: lbSG,
+			}
+			AddDirectionalGroupRule(c, t)
 		}
-		AddDirectionalGroupRule(c, t)
-	}
-
-	// Allow external access to ELB
-	for _, sshAccess := range b.Cluster.Spec.SSHAccess {
-		t := &awstasks.SecurityGroupRule{
-			Name:          fi.String("ssh-external-to-bastion-elb-" + sshAccess),
-			Lifecycle:     b.SecurityLifecycle,
-			SecurityGroup: b.LinkToELBSecurityGroup(BastionELBSecurityGroupPrefix),
-			Protocol:      fi.String("tcp"),
-			FromPort:      fi.Int64(22),
-			ToPort:        fi.Int64(22),
-		}
-		if utils.IsIPv6CIDR(sshAccess) {
-			t.IPv6CIDR = fi.String(sshAccess)
-		} else {
-			t.CIDR = fi.String(sshAccess)
-		}
-		AddDirectionalGroupRule(c, t)
 	}
 
-	var elbSubnets []*awstasks.Subnet
+	var sshAllowedCIDRs []string
+	var nlbSubnetMappings []*awstasks.SubnetMapping
 	{
-		// Compute the subnets - only one per zone, and then break ties based on chooseBestSubnetForELB
+		// Compute the subnets - only one per zone, and then break ties based on chooseBestSubnetForNLB
 		subnetsByZone := make(map[string][]*kops.ClusterSubnetSpec)
-		for i := range b.Cluster.Spec.Subnets {
-			subnet := &b.Cluster.Spec.Subnets[i]
+		for i := range b.Cluster.Spec.Networking.Subnets {
+			subnet := &b.Cluster.Spec.Networking.Subnets[i]
 
 			switch subnet.Type {
 			case kops.SubnetTypePublic, kops.SubnetTypeUtility:
@@ -240,7 +208,7 @@ func (b *BastionModelBuilder) Build(c *fi.ModelBuilderContext) error {
 					continue
 				}
 
-			case kops.SubnetTypePrivate:
+			case kops.SubnetTypeDualStack, kops.SubnetTypePrivate:
 				if bastionLoadBalancerType != kops.LoadBalancerTypeInternal {
 					continue
 				}
@@ -253,100 +221,222 @@ func (b *BastionModelBuilder) Build(c *fi.ModelBuilderContext) error {
 		}
 
 		for zone, subnets := range subnetsByZone {
-			subnet := b.chooseBestSubnetForELB(zone, subnets)
-
-			elbSubnet := b.LinkToSubnet(subnet)
-			elbSubnets = append(elbSubnets, elbSubnet)
+			for _, subnet := range subnets {
+				sshAllowedCIDRs = append(sshAllowedCIDRs, subnet.CIDR)
+			}
+			subnet := b.chooseBestSubnetForNLB(zone, subnets)
+			nlbSubnetMappings = append(nlbSubnetMappings, &awstasks.SubnetMapping{Subnet: b.LinkToSubnet(subnet)})
 		}
 	}
 
-	// Create ELB itself
-	var elb *awstasks.ClassicLoadBalancer
-	{
-		loadBalancerName := b.LBName32("bastion")
-
-		idleTimeout := BastionELBDefaultIdleTimeout
-		if b.Cluster.Spec.Topology != nil && b.Cluster.Spec.Topology.Bastion != nil && b.Cluster.Spec.Topology.Bastion.IdleTimeoutSeconds != nil {
-			idleTimeout = time.Second * time.Duration(*b.Cluster.Spec.Topology.Bastion.IdleTimeoutSeconds)
+	sshAllowedCIDRs = append(sshAllowedCIDRs, b.Cluster.Spec.SSHAccess...)
+	for _, cidr := range sshAllowedCIDRs {
+		// Allow incoming SSH traffic to the NLB
+		// TODO: Could we get away without an NLB here?  Tricky to fix if dns-controller breaks though...
+		{
+			t := &awstasks.SecurityGroupRule{
+				Name:          new(fmt.Sprintf("ssh-nlb-%s", cidr)),
+				Lifecycle:     b.SecurityLifecycle,
+				SecurityGroup: lbSG,
+				Protocol:      new("tcp"),
+				FromPort:      new(int32(22)),
+				ToPort:        new(int32(22)),
+			}
+			t.SetCidrOrPrefix(cidr)
+			AddDirectionalGroupRule(c, t)
 		}
 
-		tags := b.CloudTags(loadBalancerName, false)
+		// Allow ICMP traffic required for PMTU discovery
+		{
+			t := &awstasks.SecurityGroupRule{
+				Name:          new("icmpv6-pmtu-ssh-nlb-" + cidr),
+				Lifecycle:     b.SecurityLifecycle,
+				FromPort:      new(int32(-1)),
+				Protocol:      new("icmpv6"),
+				SecurityGroup: lbSG,
+				ToPort:        new(int32(-1)),
+			}
+			t.SetCidrOrPrefix(cidr)
+			if t.CIDR == nil {
+				c.AddTask(t)
+			}
+		}
+		{
+			t := &awstasks.SecurityGroupRule{
+				Name:          new("icmp-pmtu-ssh-nlb-" + cidr),
+				Lifecycle:     b.SecurityLifecycle,
+				FromPort:      new(int32(3)),
+				Protocol:      new("icmp"),
+				SecurityGroup: lbSG,
+				ToPort:        new(int32(4)),
+			}
+			t.SetCidrOrPrefix(cidr)
+			if t.IPv6CIDR == nil {
+				c.AddTask(t)
+			}
+		}
+	}
+
+	// Allow SSH to the bastion instances from the NLB
+	for _, bastionGroup := range bastionGroups {
+		{
+			suffix := bastionGroup.Suffix
+			t := &awstasks.SecurityGroupRule{
+				Name:          new(fmt.Sprintf("ssh-to-bastion%s", suffix)),
+				Lifecycle:     b.SecurityLifecycle,
+				SecurityGroup: bastionGroup.Task,
+				SourceGroup:   lbSG,
+				Protocol:      new("tcp"),
+				FromPort:      new(int32(22)),
+				ToPort:        new(int32(22)),
+			}
+			AddDirectionalGroupRule(c, t)
+		}
+		{
+			suffix := bastionGroup.Suffix
+			t := &awstasks.SecurityGroupRule{
+				Name:          new(fmt.Sprintf("icmp-to-bastion%s", suffix)),
+				Lifecycle:     b.SecurityLifecycle,
+				SecurityGroup: bastionGroup.Task,
+				SourceGroup:   lbSG,
+				Protocol:      new("icmp"),
+				FromPort:      new(int32(3)),
+				ToPort:        new(int32(4)),
+			}
+			AddDirectionalGroupRule(c, t)
+		}
+		{
+			suffix := bastionGroup.Suffix
+			t := &awstasks.SecurityGroupRule{
+				Name:          new(fmt.Sprintf("icmp-from-bastion%s", suffix)),
+				Lifecycle:     b.SecurityLifecycle,
+				SecurityGroup: lbSG,
+				SourceGroup:   bastionGroup.Task,
+				Protocol:      new("icmp"),
+				FromPort:      new(int32(3)),
+				ToPort:        new(int32(4)),
+			}
+			AddDirectionalGroupRule(c, t)
+		}
+	}
+
+	// Create NLB itself
+	var nlb *awstasks.NetworkLoadBalancer
+	{
+		tags := b.CloudTags("", false)
 		for k, v := range b.Cluster.Spec.CloudLabels {
 			tags[k] = v
 		}
 		// Override the returned name to be the expected ELB name
 		tags["Name"] = "bastion." + b.ClusterName()
 
-		elb = &awstasks.ClassicLoadBalancer{
-			Name:      fi.String("bastion." + b.ClusterName()),
+		nlbListener := &awstasks.NetworkLoadBalancerListener{
+			Name:                new(b.NLBListenerName("bastion", 22)),
+			Lifecycle:           b.Lifecycle,
+			NetworkLoadBalancer: b.LinkToNLB("bastion"),
+			Port:                22,
+			TargetGroup:         b.LinkToTargetGroup("bastion"),
+		}
+		c.AddTask(nlbListener)
+
+		nlb = &awstasks.NetworkLoadBalancer{
+			Name:      new(b.NLBName("bastion")),
 			Lifecycle: b.Lifecycle,
 
-			LoadBalancerName: fi.String(loadBalancerName),
+			LoadBalancerBaseName: new(b.LBName32("bastion")),
+			SubnetMappings:       nlbSubnetMappings,
 			SecurityGroups: []*awstasks.SecurityGroup{
-				b.LinkToELBSecurityGroup(BastionELBSecurityGroupPrefix),
+				b.LinkToELBSecurityGroup("bastion"),
 			},
-			Subnets: elbSubnets,
-			Listeners: map[string]*awstasks.ClassicLoadBalancerListener{
-				"22": {InstancePort: 22},
-			},
-
-			HealthCheck: &awstasks.ClassicLoadBalancerHealthCheck{
-				Target:             fi.String("TCP:22"),
-				Timeout:            fi.Int64(5),
-				Interval:           fi.Int64(10),
-				HealthyThreshold:   fi.Int64(2),
-				UnhealthyThreshold: fi.Int64(2),
-			},
-
-			ConnectionSettings: &awstasks.ClassicLoadBalancerConnectionSettings{
-				IdleTimeout: fi.Int64(int64(idleTimeout.Seconds())),
-			},
-
-			Tags: tags,
+			Tags:          tags,
+			VPC:           b.LinkToVPC(),
+			Type:          elbv2types.LoadBalancerTypeEnumNetwork,
+			IpAddressType: elbv2types.IpAddressTypeIpv4,
 		}
-		// Add additional security groups to the ELB
-		if b.Cluster.Spec.Topology != nil && b.Cluster.Spec.Topology.Bastion != nil && b.Cluster.Spec.Topology.Bastion.LoadBalancer != nil && b.Cluster.Spec.Topology.Bastion.LoadBalancer.AdditionalSecurityGroups != nil {
-			for _, id := range b.Cluster.Spec.Topology.Bastion.LoadBalancer.AdditionalSecurityGroups {
-				t := &awstasks.SecurityGroup{
-					Name:      fi.String(id),
-					Lifecycle: b.SecurityLifecycle,
-					ID:        fi.String(id),
-					Shared:    fi.Bool(true),
-				}
-				if err := c.EnsureTask(t); err != nil {
-					return err
-				}
-				elb.SecurityGroups = append(elb.SecurityGroups, t)
-			}
+		if useIPv6ForBastion(b) {
+			nlb.IpAddressType = elbv2types.IpAddressTypeDualstack
 		}
-		// Set the elb Scheme according to load balancer Type
+		// Set the NLB Scheme according to load balancer Type
 		switch bastionLoadBalancerType {
 		case kops.LoadBalancerTypeInternal:
-			elb.Scheme = fi.String("internal")
+			nlb.Scheme = elbv2types.LoadBalancerSchemeEnumInternal
 		case kops.LoadBalancerTypePublic:
-			elb.Scheme = nil
+			nlb.Scheme = elbv2types.LoadBalancerSchemeEnumInternetFacing
 		default:
 			return fmt.Errorf("unhandled bastion LoadBalancer type %q", bastionLoadBalancerType)
 		}
 
-		c.AddTask(elb)
+		sshGroupName := b.NLBTargetGroupName("bastion")
+		sshGroupTags := b.CloudTags(sshGroupName, false)
+
+		// Override the returned name to be the expected NLB TG name
+		sshGroupTags["Name"] = sshGroupName
+
+		groupAttrs := map[string]string{
+			awstasks.TargetGroupAttributeDeregistrationDelayConnectionTerminationEnabled: "true",
+			awstasks.TargetGroupAttributeDeregistrationDelayTimeoutSeconds:               "30",
+		}
+
+		tg := &awstasks.TargetGroup{
+			Name:                new(sshGroupName),
+			Lifecycle:           b.Lifecycle,
+			VPC:                 b.LinkToVPC(),
+			Tags:                sshGroupTags,
+			Protocol:            elbv2types.ProtocolEnumTcp,
+			Port:                new(int32(22)),
+			Attributes:          groupAttrs,
+			Interval:            new(int32(10)),
+			HealthyThreshold:    new(int32(2)),
+			UnhealthyThreshold:  new(int32(2)),
+			HealthCheckProtocol: elbv2types.ProtocolEnumTcp,
+			Shared:              new(false),
+		}
+		tg.CreateNewRevisionsWith(nlb)
+
+		c.AddTask(tg)
+
+		// Add additional security groups to the NLB
+		if b.Cluster.Spec.Networking.Topology != nil && b.Cluster.Spec.Networking.Topology.Bastion != nil && b.Cluster.Spec.Networking.Topology.Bastion.LoadBalancer != nil && b.Cluster.Spec.Networking.Topology.Bastion.LoadBalancer.AdditionalSecurityGroups != nil {
+			for _, id := range b.Cluster.Spec.Networking.Topology.Bastion.LoadBalancer.AdditionalSecurityGroups {
+				t := &awstasks.SecurityGroup{
+					Name:      new(id),
+					Lifecycle: b.SecurityLifecycle,
+					ID:        new(id),
+					Shared:    new(true),
+				}
+				c.EnsureTask(t)
+				nlb.SecurityGroups = append(nlb.SecurityGroups, t)
+			}
+		}
+
+		c.AddTask(nlb)
 	}
 
-	bastionPublicName := ""
-	if b.Cluster.Spec.Topology != nil && b.Cluster.Spec.Topology.Bastion != nil {
-		bastionPublicName = b.Cluster.Spec.Topology.Bastion.BastionPublicName
+	publicName := ""
+	if b.Cluster.Spec.Networking.Topology != nil && b.Cluster.Spec.Networking.Topology.Bastion != nil {
+		publicName = b.Cluster.Spec.Networking.Topology.Bastion.PublicName
 	}
-	if bastionPublicName != "" {
+	if publicName != "" {
 		// Here we implement the bastion CNAME logic
 		// By default bastions will create a CNAME that follows the `bastion-$clustername` formula
 		t := &awstasks.DNSName{
-			Name:      fi.String(bastionPublicName),
+			Name:      new(publicName),
 			Lifecycle: b.Lifecycle,
 
 			Zone:               b.LinkToDNSZone(),
-			ResourceName:       fi.String(bastionPublicName),
-			ResourceType:       fi.String("A"),
-			TargetLoadBalancer: elb,
+			ResourceName:       new(publicName),
+			ResourceType:       new("A"),
+			TargetLoadBalancer: b.LinkToNLB("bastion"),
+		}
+		c.AddTask(t)
+		t = &awstasks.DNSName{
+			Name:      new(publicName + "-AAAA"),
+			Lifecycle: b.Lifecycle,
+
+			Zone:               b.LinkToDNSZone(),
+			ResourceName:       new(publicName),
+			ResourceType:       new("AAAA"),
+			TargetLoadBalancer: b.LinkToNLB("bastion"),
 		}
 		c.AddTask(t)
 
@@ -354,11 +444,27 @@ func (b *BastionModelBuilder) Build(c *fi.ModelBuilderContext) error {
 	return nil
 }
 
+func useIPv6ForBastion(b *BastionModelBuilder) bool {
+	for _, ig := range b.AllInstanceGroups {
+		for _, igSubnetName := range ig.Spec.Subnets {
+			for _, clusterSubnet := range b.Cluster.Spec.Networking.Subnets {
+				if igSubnetName != clusterSubnet.Name {
+					continue
+				}
+				if clusterSubnet.IPv6CIDR != "" {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 // Choose between subnets in a zone.
-// We have already applied the rules to match internal subnets to internal ELBs and vice-versa for public-facing ELBs.
-// For internal ELBs: we prefer the master subnets
-// For public facing ELBs: we prefer the utility subnets
-func (b *BastionModelBuilder) chooseBestSubnetForELB(zone string, subnets []*kops.ClusterSubnetSpec) *kops.ClusterSubnetSpec {
+// We have already applied the rules to match internal subnets to internal NLBs and vice-versa for public-facing NLBs.
+// For internal NLBs: we prefer the control-plane subnets
+// For public facing NLBs: we prefer the utility subnets
+func (b *BastionModelBuilder) chooseBestSubnetForNLB(zone string, subnets []*kops.ClusterSubnetSpec) *kops.ClusterSubnetSpec {
 	if len(subnets) == 0 {
 		return nil
 	}
@@ -381,8 +487,12 @@ func (b *BastionModelBuilder) chooseBestSubnetForELB(zone string, subnets []*kop
 			score += 1
 		}
 
+		if subnet.Type == kops.SubnetTypeDualStack {
+			score += 2
+		}
+
 		if subnet.Type == kops.SubnetTypeUtility {
-			score += 1
+			score += 3
 		}
 
 		scoredSubnets = append(scoredSubnets, &scoredSubnet{
@@ -394,7 +504,7 @@ func (b *BastionModelBuilder) chooseBestSubnetForELB(zone string, subnets []*kop
 	sort.Sort(ByScoreDescending(scoredSubnets))
 
 	if scoredSubnets[0].score == scoredSubnets[1].score {
-		klog.V(2).Infof("Making arbitrary choice between subnets in zone %q to attach to ELB (%q vs %q)", zone, scoredSubnets[0].subnet.Name, scoredSubnets[1].subnet.Name)
+		klog.V(2).Infof("Making arbitrary choice between subnets in zone %q to attach to NLB (%q vs %q)", zone, scoredSubnets[0].subnet.Name, scoredSubnets[1].subnet.Name)
 	}
 
 	return scoredSubnets[0].subnet

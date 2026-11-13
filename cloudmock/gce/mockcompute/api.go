@@ -27,13 +27,17 @@ type MockClient struct {
 	projectClient *projectClient
 	zoneClient    *zoneClient
 
-	networkClient        *networkClient
-	subnetworkClient     *subnetworkClient
-	routeClient          *routeClient
-	forwardingRuleClient *forwardingRuleClient
-	addressClient        *addressClient
-	firewallClient       *firewallClient
-	routerClient         *routerClient
+	networkClient          *networkClient
+	subnetworkClient       *subnetworkClient
+	backendServiceClient   *backendServiceClient
+	routeClient            *routeClient
+	forwardingRuleClient   *forwardingRuleClient
+	httpHealthChecksClient *httpHealthChecksClient
+	healthCheckClient      *healthCheckClient
+	addressClient          *addressClient
+	firewallClient         *firewallClient
+	routerClient           *routerClient
+	instanceClient         *instanceClient
 
 	instanceTemplateClient     *instanceTemplateClient
 	instanceGroupManagerClient *instanceGroupManagerClient
@@ -46,20 +50,26 @@ var _ gce.ComputeClient = &MockClient{}
 
 // NewMockClient creates a new mock client.
 func NewMockClient(project string) *MockClient {
+	instanceClient := newInstanceClient()
+
 	return &MockClient{
 		projectClient: newProjectClient(project),
 		zoneClient:    newZoneClient(project),
 
-		networkClient:        newNetworkClient(),
-		subnetworkClient:     newSubnetworkClient(),
-		routeClient:          newRouteClient(),
-		forwardingRuleClient: newForwardingRuleClient(),
-		addressClient:        newAddressClient(),
-		firewallClient:       newFirewallClient(),
-		routerClient:         newRouterClient(),
+		networkClient:          newNetworkClient(),
+		subnetworkClient:       newSubnetworkClient(),
+		backendServiceClient:   newBackendServiceClient(),
+		routeClient:            newRouteClient(),
+		forwardingRuleClient:   newForwardingRuleClient(),
+		httpHealthChecksClient: newHttpHealthChecksClient(),
+		healthCheckClient:      newHealthCheckClient(),
+		addressClient:          newAddressClient(),
+		firewallClient:         newFirewallClient(),
+		routerClient:           newRouterClient(),
+		instanceClient:         instanceClient,
 
 		instanceTemplateClient:     newInstanceTemplateClient(),
-		instanceGroupManagerClient: newInstanceGroupManagerClient(),
+		instanceGroupManagerClient: newInstanceGroupManagerClient(instanceClient),
 		targetPoolClient:           newTargetPoolClient(),
 
 		diskClient: newDiskClient(),
@@ -71,12 +81,14 @@ func (c *MockClient) AllResources() map[string]interface{} {
 	fs := []func() map[string]interface{}{
 		c.projectClient.All,
 		c.zoneClient.All,
-		// Do not call c.networkClient.All() as currently pkg/resources/gce/gce.go
-		// does not delete a network.
+		// Do not call c.networkClient.All() or c.subnetworkClient.All,
+		// as currently pkg/resources/gce/gce.go
+		// does not delete a network or subnetwork.
 		// TODO(kenji): Fix this.
-		c.subnetworkClient.All,
 		c.routeClient.All,
 		c.forwardingRuleClient.All,
+		c.httpHealthChecksClient.All,
+		c.healthCheckClient.All,
 		c.addressClient.All,
 		c.firewallClient.All,
 		c.routerClient.All,
@@ -84,6 +96,7 @@ func (c *MockClient) AllResources() map[string]interface{} {
 		c.instanceGroupManagerClient.All,
 		c.targetPoolClient.All,
 		c.diskClient.All,
+		c.backendServiceClient.All,
 	}
 	for _, f := range fs {
 		m := f()
@@ -124,6 +137,18 @@ func (c *MockClient) ForwardingRules() gce.ForwardingRuleClient {
 	return c.forwardingRuleClient
 }
 
+func (c *MockClient) HTTPHealthChecks() gce.HttpHealthChecksClient {
+	return c.httpHealthChecksClient
+}
+
+func (c *MockClient) RegionHealthChecks() gce.RegionHealthChecksClient {
+	return c.healthCheckClient
+}
+
+func (c *MockClient) RegionBackendServices() gce.RegionBackendServiceClient {
+	return c.backendServiceClient
+}
+
 func (c *MockClient) Addresses() gce.AddressClient {
 	return c.addressClient
 }
@@ -137,8 +162,7 @@ func (c *MockClient) Routers() gce.RouterClient {
 }
 
 func (c *MockClient) Instances() gce.InstanceClient {
-	// Not implemented.
-	return nil
+	return c.instanceClient
 }
 
 func (c *MockClient) InstanceTemplates() gce.InstanceTemplateClient {
@@ -147,6 +171,17 @@ func (c *MockClient) InstanceTemplates() gce.InstanceTemplateClient {
 
 func (c *MockClient) InstanceGroupManagers() gce.InstanceGroupManagerClient {
 	return c.instanceGroupManagerClient
+}
+
+// SetInstanceGroupManagerErrors installs the canned ListErrors response for one
+// managed instance group.
+func (c *MockClient) SetInstanceGroupManagerErrors(project, zone, name string, errs []*compute.InstanceManagedByIgmError) {
+	c.instanceGroupManagerClient.SetErrors(project, zone, name, errs)
+}
+
+// SetManagedInstance installs the managed instance a group reports for name.
+func (c *MockClient) SetManagedInstance(project, zone, name string, mi *compute.ManagedInstance) {
+	c.instanceGroupManagerClient.SetManagedInstance(project, zone, name, mi)
 }
 
 func (c *MockClient) TargetPools() gce.TargetPoolClient {

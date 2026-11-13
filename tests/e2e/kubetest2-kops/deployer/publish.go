@@ -53,7 +53,8 @@ func (d *deployer) PostTest(testErr error) error {
 	}
 
 	args := []string{
-		"gsutil", "cp",
+		"gcloud", "storage", "cp",
+		"--cache-control", "private, max-age=0, no-transform",
 		tempSrc.Name(),
 		d.PublishVersionMarker,
 	}

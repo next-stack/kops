@@ -17,6 +17,7 @@ limitations under the License.
 package vfs
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"strings"
@@ -29,39 +30,38 @@ import (
 // Yet another VFS package
 // If there's a "winning" VFS implementation in go, we should switch to it!
 
-type VFS interface {
-}
+type VFS interface{}
 
 func IsDirectory(p Path) bool {
 	_, err := p.ReadDir()
 	return err == nil
 }
 
-type ACL interface {
-}
+type ACL interface{}
 
 type ACLOracle func(Path) (ACL, error)
 
 // Path is a path in the VFS space, which we can read, write, list etc
 type Path interface {
 	io.WriterTo
-
 	Join(relativePath ...string) Path
 
 	// ReadFile returns the contents of the file, or an error if the file could not be read.
 	// If the file did not exist, err = os.ErrNotExist
 	// As this reads the entire file into memory, consider using WriteTo for bigger files
-	ReadFile() ([]byte, error)
-
-	WriteFile(data io.ReadSeeker, acl ACL) error
+	ReadFile(ctx context.Context) ([]byte, error)
+	WriteFile(ctx context.Context, data io.ReadSeeker, acl ACL) error
 	// CreateFile writes the file contents, but only if the file does not already exist
-	CreateFile(data io.ReadSeeker, acl ACL) error
+	CreateFile(ctx context.Context, data io.ReadSeeker, acl ACL) error
 
 	// Remove deletes the file
-	Remove() error
+	Remove(ctx context.Context) error
+
+	// RemoveAll deletes all files recursively, deletes only files as returned per ReadTree
+	RemoveAll(ctx context.Context) error
 
 	// RemoveAllVersions completely deletes the file (with all its versions and markers).
-	RemoveAllVersions() error
+	RemoveAllVersions(ctx context.Context) error
 
 	// Base returns the base name (last element)
 	Base() string
@@ -74,7 +74,7 @@ type Path interface {
 
 	// ReadTree lists all files (recursively) in the subtree rooted at the current Path
 	/// Note: returns only files, not directories
-	ReadTree() ([]Path, error)
+	ReadTree(ctx context.Context) ([]Path, error)
 }
 
 // TerraformPath is a Path that can render to Terraform.
@@ -82,17 +82,12 @@ type TerraformPath interface {
 	Path
 	// RenderTerraform renders the file to a TerraformWriter.
 	RenderTerraform(writer *terraformWriter.TerraformWriter, name string, data io.Reader, acl ACL) error
-
-	// TerraformProvider returns provider information
-	TerraformProvider() (*TerraformProvider, error)
 }
 
-// TerraformProvider is a provider definition for a TerraformPath
-type TerraformProvider struct {
-	// Name is the name of the terraform provider
-	Name string
-	// Arguments are additional settings used in the provider definition
-	Arguments map[string]string
+// WriterToWithContext is implemented by Paths that can stream their contents
+// to a writer with a caller-provided context.
+type WriterToWithContext interface {
+	WriteToWithContext(ctx context.Context, out io.Writer) (int64, error)
 }
 
 type HasHash interface {
@@ -124,7 +119,7 @@ func IsClusterReadable(p Path) bool {
 	}
 
 	switch p.(type) {
-	case *S3Path, *GSPath, *SwiftPath, *OSSPath, *FSPath, *VaultPath, *AzureBlobPath:
+	case *S3Path, *GSPath, *SwiftPath, *FSPath, *AzureBlobPath:
 		return true
 
 	case *KubernetesPath:

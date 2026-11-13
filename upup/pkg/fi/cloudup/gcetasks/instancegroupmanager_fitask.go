@@ -27,7 +27,7 @@ import (
 
 // InstanceGroupManager
 
-var _ fi.HasLifecycle = &InstanceGroupManager{}
+var _ fi.HasLifecycle = (*InstanceGroupManager)(nil)
 
 // GetLifecycle returns the Lifecycle of the object, implementing fi.HasLifecycle
 func (o *InstanceGroupManager) GetLifecycle() fi.Lifecycle {
@@ -39,7 +39,7 @@ func (o *InstanceGroupManager) SetLifecycle(lifecycle fi.Lifecycle) {
 	o.Lifecycle = lifecycle
 }
 
-var _ fi.HasName = &InstanceGroupManager{}
+var _ fi.HasName = (*InstanceGroupManager)(nil)
 
 // GetName returns the Name of the object, implementing fi.HasName
 func (o *InstanceGroupManager) GetName() *string {
@@ -48,5 +48,5 @@ func (o *InstanceGroupManager) GetName() *string {
 
 // String is the stringer function for the task, producing readable output using fi.TaskAsString
 func (o *InstanceGroupManager) String() string {
-	return fi.TaskAsString(o)
+	return fi.CloudupTaskAsString(o)
 }

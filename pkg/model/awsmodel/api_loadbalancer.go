@@ -19,19 +19,16 @@ package awsmodel
 import (
 	"fmt"
 	"sort"
-	"time"
 
+	elbv2types "github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 	"k8s.io/kops/pkg/apis/kops"
-	"k8s.io/kops/pkg/dns"
+	"k8s.io/kops/pkg/wellknownports"
+	"k8s.io/kops/pkg/wellknownservices"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awstasks"
-	"k8s.io/kops/upup/pkg/fi/utils"
 )
-
-// LoadBalancerDefaultIdleTimeout is the default idle time for the ELB
-const LoadBalancerDefaultIdleTimeout = 5 * time.Minute
 
 // APILoadBalancerBuilder builds a LoadBalancer for accessing the API
 type APILoadBalancerBuilder struct {
@@ -41,10 +38,10 @@ type APILoadBalancerBuilder struct {
 	SecurityLifecycle fi.Lifecycle
 }
 
-var _ fi.ModelBuilder = &APILoadBalancerBuilder{}
+var _ fi.CloudupModelBuilder = &APILoadBalancerBuilder{}
 
 // Build is responsible for building the KubeAPI tasks for the aws model
-func (b *APILoadBalancerBuilder) Build(c *fi.ModelBuilderContext) error {
+func (b *APILoadBalancerBuilder) Build(c *fi.CloudupModelBuilderContext) error {
 	// Configuration where an ELB fronts the API
 	if !b.UseLoadBalancerForAPI() {
 		return nil
@@ -64,18 +61,14 @@ func (b *APILoadBalancerBuilder) Build(c *fi.ModelBuilderContext) error {
 		return fmt.Errorf("unhandled LoadBalancer type %q", lbSpec.Type)
 	}
 
-	var elbSubnets []*awstasks.Subnet
 	var nlbSubnetMappings []*awstasks.SubnetMapping
 	if len(lbSpec.Subnets) != 0 {
 		// Subnets have been explicitly set
 		for _, subnet := range lbSpec.Subnets {
-			for _, clusterSubnet := range b.Cluster.Spec.Subnets {
+			for _, clusterSubnet := range b.Cluster.Spec.Networking.Subnets {
 				if subnet.Name == clusterSubnet.Name {
-					elbSubnet := b.LinkToSubnet(&clusterSubnet)
-					elbSubnets = append(elbSubnets, elbSubnet)
-
 					nlbSubnetMapping := &awstasks.SubnetMapping{
-						Subnet: elbSubnet,
+						Subnet: b.LinkToSubnet(&clusterSubnet),
 					}
 					if subnet.PrivateIPv4Address != nil {
 						nlbSubnetMapping.PrivateIPv4Address = subnet.PrivateIPv4Address
@@ -91,8 +84,8 @@ func (b *APILoadBalancerBuilder) Build(c *fi.ModelBuilderContext) error {
 	} else {
 		// Compute the subnets - only one per zone, and then break ties based on chooseBestSubnetForELB
 		subnetsByZone := make(map[string][]*kops.ClusterSubnetSpec)
-		for i := range b.Cluster.Spec.Subnets {
-			subnet := &b.Cluster.Spec.Subnets[i]
+		for i := range b.Cluster.Spec.Networking.Subnets {
+			subnet := &b.Cluster.Spec.Networking.Subnets[i]
 
 			switch subnet.Type {
 			case kops.SubnetTypePublic, kops.SubnetTypeUtility:
@@ -100,7 +93,7 @@ func (b *APILoadBalancerBuilder) Build(c *fi.ModelBuilderContext) error {
 					continue
 				}
 
-			case kops.SubnetTypePrivate:
+			case kops.SubnetTypeDualStack, kops.SubnetTypePrivate:
 				if lbSpec.Type != kops.LoadBalancerTypeInternal {
 					continue
 				}
@@ -115,174 +108,223 @@ func (b *APILoadBalancerBuilder) Build(c *fi.ModelBuilderContext) error {
 		for zone, subnets := range subnetsByZone {
 			subnet := b.chooseBestSubnetForELB(zone, subnets)
 
-			elbSubnet := b.LinkToSubnet(subnet)
-			elbSubnets = append(elbSubnets, elbSubnet)
-			nlbSubnetMappings = append(nlbSubnetMappings, &awstasks.SubnetMapping{Subnet: elbSubnet})
+			nlbSubnetMappings = append(nlbSubnetMappings, &awstasks.SubnetMapping{Subnet: b.LinkToSubnet(subnet)})
 		}
 	}
 
-	var clb *awstasks.ClassicLoadBalancer
 	var nlb *awstasks.NetworkLoadBalancer
 	{
-		loadBalancerName := b.LBName32("api")
+		var nlbListeners []*awstasks.NetworkLoadBalancerListener
 
-		idleTimeout := LoadBalancerDefaultIdleTimeout
-		if lbSpec.IdleTimeoutSeconds != nil {
-			idleTimeout = time.Second * time.Duration(*lbSpec.IdleTimeoutSeconds)
-		}
+		if lbSpec.SSLCertificate == "" {
+			listener443 := &awstasks.NetworkLoadBalancerListener{
+				Name:                new(b.NLBListenerName("api", 443)),
+				Lifecycle:           b.Lifecycle,
+				NetworkLoadBalancer: b.LinkToNLB("api"),
+				Port:                443,
+				TargetGroup:         b.LinkToTargetGroup("tcp"),
+			}
+			nlbListeners = append(nlbListeners, listener443)
+		} else {
+			// When using a custom certificate, we create a secondary listener on 8443, which does _not_ use the custom certificate.
+			// This is because client certificates cannot be used in conjunction with custom certificates on NLBs.
+			listener8443 := &awstasks.NetworkLoadBalancerListener{
+				Name:                new(b.NLBListenerName("api", 8443)),
+				Lifecycle:           b.Lifecycle,
+				NetworkLoadBalancer: b.LinkToNLB("api"),
+				Port:                8443,
+				TargetGroup:         b.LinkToTargetGroup("tcp"),
+			}
+			nlbListeners = append(nlbListeners, listener8443)
 
-		listeners := map[string]*awstasks.ClassicLoadBalancerListener{
-			"443": {InstancePort: 443},
-		}
-
-		nlbListeners := []*awstasks.NetworkLoadBalancerListener{
-			{
-				Port:            443,
-				TargetGroupName: b.NLBTargetGroupName("tcp"),
-			},
-		}
-
-		if lbSpec.SSLCertificate != "" {
-			listeners["443"].SSLCertificateID = lbSpec.SSLCertificate
-			nlbListeners[0].Port = 8443
-
-			nlbListener := &awstasks.NetworkLoadBalancerListener{
-				Port:             443,
-				TargetGroupName:  b.NLBTargetGroupName("tls"),
-				SSLCertificateID: lbSpec.SSLCertificate,
+			// The primary listener _does_ use the custom certificate.
+			listener443 := &awstasks.NetworkLoadBalancerListener{
+				Name:                new(b.NLBListenerName("api", 443)),
+				Lifecycle:           b.Lifecycle,
+				NetworkLoadBalancer: b.LinkToNLB("api"),
+				Port:                443,
+				TargetGroup:         b.LinkToTargetGroup("tls"),
+				SSLCertificateID:    lbSpec.SSLCertificate,
 			}
 			if lbSpec.SSLPolicy != nil {
-				nlbListener.SSLPolicy = *lbSpec.SSLPolicy
+				listener443.SSLPolicy = *lbSpec.SSLPolicy
+			} else {
+				listener443.SSLPolicy = "ELBSecurityPolicy-2016-08" // The AWS default
 			}
-			nlbListeners = append(nlbListeners, nlbListener)
+			nlbListeners = append(nlbListeners, listener443)
+		}
+
+		if b.Cluster.UsesLoadBalancerForKopsController() {
+			{
+				nlbListener := &awstasks.NetworkLoadBalancerListener{
+					Name:                new(b.NLBListenerName("api", wellknownports.KopsControllerPort)),
+					Lifecycle:           b.Lifecycle,
+					NetworkLoadBalancer: b.LinkToNLB("api"),
+					Port:                wellknownports.KopsControllerPort,
+					TargetGroup:         b.LinkToTargetGroup("kops-controller"),
+				}
+				nlbListeners = append(nlbListeners, nlbListener)
+			}
+
+			if b.Cluster.Spec.Networking.Cilium != nil && b.Cluster.Spec.Networking.Cilium.EtcdManaged {
+				nlbListener := &awstasks.NetworkLoadBalancerListener{
+					Name:                new(b.NLBListenerName("etcd-cilium", wellknownports.EtcdCiliumClientPort)),
+					Lifecycle:           b.Lifecycle,
+					NetworkLoadBalancer: b.LinkToNLB("api"),
+					Port:                wellknownports.EtcdCiliumClientPort,
+					TargetGroup:         b.LinkToTargetGroup("etcd-cilium"),
+				}
+				nlbListeners = append(nlbListeners, nlbListener)
+			}
 		}
 
 		if lbSpec.SecurityGroupOverride != nil {
 			klog.V(1).Infof("WARNING: You are overwriting the Load Balancers, Security Group. When this is done you are responsible for ensure the correct rules!")
 		}
 
-		tags := b.CloudTags(loadBalancerName, false)
+		tags := b.CloudTags("", false)
 		for k, v := range b.Cluster.Spec.CloudLabels {
 			tags[k] = v
 		}
 		// Override the returned name to be the expected ELB name
 		tags["Name"] = "api." + b.ClusterName()
 
-		name := b.NLBName("api")
 		nlb = &awstasks.NetworkLoadBalancer{
-			Name:      &name,
+			Name:      new(b.NLBName("api")),
 			Lifecycle: b.Lifecycle,
 
-			LoadBalancerName: fi.String(loadBalancerName),
-			SubnetMappings:   nlbSubnetMappings,
-			Listeners:        nlbListeners,
-			TargetGroups:     make([]*awstasks.TargetGroup, 0),
-
-			Tags:          tags,
-			VPC:           b.LinkToVPC(),
-			Type:          fi.String("network"),
-			IpAddressType: fi.String("ipv4"),
-		}
-		// DualStack can only be used for public NLB
-		// https://aws.amazon.com/premiumsupport/knowledge-center/elb-configure-with-ipv6
-		if b.UseIPv6ForAPI() && lbSpec.Type == kops.LoadBalancerTypePublic {
-			nlb.IpAddressType = fi.String("dualstack")
-		}
-
-		clb = &awstasks.ClassicLoadBalancer{
-			Name:      fi.String("api." + b.ClusterName()),
-			Lifecycle: b.Lifecycle,
-
-			LoadBalancerName: fi.String(loadBalancerName),
+			LoadBalancerBaseName: new(b.LBName32("api")),
 			SecurityGroups: []*awstasks.SecurityGroup{
 				b.LinkToELBSecurityGroup("api"),
 			},
-			Subnets:   elbSubnets,
-			Listeners: listeners,
-
-			// Configure fast-recovery health-checks
-			HealthCheck: &awstasks.ClassicLoadBalancerHealthCheck{
-				Target:             fi.String("SSL:443"),
-				Timeout:            fi.Int64(5),
-				Interval:           fi.Int64(10),
-				HealthyThreshold:   fi.Int64(2),
-				UnhealthyThreshold: fi.Int64(2),
-			},
-
-			ConnectionSettings: &awstasks.ClassicLoadBalancerConnectionSettings{
-				IdleTimeout: fi.Int64(int64(idleTimeout.Seconds())),
-			},
-
-			Tags: tags,
+			SubnetMappings:    nlbSubnetMappings,
+			Tags:              tags,
+			WellKnownServices: []wellknownservices.WellKnownService{wellknownservices.KubeAPIServer},
+			VPC:               b.LinkToVPC(),
+			Type:              elbv2types.LoadBalancerTypeEnumNetwork,
 		}
 
-		if lbSpec.CrossZoneLoadBalancing == nil {
-			lbSpec.CrossZoneLoadBalancing = fi.Bool(false)
+		// Wait for all load balancer components to be created (including network interfaces needed to
+		// bake NLB ENI IPs into worker nodeup configs). Limiting this to clusters that actually need
+		// those IPs because load balancer creation is quite slow.
+		if b.Cluster.UsesLoadBalancerForKopsController() {
+			nlb.SetWaitForLoadBalancerReady(true)
 		}
 
-		clb.CrossZoneLoadBalancing = &awstasks.ClassicLoadBalancerCrossZoneLoadBalancing{
-			Enabled: lbSpec.CrossZoneLoadBalancing,
+		if b.Cluster.UsesLoadBalancerForKopsController() {
+			lbSpec.CrossZoneLoadBalancing = new(true)
+		} else if lbSpec.CrossZoneLoadBalancing == nil {
+			lbSpec.CrossZoneLoadBalancing = new(false)
 		}
 
 		nlb.CrossZoneLoadBalancing = lbSpec.CrossZoneLoadBalancing
 
 		switch lbSpec.Type {
 		case kops.LoadBalancerTypeInternal:
-			clb.Scheme = fi.String("internal")
-			nlb.Scheme = fi.String("internal")
+			nlb.Scheme = elbv2types.LoadBalancerSchemeEnumInternal
 		case kops.LoadBalancerTypePublic:
-			clb.Scheme = nil
-			nlb.Scheme = nil
+			nlb.Scheme = elbv2types.LoadBalancerSchemeEnumInternetFacing
 		default:
 			return fmt.Errorf("unknown load balancer Type: %q", lbSpec.Type)
 		}
 
 		if lbSpec.AccessLog != nil {
-			clb.AccessLog = &awstasks.ClassicLoadBalancerAccessLog{
-				EmitInterval:   fi.Int64(int64(lbSpec.AccessLog.Interval)),
-				Enabled:        fi.Bool(true),
-				S3BucketName:   fi.String(lbSpec.AccessLog.Bucket),
-				S3BucketPrefix: fi.String(lbSpec.AccessLog.BucketPrefix),
-			}
 			nlb.AccessLog = &awstasks.NetworkLoadBalancerAccessLog{
-				Enabled:        fi.Bool(true),
-				S3BucketName:   fi.String(lbSpec.AccessLog.Bucket),
-				S3BucketPrefix: fi.String(lbSpec.AccessLog.BucketPrefix),
+				Enabled:        new(true),
+				S3BucketName:   lbSpec.AccessLog.Bucket,
+				S3BucketPrefix: lbSpec.AccessLog.BucketPrefix,
 			}
 		} else {
-			clb.AccessLog = &awstasks.ClassicLoadBalancerAccessLog{
-				Enabled: fi.Bool(false),
-			}
 			nlb.AccessLog = &awstasks.NetworkLoadBalancerAccessLog{
-				Enabled: fi.Bool(false),
+				Enabled: new(false),
 			}
 		}
 
-		if b.APILoadBalancerClass() == kops.LoadBalancerClassClassic {
-			c.AddTask(clb)
-		} else if b.APILoadBalancerClass() == kops.LoadBalancerClassNetwork {
-
-			tcpGroupName := b.NLBTargetGroupName("tcp")
-			tcpGroupTags := b.CloudTags(tcpGroupName, false)
-
-			// Override the returned name to be the expected NLB TG name
-			tcpGroupTags["Name"] = tcpGroupName
-
-			tg := &awstasks.TargetGroup{
-				Name:               fi.String(tcpGroupName),
-				Lifecycle:          b.Lifecycle,
-				VPC:                b.LinkToVPC(),
-				Tags:               tcpGroupTags,
-				Protocol:           fi.String("TCP"),
-				Port:               fi.Int64(443),
-				HealthyThreshold:   fi.Int64(2),
-				UnhealthyThreshold: fi.Int64(2),
-				Shared:             fi.Bool(false),
+		{
+			groupAttrs := map[string]string{
+				awstasks.TargetGroupAttributeDeregistrationDelayConnectionTerminationEnabled: "true",
+				awstasks.TargetGroupAttributeDeregistrationDelayTimeoutSeconds:               "30",
 			}
 
-			c.AddTask(tg)
+			{
+				groupName := b.NLBTargetGroupName("tcp")
+				groupTags := b.CloudTags(groupName, false)
 
-			nlb.TargetGroups = append(nlb.TargetGroups, tg)
+				// Override the returned name to be the expected NLB TG name
+				groupTags["Name"] = groupName
+
+				tg := &awstasks.TargetGroup{
+					Name:                new(groupName),
+					Lifecycle:           b.Lifecycle,
+					VPC:                 b.LinkToVPC(),
+					Tags:                groupTags,
+					Protocol:            elbv2types.ProtocolEnumTcp,
+					Port:                new(int32(443)),
+					Attributes:          groupAttrs,
+					Interval:            new(int32(10)),
+					HealthyThreshold:    new(int32(2)),
+					UnhealthyThreshold:  new(int32(2)),
+					HealthCheckProtocol: elbv2types.ProtocolEnumTcp,
+					Shared:              new(false),
+				}
+				tg.CreateNewRevisionsWith(nlb)
+				c.AddTask(tg)
+			}
+
+			if b.Cluster.UsesLoadBalancerForKopsController() {
+				{
+					groupName := b.NLBTargetGroupName("kops-controller")
+					groupTags := b.CloudTags(groupName, false)
+
+					// Override the returned name to be the expected NLB TG name
+					groupTags["Name"] = groupName
+
+					tg := &awstasks.TargetGroup{
+						Name:                new(groupName),
+						Lifecycle:           b.Lifecycle,
+						VPC:                 b.LinkToVPC(),
+						Tags:                groupTags,
+						Protocol:            elbv2types.ProtocolEnumTcp,
+						Port:                new(int32(wellknownports.KopsControllerPort)),
+						Attributes:          groupAttrs,
+						Interval:            new(int32(10)),
+						HealthyThreshold:    new(int32(2)),
+						UnhealthyThreshold:  new(int32(2)),
+						HealthCheckProtocol: elbv2types.ProtocolEnumHttps,
+						HealthCheckPath:     new("/healthz"),
+						Shared:              new(false),
+					}
+					tg.CreateNewRevisionsWith(nlb)
+
+					c.AddTask(tg)
+				}
+
+				if b.Cluster.Spec.Networking.Cilium != nil && b.Cluster.Spec.Networking.Cilium.EtcdManaged {
+					groupName := b.NLBTargetGroupName("etcd-cilium")
+					groupTags := b.CloudTags(groupName, false)
+
+					// Override the returned name to be the expected NLB TG name
+					groupTags["Name"] = groupName
+
+					tg := &awstasks.TargetGroup{
+						Name:                new(groupName),
+						Lifecycle:           b.Lifecycle,
+						VPC:                 b.LinkToVPC(),
+						Tags:                groupTags,
+						Protocol:            elbv2types.ProtocolEnumTcp,
+						Port:                new(int32(wellknownports.EtcdCiliumClientPort)),
+						Attributes:          groupAttrs,
+						Interval:            new(int32(10)),
+						HealthyThreshold:    new(int32(2)),
+						UnhealthyThreshold:  new(int32(2)),
+						HealthCheckProtocol: elbv2types.ProtocolEnumTcp,
+						Shared:              new(false),
+					}
+					tg.CreateNewRevisionsWith(nlb)
+
+					c.AddTask(tg)
+				}
+			}
 
 			if lbSpec.SSLCertificate != "" {
 				tlsGroupName := b.NLBTargetGroupName("tls")
@@ -291,20 +333,25 @@ func (b *APILoadBalancerBuilder) Build(c *fi.ModelBuilderContext) error {
 				// Override the returned name to be the expected NLB TG name
 				tlsGroupTags["Name"] = tlsGroupName
 				secondaryTG := &awstasks.TargetGroup{
-					Name:               fi.String(tlsGroupName),
-					Lifecycle:          b.Lifecycle,
-					VPC:                b.LinkToVPC(),
-					Tags:               tlsGroupTags,
-					Protocol:           fi.String("TLS"),
-					Port:               fi.Int64(443),
-					HealthyThreshold:   fi.Int64(2),
-					UnhealthyThreshold: fi.Int64(2),
-					Shared:             fi.Bool(false),
+					Name:                new(tlsGroupName),
+					Lifecycle:           b.Lifecycle,
+					VPC:                 b.LinkToVPC(),
+					Tags:                tlsGroupTags,
+					Protocol:            elbv2types.ProtocolEnumTls,
+					Port:                new(int32(443)),
+					Attributes:          groupAttrs,
+					Interval:            new(int32(10)),
+					HealthyThreshold:    new(int32(2)),
+					UnhealthyThreshold:  new(int32(2)),
+					HealthCheckProtocol: elbv2types.ProtocolEnumTcp,
+					Shared:              new(false),
 				}
+				secondaryTG.CreateNewRevisionsWith(nlb)
 				c.AddTask(secondaryTG)
-				nlb.TargetGroups = append(nlb.TargetGroups, secondaryTG)
 			}
-			sort.Stable(awstasks.OrderTargetGroupsByName(nlb.TargetGroups))
+			for _, nlbListener := range nlbListeners {
+				c.AddTask(nlbListener)
+			}
 			c.AddTask(nlb)
 		}
 
@@ -313,40 +360,40 @@ func (b *APILoadBalancerBuilder) Build(c *fi.ModelBuilderContext) error {
 	var lbSG *awstasks.SecurityGroup
 	{
 		lbSG = &awstasks.SecurityGroup{
-			Name:             fi.String(b.ELBSecurityGroupName("api")),
+			Name:             new(b.ELBSecurityGroupName("api")),
 			Lifecycle:        b.SecurityLifecycle,
-			Description:      fi.String("Security group for api ELB"),
+			Description:      new("Security group for api ELB"),
 			RemoveExtraRules: []string{"port=443"},
 			VPC:              b.LinkToVPC(),
 		}
 		lbSG.Tags = b.CloudTags(*lbSG.Name, false)
 
 		if lbSpec.SecurityGroupOverride != nil {
-			lbSG.ID = fi.String(*lbSpec.SecurityGroupOverride)
-			lbSG.Shared = fi.Bool(true)
+			lbSG.ID = new(*lbSpec.SecurityGroupOverride)
+			lbSG.Shared = new(true)
 		}
 
 		c.AddTask(lbSG)
 	}
 
 	// Allow traffic from ELB to egress freely
-	if b.APILoadBalancerClass() == kops.LoadBalancerClassClassic {
+	{
 		{
 			t := &awstasks.SecurityGroupRule{
-				Name:          fi.String("ipv4-api-elb-egress"),
+				Name:          new("ipv4-api-elb-egress"),
 				Lifecycle:     b.SecurityLifecycle,
-				CIDR:          fi.String("0.0.0.0/0"),
-				Egress:        fi.Bool(true),
+				CIDR:          new("0.0.0.0/0"),
+				Egress:        new(true),
 				SecurityGroup: lbSG,
 			}
 			AddDirectionalGroupRule(c, t)
 		}
 		{
 			t := &awstasks.SecurityGroupRule{
-				Name:          fi.String("ipv6-api-elb-egress"),
+				Name:          new("ipv6-api-elb-egress"),
 				Lifecycle:     b.SecurityLifecycle,
-				IPv6CIDR:      fi.String("::/0"),
-				Egress:        fi.Bool(true),
+				IPv6CIDR:      new("::/0"),
+				Egress:        new(true),
 				SecurityGroup: lbSG,
 			}
 			AddDirectionalGroupRule(c, t)
@@ -354,181 +401,184 @@ func (b *APILoadBalancerBuilder) Build(c *fi.ModelBuilderContext) error {
 	}
 
 	// Allow traffic into the ELB from KubernetesAPIAccess CIDRs
-	if b.APILoadBalancerClass() == kops.LoadBalancerClassClassic {
-		for _, cidr := range b.Cluster.Spec.KubernetesAPIAccess {
+	{
+		for _, cidr := range b.Cluster.Spec.API.Access {
 			{
 				t := &awstasks.SecurityGroupRule{
-					Name:          fi.String("https-api-elb-" + cidr),
+					Name:          new("https-api-elb-" + cidr),
 					Lifecycle:     b.SecurityLifecycle,
-					FromPort:      fi.Int64(443),
-					Protocol:      fi.String("tcp"),
+					FromPort:      new(int32(443)),
+					Protocol:      new("tcp"),
 					SecurityGroup: lbSG,
-					ToPort:        fi.Int64(443),
+					ToPort:        new(int32(443)),
 				}
-				if utils.IsIPv6CIDR(cidr) {
-					t.IPv6CIDR = fi.String(cidr)
-				} else {
-					t.CIDR = fi.String(cidr)
+				t.SetCidrOrPrefix(cidr)
+				AddDirectionalGroupRule(c, t)
+			}
+
+			// If we have opened a secondary listener on 8443, allow it also
+			if lbSpec.SSLCertificate != "" {
+				t := &awstasks.SecurityGroupRule{
+					Name:          new("https-api-elb-8443-" + cidr),
+					Lifecycle:     b.SecurityLifecycle,
+					FromPort:      new(int32(8443)),
+					ToPort:        new(int32(8443)),
+					Protocol:      new("tcp"),
+					SecurityGroup: lbSG,
 				}
+				lbSG.RemoveExtraRules = append(lbSG.RemoveExtraRules, "port=8443")
+
+				t.SetCidrOrPrefix(cidr)
 				AddDirectionalGroupRule(c, t)
 			}
 
 			// Allow ICMP traffic required for PMTU discovery
-			if utils.IsIPv6CIDR(cidr) {
-				c.AddTask(&awstasks.SecurityGroupRule{
-					Name:          fi.String("icmpv6-pmtu-api-elb-" + cidr),
+			{
+				t := &awstasks.SecurityGroupRule{
+					Name:          new("icmpv6-pmtu-api-elb-" + cidr),
 					Lifecycle:     b.SecurityLifecycle,
-					IPv6CIDR:      fi.String(cidr),
-					FromPort:      fi.Int64(-1),
-					Protocol:      fi.String("icmpv6"),
+					FromPort:      new(int32(-1)),
+					Protocol:      new("icmpv6"),
 					SecurityGroup: lbSG,
-					ToPort:        fi.Int64(-1),
-				})
-			} else {
-				c.AddTask(&awstasks.SecurityGroupRule{
-					Name:          fi.String("icmp-pmtu-api-elb-" + cidr),
-					Lifecycle:     b.SecurityLifecycle,
-					CIDR:          fi.String(cidr),
-					FromPort:      fi.Int64(3),
-					Protocol:      fi.String("icmp"),
-					SecurityGroup: lbSG,
-					ToPort:        fi.Int64(4),
-				})
+					ToPort:        new(int32(-1)),
+				}
+				t.SetCidrOrPrefix(cidr)
+				if t.CIDR == nil {
+					c.AddTask(t)
+				}
 			}
-		}
-	}
-
-	masterGroups, err := b.GetSecurityGroups(kops.InstanceGroupRoleMaster)
-	if err != nil {
-		return err
-	}
-
-	if b.APILoadBalancerClass() == kops.LoadBalancerClassNetwork {
-		for _, cidr := range b.Cluster.Spec.KubernetesAPIAccess {
-
-			for _, masterGroup := range masterGroups {
-				{
-					t := &awstasks.SecurityGroupRule{
-						Name:          fi.String(fmt.Sprintf("https-api-elb-%s", cidr)),
-						Lifecycle:     b.SecurityLifecycle,
-						FromPort:      fi.Int64(443),
-						Protocol:      fi.String("tcp"),
-						SecurityGroup: masterGroup.Task,
-						ToPort:        fi.Int64(443),
-					}
-					if utils.IsIPv6CIDR(cidr) {
-						t.IPv6CIDR = fi.String(cidr)
-					} else {
-						t.CIDR = fi.String(cidr)
-					}
-					AddDirectionalGroupRule(c, t)
+			{
+				t := &awstasks.SecurityGroupRule{
+					Name:          new("icmp-pmtu-api-elb-" + cidr),
+					Lifecycle:     b.SecurityLifecycle,
+					FromPort:      new(int32(3)),
+					Protocol:      new("icmp"),
+					SecurityGroup: lbSG,
+					ToPort:        new(int32(4)),
 				}
-
-				// Allow ICMP traffic required for PMTU discovery
-				if utils.IsIPv6CIDR(cidr) {
-					c.AddTask(&awstasks.SecurityGroupRule{
-						Name:          fi.String("icmpv6-pmtu-api-elb-" + cidr),
-						Lifecycle:     b.SecurityLifecycle,
-						IPv6CIDR:      fi.String(cidr),
-						FromPort:      fi.Int64(-1),
-						Protocol:      fi.String("icmpv6"),
-						SecurityGroup: masterGroup.Task,
-						ToPort:        fi.Int64(-1),
-					})
-				} else {
-					c.AddTask(&awstasks.SecurityGroupRule{
-						Name:          fi.String("icmp-pmtu-api-elb-" + cidr),
-						Lifecycle:     b.SecurityLifecycle,
-						CIDR:          fi.String(cidr),
-						FromPort:      fi.Int64(3),
-						Protocol:      fi.String("icmp"),
-						SecurityGroup: masterGroup.Task,
-						ToPort:        fi.Int64(4),
-					})
-				}
-
-				if b.Cluster.Spec.API != nil && b.Cluster.Spec.API.LoadBalancer != nil && b.Cluster.Spec.API.LoadBalancer.SSLCertificate != "" {
-					// Allow access to masters on secondary port through NLB
-					t := &awstasks.SecurityGroupRule{
-						Name:          fi.String(fmt.Sprintf("tcp-api-%s", cidr)),
-						Lifecycle:     b.SecurityLifecycle,
-						FromPort:      fi.Int64(8443),
-						Protocol:      fi.String("tcp"),
-						SecurityGroup: masterGroup.Task,
-						ToPort:        fi.Int64(8443),
-					}
-					if utils.IsIPv6CIDR(cidr) {
-						t.IPv6CIDR = fi.String(cidr)
-					} else {
-						t.CIDR = fi.String(cidr)
-					}
+				t.SetCidrOrPrefix(cidr)
+				if t.IPv6CIDR == nil {
 					c.AddTask(t)
 				}
 			}
 		}
 	}
 
-	// Add precreated additional security groups to the ELB
-	if b.APILoadBalancerClass() == kops.LoadBalancerClassClassic {
-		for _, id := range b.Cluster.Spec.API.LoadBalancer.AdditionalSecurityGroups {
-			t := &awstasks.SecurityGroup{
-				Name:      fi.String(id),
-				Lifecycle: b.SecurityLifecycle,
-				ID:        fi.String(id),
-				Shared:    fi.Bool(true),
+	if b.Cluster.UsesLoadBalancerForKopsController() {
+		nodeGroups, err := b.GetSecurityGroups(kops.InstanceGroupRoleNode)
+		if err != nil {
+			return err
+		}
+
+		for _, nodeGroup := range nodeGroups {
+			suffix := nodeGroup.Suffix
+			t := &awstasks.SecurityGroupRule{
+				Name:          new(fmt.Sprintf("node%s-to-elb", suffix)),
+				Lifecycle:     b.SecurityLifecycle,
+				SecurityGroup: lbSG,
+				SourceGroup:   nodeGroup.Task,
 			}
-			if err := c.EnsureTask(t); err != nil {
-				return err
-			}
-			clb.SecurityGroups = append(clb.SecurityGroups, t)
+			c.AddTask(t)
 		}
 	}
 
-	// Allow HTTPS to the master instances from the ELB
-	if b.APILoadBalancerClass() == kops.LoadBalancerClassClassic {
+	masterGroups, err := b.GetSecurityGroups(kops.InstanceGroupRoleControlPlane)
+	if err != nil {
+		return err
+	}
+
+	if lbSpec.SSLCertificate != "" {
 		for _, masterGroup := range masterGroups {
 			suffix := masterGroup.Suffix
-			c.AddTask(&awstasks.SecurityGroupRule{
-				Name:          fi.String(fmt.Sprintf("https-elb-to-master%s", suffix)),
+			// Allow access to control plane on secondary port through NLB
+			t := &awstasks.SecurityGroupRule{
+				Name:          new(fmt.Sprintf("tcp-api-cp%s", suffix)),
 				Lifecycle:     b.SecurityLifecycle,
-				FromPort:      fi.Int64(443),
-				Protocol:      fi.String("tcp"),
+				FromPort:      new(int32(8443)),
+				Protocol:      new("tcp"),
 				SecurityGroup: masterGroup.Task,
 				SourceGroup:   lbSG,
-				ToPort:        fi.Int64(443),
-			})
-		}
-	} else if b.APILoadBalancerClass() == kops.LoadBalancerClassNetwork {
-		for _, masterGroup := range masterGroups {
-			suffix := masterGroup.Suffix
-			c.AddTask(&awstasks.SecurityGroupRule{
-				Name:          fi.String(fmt.Sprintf("https-elb-to-master%s", suffix)),
-				Lifecycle:     b.SecurityLifecycle,
-				FromPort:      fi.Int64(443),
-				Protocol:      fi.String("tcp"),
-				SecurityGroup: masterGroup.Task,
-				ToPort:        fi.Int64(443),
-				CIDR:          fi.String(b.Cluster.Spec.NetworkCIDR),
-			})
-			for _, cidr := range b.Cluster.Spec.AdditionalNetworkCIDRs {
-				c.AddTask(&awstasks.SecurityGroupRule{
-					Name:          fi.String(fmt.Sprintf("https-lb-to-master%s-%s", suffix, cidr)),
-					Lifecycle:     b.SecurityLifecycle,
-					FromPort:      fi.Int64(443),
-					Protocol:      fi.String("tcp"),
-					SecurityGroup: masterGroup.Task,
-					ToPort:        fi.Int64(443),
-					CIDR:          fi.String(cidr),
-				})
+				ToPort:        new(int32(8443)),
 			}
+			c.AddTask(t)
 		}
 	}
 
-	if dns.IsGossipHostname(b.Cluster.Name) || b.UsePrivateDNS() {
-		// Ensure the LB hostname is included in the TLS certificate,
-		// if we're not going to use an alias for it
-		clb.ForAPIServer = true
-		nlb.ForAPIServer = true
+	// Add precreated additional security groups to the ELB
+	{
+		for _, id := range b.Cluster.Spec.API.LoadBalancer.AdditionalSecurityGroups {
+			t := &awstasks.SecurityGroup{
+				Name:      new(id),
+				Lifecycle: b.SecurityLifecycle,
+				ID:        new(id),
+				Shared:    new(true),
+			}
+			c.EnsureTask(t)
+			nlb.SecurityGroups = append(nlb.SecurityGroups, t)
+		}
+	}
+
+	// Allow HTTPS to the control-plane instances from the ELB
+	{
+		for _, masterGroup := range masterGroups {
+			suffix := masterGroup.Suffix
+			c.AddTask(&awstasks.SecurityGroupRule{
+				Name:          new(fmt.Sprintf("https-elb-to-master%s", suffix)),
+				Lifecycle:     b.SecurityLifecycle,
+				FromPort:      new(int32(443)),
+				Protocol:      new("tcp"),
+				SecurityGroup: masterGroup.Task,
+				SourceGroup:   lbSG,
+				ToPort:        new(int32(443)),
+			})
+			c.AddTask(&awstasks.SecurityGroupRule{
+				Name:          new(fmt.Sprintf("icmp-pmtu-elb-to-cp%s", suffix)),
+				Lifecycle:     b.SecurityLifecycle,
+				FromPort:      new(int32(3)),
+				Protocol:      new("icmp"),
+				SecurityGroup: masterGroup.Task,
+				SourceGroup:   lbSG,
+				ToPort:        new(int32(4)),
+			})
+			c.AddTask(&awstasks.SecurityGroupRule{
+				Name:          new(fmt.Sprintf("icmp-pmtu-cp%s-to-elb", suffix)),
+				Lifecycle:     b.SecurityLifecycle,
+				FromPort:      new(int32(3)),
+				Protocol:      new("icmp"),
+				SecurityGroup: lbSG,
+				SourceGroup:   masterGroup.Task,
+				ToPort:        new(int32(4)),
+			})
+			if b.Cluster.UsesLoadBalancerForKopsController() {
+				{
+					nlb.WellKnownServices = append(nlb.WellKnownServices, wellknownservices.KopsController)
+
+					c.AddTask(&awstasks.SecurityGroupRule{
+						Name:          new(fmt.Sprintf("kops-controller-elb-to-cp%s", suffix)),
+						Lifecycle:     b.SecurityLifecycle,
+						FromPort:      new(int32(wellknownports.KopsControllerPort)),
+						Protocol:      new("tcp"),
+						SecurityGroup: masterGroup.Task,
+						ToPort:        new(int32(wellknownports.KopsControllerPort)),
+						SourceGroup:   lbSG,
+					})
+				}
+
+				if b.Cluster.Spec.Networking.Cilium != nil && b.Cluster.Spec.Networking.Cilium.EtcdManaged {
+					nlb.WellKnownServices = append(nlb.WellKnownServices, wellknownservices.EtcdCilium)
+
+					c.AddTask(&awstasks.SecurityGroupRule{
+						Name:          new(fmt.Sprintf("etcd-cilium-elb-to-cp%s", suffix)),
+						Lifecycle:     b.SecurityLifecycle,
+						FromPort:      new(int32(wellknownports.EtcdCiliumClientPort)),
+						Protocol:      new("tcp"),
+						SecurityGroup: masterGroup.Task,
+						ToPort:        new(int32(wellknownports.EtcdCiliumClientPort)),
+						SourceGroup:   lbSG,
+					})
+				}
+			}
+		}
 	}
 
 	return nil
@@ -546,7 +596,7 @@ func (a ByScoreDescending) Swap(i, j int) { a[i], a[j] = a[j], a[i] }
 func (a ByScoreDescending) Less(i, j int) bool {
 	if a[i].score != a[j].score {
 		// ! to sort highest score first
-		return !(a[i].score < a[j].score)
+		return a[i].score >= a[j].score
 	}
 	// Use name to break ties consistently
 	return a[i].subnet.Name < a[j].subnet.Name
@@ -554,7 +604,7 @@ func (a ByScoreDescending) Less(i, j int) bool {
 
 // Choose between subnets in a zone.
 // We have already applied the rules to match internal subnets to internal ELBs and vice-versa for public-facing ELBs.
-// For internal ELBs: we prefer the master subnets
+// For internal ELBs: we prefer dual stack and the master subnets
 // For public facing ELBs: we prefer the utility subnets
 func (b *APILoadBalancerBuilder) chooseBestSubnetForELB(zone string, subnets []*kops.ClusterSubnetSpec) *kops.ClusterSubnetSpec {
 	if len(subnets) == 0 {
@@ -579,8 +629,12 @@ func (b *APILoadBalancerBuilder) chooseBestSubnetForELB(zone string, subnets []*
 			score += 1
 		}
 
+		if subnet.Type == kops.SubnetTypeDualStack {
+			score += 2
+		}
+
 		if subnet.Type == kops.SubnetTypeUtility {
-			score += 1
+			score += 3
 		}
 
 		scoredSubnets = append(scoredSubnets, &scoredSubnet{

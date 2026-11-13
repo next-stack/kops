@@ -27,7 +27,7 @@ import (
 
 // VMScaleSet
 
-var _ fi.HasLifecycle = &VMScaleSet{}
+var _ fi.HasLifecycle = (*VMScaleSet)(nil)
 
 // GetLifecycle returns the Lifecycle of the object, implementing fi.HasLifecycle
 func (o *VMScaleSet) GetLifecycle() fi.Lifecycle {
@@ -39,7 +39,7 @@ func (o *VMScaleSet) SetLifecycle(lifecycle fi.Lifecycle) {
 	o.Lifecycle = lifecycle
 }
 
-var _ fi.HasName = &VMScaleSet{}
+var _ fi.HasName = (*VMScaleSet)(nil)
 
 // GetName returns the Name of the object, implementing fi.HasName
 func (o *VMScaleSet) GetName() *string {
@@ -48,5 +48,5 @@ func (o *VMScaleSet) GetName() *string {
 
 // String is the stringer function for the task, producing readable output using fi.TaskAsString
 func (o *VMScaleSet) String() string {
-	return fi.TaskAsString(o)
+	return fi.CloudupTaskAsString(o)
 }

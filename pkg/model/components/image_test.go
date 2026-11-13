@@ -22,10 +22,14 @@ import (
 
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/assets"
+	"k8s.io/kops/pkg/featureflag"
+	"k8s.io/kops/pkg/testutils/testcontext"
 	"k8s.io/kops/util/pkg/vfs"
 )
 
 func TestImage(t *testing.T) {
+	ctx := testcontext.ForTest(t)
+	featureflag.ParseFlags("-ImageDigest")
 	grid := []struct {
 		Component string
 		Cluster   *kops.Cluster
@@ -45,7 +49,7 @@ func TestImage(t *testing.T) {
 			VFS: map[string]string{
 				"memfs://v1.20.0-download/bin/linux/amd64/kube-apiserver.docker_tag": "1-20-0dockertag",
 			},
-			Expected: "k8s.gcr.io/kube-apiserver-amd64:1-20-0dockertag",
+			Expected: "registry.k8s.io/kube-apiserver-amd64:1-20-0dockertag",
 		},
 		{
 			Component: "kube-apiserver",
@@ -54,7 +58,7 @@ func TestImage(t *testing.T) {
 					KubernetesVersion: "1.20.0",
 				},
 			},
-			Expected: "k8s.gcr.io/kube-apiserver:v1.20.0",
+			Expected: "registry.k8s.io/kube-apiserver:v1.20.0",
 		},
 	}
 
@@ -68,13 +72,13 @@ func TestImage(t *testing.T) {
 				t.Errorf("error building vfs path for %s: %v", k, err)
 				continue
 			}
-			if err := p.WriteFile(bytes.NewReader([]byte(v)), nil); err != nil {
+			if err := p.WriteFile(ctx, bytes.NewReader([]byte(v)), nil); err != nil {
 				t.Errorf("error writing vfs path %s: %v", k, err)
 				continue
 			}
 		}
 
-		assetBuilder := assets.NewAssetBuilder(g.Cluster, false)
+		assetBuilder := assets.NewAssetBuilder(vfs.Context, g.Cluster.Spec.Assets, false)
 		actual, err := Image(g.Component, &g.Cluster.Spec, assetBuilder)
 		if err != nil {
 			t.Errorf("unexpected error from image %q %v: %v",

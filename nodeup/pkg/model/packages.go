@@ -29,55 +29,50 @@ type PackagesBuilder struct {
 	*NodeupModelContext
 }
 
-var _ fi.ModelBuilder = &DockerBuilder{}
+var _ fi.NodeupModelBuilder = &PackagesBuilder{}
 
 // Build is responsible for installing packages
-func (b *PackagesBuilder) Build(c *fi.ModelBuilderContext) error {
+func (b *PackagesBuilder) Build(c *fi.NodeupModelBuilderContext) error {
 	// kubelet needs:
 	//   conntrack  - kops #5671
-	//   ebtables - kops #1711
-	//   ethtool - kops #1830
 	if b.Distribution.IsDebianFamily() {
-		c.AddTask(&nodetasks.Package{Name: "nfs-common"})
-		// From containerd: https://github.com/containerd/cri/blob/master/contrib/ansible/tasks/bootstrap_ubuntu.yaml
-		c.AddTask(&nodetasks.Package{Name: "bridge-utils"})
-		c.AddTask(&nodetasks.Package{Name: "cgroupfs-mount"})
-		c.AddTask(&nodetasks.Package{Name: "conntrack"})
-		c.AddTask(&nodetasks.Package{Name: "ebtables"})
-		c.AddTask(&nodetasks.Package{Name: "ethtool"})
 		c.AddTask(&nodetasks.Package{Name: "iptables"})
 		c.AddTask(&nodetasks.Package{Name: "libapparmor1"})
 		c.AddTask(&nodetasks.Package{Name: "libseccomp2"})
-		c.AddTask(&nodetasks.Package{Name: "libltdl7"})
-		c.AddTask(&nodetasks.Package{Name: "pigz"})
-		c.AddTask(&nodetasks.Package{Name: "socat"})
+		if b.NodeupConfig.KubeProxy != nil && fi.ValueOf(b.NodeupConfig.KubeProxy.Enabled) && b.NodeupConfig.KubeProxy.ProxyMode == "nftables" {
+			// Note: keep the iptables/nftables logic in sync with ForceNftables
+			c.AddTask(&nodetasks.Package{Name: "nftables"})
+		}
 		c.AddTask(&nodetasks.Package{Name: "util-linux"})
+		// Additional packages
+		for _, additionalPackage := range b.NodeupConfig.Packages {
+			c.EnsureTask(&nodetasks.Package{Name: additionalPackage})
+		}
 	} else if b.Distribution.IsRHELFamily() {
-		c.AddTask(&nodetasks.Package{Name: "nfs-utils"})
-		// From containerd: https://github.com/containerd/cri/blob/master/contrib/ansible/tasks/bootstrap_centos.yaml
-		c.AddTask(&nodetasks.Package{Name: "conntrack-tools"})
-		c.AddTask(&nodetasks.Package{Name: "ebtables"})
-		c.AddTask(&nodetasks.Package{Name: "ethtool"})
-		c.AddTask(&nodetasks.Package{Name: "iptables"})
-		c.AddTask(&nodetasks.Package{Name: "libcgroup"})
-		c.AddTask(&nodetasks.Package{Name: "libseccomp"})
-		c.AddTask(&nodetasks.Package{Name: "libtool-ltdl"})
-		c.AddTask(&nodetasks.Package{Name: "socat"})
-		c.AddTask(&nodetasks.Package{Name: "util-linux"})
-		// Handle some packages differently for each distro
+		// RHEL 10+ doesn't support iptables anymore
+		// Note: keep the iptables/nftables logic in sync with ForceNftables
 		switch b.Distribution {
-		case distributions.DistributionRhel7:
-			// Easier to install container-selinux from CentOS than extras
-			c.AddTask(&nodetasks.Package{
-				Name:   "container-selinux",
-				Source: s("http://vault.centos.org/7.6.1810/extras/x86_64/Packages/container-selinux-2.107-1.el7_6.noarch.rpm"),
-				Hash:   s("7de4211fa0dfd240d8827b93763e1eb5f0d56411"),
-			})
-		case distributions.DistributionAmazonLinux2:
-			// Amazon Linux 2 doesn't have SELinux enabled by default
+		case distributions.DistributionAmazonLinux2023, distributions.DistributionAmazonLinux2027:
+			// install iptables-nft in Amazon Linux (NOT the iptables-legacy!)
+			c.AddTask(&nodetasks.Package{Name: "iptables-nft"})
+		case distributions.DistributionRhel8, distributions.DistributionRhel9,
+			distributions.DistributionRocky8:
+			c.AddTask(&nodetasks.Package{Name: "iptables"})
 		default:
-			c.AddTask(&nodetasks.Package{Name: "container-selinux"})
-			c.AddTask(&nodetasks.Package{Name: "pigz"})
+			c.AddTask(&nodetasks.Package{Name: "nftables"})
+			// Also install iptables-nft so that CNI plugins that shell
+			// out to the iptables binary get the nf_tables backend
+			c.AddTask(&nodetasks.Package{Name: "iptables-nft"})
+		}
+		c.AddTask(&nodetasks.Package{Name: "libseccomp"})
+		if b.NodeupConfig.KubeProxy != nil && fi.ValueOf(b.NodeupConfig.KubeProxy.Enabled) && b.NodeupConfig.KubeProxy.ProxyMode == "nftables" {
+			c.AddTask(&nodetasks.Package{Name: "nftables"})
+		}
+		c.AddTask(&nodetasks.Package{Name: "util-linux"})
+		c.AddTask(&nodetasks.Package{Name: "container-selinux"})
+		// Additional packages
+		for _, additionalPackage := range b.NodeupConfig.Packages {
+			c.EnsureTask(&nodetasks.Package{Name: additionalPackage})
 		}
 	} else {
 		// Hopefully they are already installed

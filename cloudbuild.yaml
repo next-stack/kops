@@ -2,78 +2,55 @@
 timeout: 1800s
 options:
   substitution_option: ALLOW_LOOSE
-  machineType: 'N1_HIGHCPU_8'
+  machineType: "E2_HIGHCPU_32"
 steps:
-# Push the images
-- name: 'gcr.io/k8s-testimages/kubekins-e2e:v20210825-f1955d1-experimental'
-  id: images
-  entrypoint: make
-  env:
-  # _GIT_TAG is not a valid semver, we use CI=1 instead
-  # - VERSION=$_GIT_TAG
-  - CI=$_CI
-  - PULL_BASE_REF=$_PULL_BASE_REF
-  - DOCKER_REGISTRY=$_DOCKER_REGISTRY
-  - DOCKER_IMAGE_PREFIX=$_DOCKER_IMAGE_PREFIX
-  args:
-  - kops-controller-push
-  - dns-controller-push
-  - kube-apiserver-healthcheck-push
-# Push the artifacts
-- name: 'gcr.io/k8s-testimages/kubekins-e2e:v20210825-f1955d1-experimental'
-  id: artifacts
-  entrypoint: make
-  env:
-  # _GIT_TAG is not a valid semver, we use CI=1 instead
-  # - VERSION=$_GIT_TAG
-  - CI=$_CI
-  - PULL_BASE_REF=$_PULL_BASE_REF
-  - DOCKER_REGISTRY=$_DOCKER_REGISTRY
-  - DOCKER_IMAGE_PREFIX=$_DOCKER_IMAGE_PREFIX
-  - GCS_LOCATION=$_GCS_LOCATION
-  - LATEST_FILE=markers/${_PULL_BASE_REF}/latest-ci.txt
-  args:
-  - gcs-upload-and-tag
-# Push the manifests
-- name: 'gcr.io/k8s-testimages/gcb-docker-gcloud:v20210722-085d930'
-  id: manifests
-  waitFor: [images]
-  entrypoint: make
-  env:
-  - DOCKER_CLI_EXPERIMENTAL=enabled
-  - CI=$_CI
-  - PULL_BASE_REF=$_PULL_BASE_REF
-  - DOCKER_REGISTRY=$_DOCKER_REGISTRY
-  - DOCKER_IMAGE_PREFIX=$_DOCKER_IMAGE_PREFIX
-  args:
-  - kops-controller-manifest
-  - dns-controller-manifest
-  - kube-apiserver-healthcheck-manifest
-# Build cloudbuild artifacts (for attestation)
-- name: 'gcr.io/k8s-testimages/kubekins-e2e:v20210825-f1955d1-experimental'
-  id: cloudbuild-artifacts
-  entrypoint: make
-  env:
-  # _GIT_TAG is not a valid semver, we use CI=1 instead
-  # - VERSION=$_GIT_TAG
-  - CI=$_CI
-  - PULL_BASE_REF=$_PULL_BASE_REF
-  - DOCKER_REGISTRY=$_DOCKER_REGISTRY
-  - DOCKER_IMAGE_PREFIX=$_DOCKER_IMAGE_PREFIX
-  - GCS_LOCATION=$_GCS_LOCATION
-  - LATEST_FILE=markers/${_PULL_BASE_REF}/latest-ci.txt
-  args:
-  - cloudbuild-artifacts
+  # Push the images
+  - name: "mirror.gcr.io/library/golang:1.27.4-trixie"
+    id: images
+    entrypoint: make
+    env:
+      # _GIT_TAG is not a valid semver, we use CI=1 instead
+      # - VERSION=$_GIT_TAG
+      - CI=$_CI
+      - PULL_BASE_REF=$_PULL_BASE_REF
+      - DOCKER_REGISTRY=$_DOCKER_REGISTRY
+      - DOCKER_IMAGE_PREFIX=$_DOCKER_IMAGE_PREFIX
+    args:
+      - kops-controller-push
+      - kops-channels-push
+      - dns-controller-push
+      - kube-apiserver-healthcheck-push
+      - discovery-server-push
+  # Push the artifacts
+  - name: "mirror.gcr.io/library/golang:1.27.4-trixie"
+    id: artifacts
+    entrypoint: make
+    env:
+      # _GIT_TAG is not a valid semver, we use CI=1 instead
+      # - VERSION=$_GIT_TAG
+      - CI=$_CI
+      - PULL_BASE_REF=$_PULL_BASE_REF
+      - DOCKER_REGISTRY=$_DOCKER_REGISTRY
+      - DOCKER_IMAGE_PREFIX=$_DOCKER_IMAGE_PREFIX
+      - GCS_LOCATION=$_GCS_LOCATION
+      - LATEST_FILE=markers/${_PULL_BASE_REF}/latest-ci.txt
+    args:
+      - gcs-upload-and-tag
+  # Build the kubetest2 e2e binaries
+  - name: "mirror.gcr.io/library/golang:1.27.4-trixie"
+    id: e2e-binaries
+    entrypoint: make
+    env:
+      - CI=$_CI
+      - GCS_LOCATION=${_GCS_LOCATION}branches/${_PULL_BASE_REF}/
+    args:
+      - upload-e2e-binaries
 substitutions:
   # _GIT_TAG will be filled with a git-based tag for the image, of the form vYYYYMMDD-hash, and
   # can be used as a substitution
-  _CI: '1'
-  _GIT_TAG: '12345'
-  _PULL_BASE_REF: 'dev'
-  _DOCKER_REGISTRY: 'gcr.io'
-  _DOCKER_IMAGE_PREFIX: 'k8s-staging-kops/'
-  _GCS_LOCATION: 'gs://k8s-staging-kops/kops/releases/'
-artifacts:
-  objects:
-    location: '$_GCS_LOCATION/$_GIT_TAG/cloudbuild/'
-    paths: ["cloudbuild/*"]
+  _CI: "1"
+  _GIT_TAG: "12345"
+  _PULL_BASE_REF: "dev"
+  _DOCKER_REGISTRY: "gcr.io"
+  _DOCKER_IMAGE_PREFIX: "k8s-staging-kops/"
+  _GCS_LOCATION: "gs://k8s-staging-kops/kops/releases/"

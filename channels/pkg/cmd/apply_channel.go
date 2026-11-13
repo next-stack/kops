@@ -22,53 +22,162 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/blang/semver/v4"
+	certmanager "github.com/cert-manager/cert-manager/pkg/client/clientset/versioned"
 	"github.com/spf13/cobra"
+	"go.uber.org/multierr"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/restmapper"
 	"k8s.io/klog/v2"
+
 	"k8s.io/kops/channels/pkg/channels"
-	"k8s.io/kops/pkg/apis/kops/util"
+	"k8s.io/kops/channels/pkg/nodelabeler"
 	"k8s.io/kops/util/pkg/tables"
+	"k8s.io/kops/util/pkg/vfs"
 )
 
 type ApplyChannelOptions struct {
-	Yes   bool
-	Files []string
+	Yes      bool
+	Interval time.Duration
+	NodeName string
+
+	// Comma delimited label,value pairs to add to the node. Eg "node-role.kops.k8s.io/cloud-controller-manager,foo=bar"
+	NodeLabels map[string]string
 }
 
-func NewCmdApplyChannel(f Factory, out io.Writer) *cobra.Command {
+func NewCmdApplyChannel(f *ChannelsFactory, out io.Writer) *cobra.Command {
 	var options ApplyChannelOptions
+	var rawLabels string
 
 	cmd := &cobra.Command{
-		Use:   "channel",
-		Short: "Apply channel",
+		Use:   "channel CHANNEL...",
+		Short: "Applies updates from the given channel(s)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := context.TODO()
-			return RunApplyChannel(ctx, f, out, &options, args)
+			var err error
+			options.NodeLabels, err = parseLabels(rawLabels)
+			if err != nil {
+				return err
+			}
+			if options.Interval > 0 {
+				ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+				defer cancel()
+				return runApplyChannelLoop(ctx, out, &options, args)
+			}
+			return runApplyChannelIteration(context.TODO(), f, out, &options, args)
 		},
 	}
 
 	cmd.Flags().BoolVar(&options.Yes, "yes", false, "Apply update")
-	cmd.Flags().StringSliceVarP(&options.Files, "filename", "f", []string{}, "Apply from a local file")
+	cmd.Flags().DurationVar(&options.Interval, "interval", 0, "If non-zero, re-apply the channel on this interval until interrupted (e.g. 60s)")
+	cmd.Flags().StringVar(&options.NodeName, "node-name", "", "If set, patch the named node with the mandatory control-plane labels each iteration; typically supplied via the downward API.")
+	cmd.Flags().StringVar(&rawLabels, "node-labels", "", "If set, patch the named node with each of the label,value pairs each iteration; typically supplied via the downward API.")
 
 	return cmd
 }
 
-func RunApplyChannel(ctx context.Context, f Factory, out io.Writer, options *ApplyChannelOptions, args []string) error {
-	k8sClient, err := f.KubernetesClient()
+func parseLabels(rawLabels string) (map[string]string, error) {
+	labels := make(map[string]string)
+	pairs := strings.Split(rawLabels, ",")
+	for _, rawpair := range pairs {
+		pair := strings.Split(rawpair, "=")
+		if len(pair) > 2 {
+			return nil, fmt.Errorf("Error too many '=' (%d) in %s", len(pair), pair)
+		} else if len(pair) == 2 {
+			labels[pair[0]] = pair[1]
+		} else {
+			labels[rawpair] = ""
+		}
+	}
+	return labels, nil
+}
+
+// runApplyChannelIteration patches node labels (when --node-name is set) then
+// applies the channel. Labels go first so addons targeting the control-plane
+// label can schedule on the local node as soon as their manifests land.
+func runApplyChannelIteration(ctx context.Context, f *ChannelsFactory, out io.Writer, options *ApplyChannelOptions, args []string) error {
+	var merr error
+	if options.NodeName != "" {
+		labelerClient, err := f.KubernetesClient()
+		if err != nil {
+			merr = multierr.Append(merr, fmt.Errorf("building kubernetes client for node labeler: %w", err))
+		} else if err := nodelabeler.BootstrapControlPlaneNodeLabels(ctx, labelerClient, options.NodeName, options.NodeLabels); err != nil {
+			merr = multierr.Append(merr, fmt.Errorf("bootstrapping node labels: %w", err))
+		}
+	}
+	if err := RunApplyChannel(ctx, f, out, options, args); err != nil {
+		merr = multierr.Append(merr, err)
+	}
+	return merr
+}
+
+// runApplyChannelLoop reconciles repeatedly until ctx is cancelled. A fresh
+// ChannelsFactory per iteration drops cached REST configs and the discovery
+// cache, picking up cert rotation and new CRDs without a restart.
+func runApplyChannelLoop(ctx context.Context, out io.Writer, options *ApplyChannelOptions, args []string) error {
+	// In daemon mode kops-channels runs as a system-node-critical static pod; serve a
+	// readiness probe reporting the last apply outcome, so a persistent failure surfaces
+	// as NotReady (failing `kops validate cluster`, which gates rolling updates) instead
+	// of only being logged. Starts NotReady until the first successful apply.
+	readiness, err := serveReadiness(ctx)
+	if err != nil {
+		return fmt.Errorf("serving readiness probe: %w", err)
+	}
+
+	// Retry quickly until the first success: the apiserver is usually
+	// unreachable while the control plane is still coming up.
+	const startupRetryInterval = 5 * time.Second
+
+	settled := false
+	for {
+		interval := options.Interval
+		err := runApplyChannelIteration(ctx, NewChannelsFactory(), out, options, args)
+		readiness.recordApplyResult(err)
+		if err != nil {
+			if !settled {
+				interval = min(startupRetryInterval, options.Interval)
+			}
+			klog.Warningf("error in apply iteration (will retry in %s): %v", interval, err)
+		} else {
+			settled = true
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(interval):
+		}
+	}
+}
+
+func RunApplyChannel(ctx context.Context, f *ChannelsFactory, out io.Writer, options *ApplyChannelOptions, args []string) error {
+	restConfig, err := f.RESTConfig()
+	if err != nil {
+		return err
+	}
+	httpClient, err := f.HTTPClient()
 	if err != nil {
 		return err
 	}
 
-	cmClient, err := f.CertManagerClient()
+	k8sClient, err := f.KubernetesClient()
 	if err != nil {
-		return err
+		return fmt.Errorf("building kube client: %w", err)
+	}
+
+	cmClient, err := certmanager.NewForConfigAndClient(restConfig, httpClient)
+	if err != nil {
+		return fmt.Errorf("building cert manager client: %w", err)
 	}
 
 	dynamicClient, err := f.DynamicClient()
 	if err != nil {
-		return err
+		return fmt.Errorf("building dynamic client: %w", err)
 	}
 
 	restMapper, err := f.RESTMapper()
@@ -89,84 +198,35 @@ func RunApplyChannel(ctx context.Context, f Factory, out io.Writer, options *App
 	// Remove Pre and Patch, as they make semver comparisons impractical
 	kubernetesVersion.Pre = nil
 
-	menu := channels.NewAddonMenu()
-
-	for _, name := range args {
-		location, err := url.Parse(name)
-		if err != nil {
-			return fmt.Errorf("unable to parse argument %q as url", name)
-		}
-		if !location.IsAbs() {
-			// We recognize the following "well-known" format:
-			// <name> with no slashes ->
-			if strings.Contains(name, "/") {
-				return fmt.Errorf("channel format not recognized (did you mean to use `-f` to specify a local file?): %q", name)
-			}
-			expanded := "https://raw.githubusercontent.com/kubernetes/kops/master/addons/" + name + "/addon.yaml"
-			location, err = url.Parse(expanded)
-			if err != nil {
-				return fmt.Errorf("unable to parse expanded argument %q as url", expanded)
-			}
-			// Disallow the use of legacy addons from the "well-known" location starting Kubernetes 1.23:
-			// https://raw.githubusercontent.com/kubernetes/kops/master/addons/<name>/addon.yaml
-			if util.IsKubernetesGTE("1.23", kubernetesVersion) {
-				return fmt.Errorf("legacy addons are deprecated and unmaintained, use managed addons instead of %s", expanded)
-			} else {
-				klog.Warningf("Legacy addons are deprecated and unmaintained, use managed addons instead of %s", expanded)
-			}
-		}
-		o, err := channels.LoadAddons(name, location)
-		if err != nil {
-			return fmt.Errorf("error loading channel %q: %v", location, err)
-		}
-
-		current, err := o.GetCurrent(kubernetesVersion)
-		if err != nil {
-			return fmt.Errorf("error processing latest versions in %q: %v", location, err)
-		}
-		menu.MergeAddons(current)
+	if len(args) == 0 {
+		return fmt.Errorf("at least one channel URL is required")
 	}
 
-	for _, f := range options.Files {
-		location, err := url.Parse(f)
+	var merr error
+	for _, channelLocation := range args {
+		menu, err := buildMenu(f.VFSContext(), kubernetesVersion, channelLocation)
 		if err != nil {
-			return fmt.Errorf("unable to parse argument %q as url", f)
+			merr = multierr.Append(merr, fmt.Errorf("building menu for %q: %w", channelLocation, err))
+			continue
 		}
-		if !location.IsAbs() {
-			cwd, err := os.Getwd()
-			if err != nil {
-				return fmt.Errorf("error getting current directory: %v", err)
-			}
-			baseURL, err := url.Parse(cwd + string(os.PathSeparator))
-			if err != nil {
-				return fmt.Errorf("error building url for current directory %q: %v", cwd, err)
-			}
-			location = baseURL.ResolveReference(location)
+		if err := applyMenu(ctx, menu, f.VFSContext(), k8sClient, cmClient, dynamicClient, restMapper, options.Yes); err != nil {
+			merr = multierr.Append(merr, fmt.Errorf("applying %q: %w", channelLocation, err))
 		}
-		o, err := channels.LoadAddons(f, location)
-		if err != nil {
-			return fmt.Errorf("error loading file %q: %v", f, err)
-		}
+	}
+	return merr
+}
 
-		current, err := o.GetCurrent(kubernetesVersion)
-		if err != nil {
-			return fmt.Errorf("error processing latest versions in %q: %v", f, err)
-		}
-		menu.MergeAddons(current)
+func applyMenu(ctx context.Context, menu *channels.AddonMenu, vfsContext *vfs.VFSContext, k8sClient kubernetes.Interface, cmClient certmanager.Interface, dynamicClient dynamic.Interface, restMapper *restmapper.DeferredDiscoveryRESTMapper, apply bool) error {
+	// channelVersions is the list of installed addons in the cluster.
+	// It is keyed by <namespace>:<addon name>.
+	channelVersions, err := getChannelVersions(ctx, k8sClient)
+	if err != nil {
+		return fmt.Errorf("cannot fetch channel versions from namespaces: %w", err)
 	}
 
-	var updates []*channels.AddonUpdate
-	var needUpdates []*channels.Addon
-	for _, addon := range menu.Addons {
-		// TODO: Cache lookups to prevent repeated lookups?
-		update, err := addon.GetRequiredUpdates(ctx, k8sClient, cmClient)
-		if err != nil {
-			return fmt.Errorf("error checking for required update: %v", err)
-		}
-		if update != nil {
-			updates = append(updates, update)
-			needUpdates = append(needUpdates, addon)
-		}
+	updates, needUpdates, err := getUpdates(ctx, menu, k8sClient, cmClient, channelVersions)
+	if err != nil {
+		return fmt.Errorf("failed to get updates: %w", err)
 	}
 
 	if len(updates) == 0 {
@@ -205,7 +265,7 @@ func RunApplyChannel(ctx context.Context, f Factory, out io.Writer, options *App
 		}
 	}
 
-	if !options.Yes {
+	if !apply {
 		fmt.Printf("\nMust specify --yes to update\n")
 		return nil
 	}
@@ -215,16 +275,80 @@ func RunApplyChannel(ctx context.Context, f Factory, out io.Writer, options *App
 		RESTMapper: restMapper,
 	}
 
+	applier := &channels.ClientApplier{
+		Client:     dynamicClient,
+		RESTMapper: restMapper,
+	}
+
+	var merr error
+
 	for _, needUpdate := range needUpdates {
-		update, err := needUpdate.EnsureUpdated(ctx, k8sClient, cmClient, pruner)
+		update, err := needUpdate.EnsureUpdated(ctx, vfsContext, k8sClient, cmClient, pruner, applier, channelVersions[needUpdate.GetNamespace()+":"+needUpdate.Name])
 		if err != nil {
-			fmt.Printf("error updating %q: %v", needUpdate.Name, err)
+			merr = multierr.Append(merr, fmt.Errorf("updating %q: %w", needUpdate.Name, err))
 		} else if update != nil {
 			fmt.Printf("Updated %q\n", update.Name)
 		}
 	}
 
-	fmt.Printf("\n")
+	return merr
+}
 
-	return nil
+func getUpdates(ctx context.Context, menu *channels.AddonMenu, k8sClient kubernetes.Interface, cmClient certmanager.Interface, channelVersions map[string]*channels.ChannelVersion) ([]*channels.AddonUpdate, []*channels.Addon, error) {
+	var updates []*channels.AddonUpdate
+	var needUpdates []*channels.Addon
+	for _, addon := range menu.Addons {
+		update, err := addon.GetRequiredUpdates(ctx, k8sClient, cmClient, channelVersions[addon.GetNamespace()+":"+addon.Name])
+		if err != nil {
+			return nil, nil, fmt.Errorf("error checking for required update: %v", err)
+		}
+		if update != nil {
+			updates = append(updates, update)
+			needUpdates = append(needUpdates, addon)
+		}
+	}
+	return updates, needUpdates, nil
+}
+
+func getChannelVersions(ctx context.Context, k8sClient kubernetes.Interface) (map[string]*channels.ChannelVersion, error) {
+	namespaces, err := k8sClient.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("error listing namespaces: %v", err)
+	}
+
+	channelVersions := make(map[string]*channels.ChannelVersion)
+	for i := range namespaces.Items {
+		ns := &namespaces.Items[i]
+		addons := channels.FindChannelVersions(ns)
+		for name, version := range addons {
+			channelVersions[ns.Name+":"+name] = version
+		}
+	}
+	return channelVersions, nil
+}
+
+func buildMenu(vfsContext *vfs.VFSContext, kubernetesVersion semver.Version, channelLocation string) (*channels.AddonMenu, error) {
+	menu := channels.NewAddonMenu()
+
+	location, err := url.Parse(channelLocation)
+	if err != nil {
+		return nil, fmt.Errorf("unable to parse argument %q as url", channelLocation)
+	}
+	if !location.IsAbs() {
+		expanded := "https://raw.githubusercontent.com/kubernetes/kops/master/addons/" + channelLocation + "/addon.yaml"
+		// Disallow the use of legacy addons from the "well-known" location starting Kubernetes 1.23:
+		// https://raw.githubusercontent.com/kubernetes/kops/master/addons/<name>/addon.yaml
+		return nil, fmt.Errorf("legacy addons are deprecated and unmaintained, use managed addons instead of %s", expanded)
+	}
+	o, err := channels.LoadAddons(vfsContext, channelLocation, location)
+	if err != nil {
+		return nil, fmt.Errorf("error loading channel %q: %v", location, err)
+	}
+
+	current, err := o.GetCurrent(kubernetesVersion)
+	if err != nil {
+		return nil, fmt.Errorf("error processing latest versions in %q: %v", location, err)
+	}
+	menu.MergeAddons(current)
+	return menu, nil
 }

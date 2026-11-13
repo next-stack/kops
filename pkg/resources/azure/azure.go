@@ -19,46 +19,59 @@ package azure
 import (
 	"context"
 	"fmt"
+	"strings"
 
-	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2020-06-01/compute"
-	"github.com/Azure/azure-sdk-for-go/services/network/mgmt/2020-06-01/network"
-	authz "github.com/Azure/azure-sdk-for-go/services/preview/authorization/mgmt/2018-01-01-preview/authorization"
-	azureresources "github.com/Azure/azure-sdk-for-go/services/resources/mgmt/2020-06-01/resources"
-	kopsapi "k8s.io/kops/pkg/apis/kops"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
+	authz "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/authorization/armauthorization/v3"
+	compute "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v7"
+	network "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork/v7"
+	azureresources "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources/v3"
 	"k8s.io/kops/pkg/resources"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/azure"
-	"k8s.io/kops/upup/pkg/fi/cloudup/azuretasks"
+	"k8s.io/utils/set"
 )
 
 const (
-	typeResourceGroup   = "ResourceGroup"
-	typeVirtualNetwork  = "VirtualNetwork"
-	typeSubnet          = "Subnet"
-	typeRouteTable      = "RouteTable"
-	typeVMScaleSet      = "VMScaleSet"
-	typeDisk            = "Disk"
-	typeRoleAssignment  = "RoleAssignment"
-	typeLoadBalancer    = "LoadBalancer"
-	typePublicIPAddress = "PublicIPAddress"
+	typeResourceGroup            = "ResourceGroup"
+	typeVirtualNetwork           = "VirtualNetwork"
+	typeNetworkSecurityGroup     = "NetworkSecurityGroup"
+	typeApplicationSecurityGroup = "ApplicationSecurityGroup"
+	typeSubnet                   = "Subnet"
+	typeRouteTable               = "RouteTable"
+	typeVMScaleSet               = "VMScaleSet"
+	typeVMScaleSetVM             = "VMScaleSetVM"
+	typeDisk                     = "Disk"
+	typeRoleAssignment           = "RoleAssignment"
+	typeLoadBalancer             = "LoadBalancer"
+	typePublicIPAddress          = "PublicIPAddress"
+	typeNatGateway               = "NatGateway"
 )
 
 // ListResourcesAzure lists all resources for the cluster by quering Azure.
-func ListResourcesAzure(cloud azure.AzureCloud, cluster *kopsapi.Cluster) (map[string]*resources.Resource, error) {
+func ListResourcesAzure(cloud azure.AzureCloud, clusterInfo resources.ClusterInfo) (map[string]*resources.Resource, error) {
 	g := resourceGetter{
-		cloud:   cloud,
-		cluster: cluster,
+		cloud:       cloud,
+		clusterInfo: clusterInfo,
 	}
 	return g.listResourcesAzure()
 }
 
 type resourceGetter struct {
-	cloud   azure.AzureCloud
-	cluster *kopsapi.Cluster
+	cloud       azure.AzureCloud
+	clusterInfo resources.ClusterInfo
 }
 
 func (g *resourceGetter) resourceGroupName() string {
-	return g.cluster.AzureResourceGroupName()
+	return g.clusterInfo.AzureResourceGroupName
+}
+
+func (g *resourceGetter) resourceGroupID() string {
+	return fmt.Sprintf("/subscriptions/%s/resourceGroups/%s", g.clusterInfo.AzureSubscriptionID, g.clusterInfo.AzureResourceGroupName)
+}
+
+func (g *resourceGetter) storageAccountID() string {
+	return g.clusterInfo.AzureStorageAccountID
 }
 
 func (g *resourceGetter) listResourcesAzure() (map[string]*resources.Resource, error) {
@@ -68,11 +81,14 @@ func (g *resourceGetter) listResourcesAzure() (map[string]*resources.Resource, e
 	}
 
 	// Convert a slice of resources to a map of resources keyed by type and ID.
+	// Normalize IDs to lowercase since Azure resource IDs are case-insensitive
+	// but different Azure APIs may return different casing for the same resource.
 	resources := make(map[string]*resources.Resource)
 	for _, r := range rs {
 		if r.Done {
 			continue
 		}
+		r.ID = strings.ToLower(r.ID)
 		resources[toKey(r.Type, r.ID)] = r
 	}
 	return resources, nil
@@ -86,11 +102,14 @@ func (g *resourceGetter) listAll() ([]*resources.Resource, error) {
 	fns := []func(ctx context.Context) ([]*resources.Resource, error){
 		g.listResourceGroups,
 		g.listVirtualNetworksAndSubnets,
+		g.listNetworkSecurityGroups,
+		g.listApplicationSecurityGroups,
 		g.listRouteTables,
 		g.listVMScaleSetsAndRoleAssignments,
 		g.listDisks,
 		g.listLoadBalancers,
 		g.listPublicIPAddresses,
+		g.listNatGateways,
 	}
 
 	var resources []*resources.Resource
@@ -106,14 +125,13 @@ func (g *resourceGetter) listAll() ([]*resources.Resource, error) {
 }
 
 func (g *resourceGetter) listResourceGroups(ctx context.Context) ([]*resources.Resource, error) {
-	rgs, err := g.cloud.ResourceGroup().List(ctx, "" /* filter */)
+	rgs, err := g.cloud.ResourceGroup().List(ctx)
 	if err != nil {
 		return nil, err
 	}
 
 	var rs []*resources.Resource
-	for i := range rgs {
-		rg := &rgs[i]
+	for _, rg := range rgs {
 		if !g.isOwnedByCluster(rg.Tags) {
 			continue
 		}
@@ -122,14 +140,14 @@ func (g *resourceGetter) listResourceGroups(ctx context.Context) ([]*resources.R
 	return rs, nil
 }
 
-func (g *resourceGetter) toResourceGroupResource(rg *azureresources.Group) *resources.Resource {
+func (g *resourceGetter) toResourceGroupResource(rg *azureresources.ResourceGroup) *resources.Resource {
 	return &resources.Resource{
 		Obj:     rg,
 		Type:    typeResourceGroup,
-		ID:      *rg.Name,
+		ID:      *rg.ID,
 		Name:    *rg.Name,
 		Deleter: g.deleteResourceGroup,
-		Shared:  g.cluster.IsSharedAzureResourceGroup(),
+		Shared:  g.clusterInfo.AzureResourceGroupShared,
 	}
 }
 
@@ -144,14 +162,17 @@ func (g *resourceGetter) listVirtualNetworksAndSubnets(ctx context.Context) ([]*
 	}
 
 	var rs []*resources.Resource
-	for i := range vnets {
-		vnet := &vnets[i]
+	for _, vnet := range vnets {
 		if !g.isOwnedByCluster(vnet.Tags) {
 			continue
 		}
-		rs = append(rs, g.toVirtualNetworkResource(vnet))
+		r, err := g.toVirtualNetworkResource(vnet)
+		if err != nil {
+			return nil, err
+		}
+		rs = append(rs, r)
 		// Add all subnets belonging to the virtual network.
-		subnets, err := g.listSubnets(ctx, *vnet.Name)
+		subnets, err := g.listSubnets(ctx, *vnet.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -160,54 +181,180 @@ func (g *resourceGetter) listVirtualNetworksAndSubnets(ctx context.Context) ([]*
 	return rs, nil
 }
 
-func (g *resourceGetter) toVirtualNetworkResource(vnet *network.VirtualNetwork) *resources.Resource {
+func (g *resourceGetter) toVirtualNetworkResource(vnet *network.VirtualNetwork) (*resources.Resource, error) {
+	var blocks []string
+	blocks = append(blocks, toKey(typeResourceGroup, g.resourceGroupID()))
+
+	nsgs := set.New[string]()
+	if vnet.Properties != nil && vnet.Properties.Subnets != nil {
+		for _, sn := range vnet.Properties.Subnets {
+			if sn.Properties == nil || sn.Properties.NetworkSecurityGroup == nil || sn.Properties.NetworkSecurityGroup.ID == nil {
+				continue
+			}
+			nsgs.Insert(*sn.Properties.NetworkSecurityGroup.ID)
+		}
+	}
+	for nsg := range nsgs {
+		blocks = append(blocks, toKey(typeNetworkSecurityGroup, nsg))
+	}
+
 	return &resources.Resource{
 		Obj:     vnet,
 		Type:    typeVirtualNetwork,
-		ID:      *vnet.Name,
+		ID:      *vnet.ID,
 		Name:    *vnet.Name,
 		Deleter: g.deleteVirtualNetwork,
-		Blocks:  []string{toKey(typeResourceGroup, g.resourceGroupName())},
-		Shared:  g.cluster.SharedVPC(),
-	}
+		Blocks:  blocks,
+		Shared:  g.clusterInfo.AzureNetworkShared,
+	}, nil
 }
 
 func (g *resourceGetter) deleteVirtualNetwork(_ fi.Cloud, r *resources.Resource) error {
 	return g.cloud.VirtualNetwork().Delete(context.TODO(), g.resourceGroupName(), r.Name)
 }
 
-func (g *resourceGetter) listSubnets(ctx context.Context, vnetName string) ([]*resources.Resource, error) {
-	subnets, err := g.cloud.Subnet().List(ctx, g.resourceGroupName(), vnetName)
+func (g *resourceGetter) listSubnets(ctx context.Context, vnetID string) ([]*resources.Resource, error) {
+	vnet, err := arm.ParseResourceID(vnetID)
+	if err != nil {
+		return nil, err
+	}
+	subnets, err := g.cloud.Subnet().List(ctx, g.resourceGroupName(), vnet.Name)
 	if err != nil {
 		return nil, err
 	}
 
 	var rs []*resources.Resource
-	for i := range subnets {
-		rs = append(rs, g.toSubnetResource(&subnets[i], vnetName))
+	for _, sn := range subnets {
+		rs = append(rs, g.toSubnetResource(sn, vnetID))
 	}
 	return rs, nil
 }
 
-func (g *resourceGetter) toSubnetResource(subnet *network.Subnet, vnetName string) *resources.Resource {
+func (g *resourceGetter) toSubnetResource(subnet *network.Subnet, vnetID string) *resources.Resource {
+	var blocks []string
+	blocks = append(blocks, toKey(typeVirtualNetwork, vnetID))
+	blocks = append(blocks, toKey(typeResourceGroup, g.resourceGroupID()))
+
+	if subnet.Properties != nil {
+		if subnet.Properties.NatGateway != nil && subnet.Properties.NatGateway.ID != nil {
+			blocks = append(blocks, toKey(typeNatGateway, *subnet.Properties.NatGateway.ID))
+		}
+		if subnet.Properties.RouteTable != nil && subnet.Properties.RouteTable.ID != nil {
+			blocks = append(blocks, toKey(typeRouteTable, *subnet.Properties.RouteTable.ID))
+		}
+		if subnet.Properties.NetworkSecurityGroup != nil && subnet.Properties.NetworkSecurityGroup.ID != nil {
+			blocks = append(blocks, toKey(typeNetworkSecurityGroup, *subnet.Properties.NetworkSecurityGroup.ID))
+		}
+	}
+
+	vnet, err := arm.ParseResourceID(vnetID)
+	if err != nil {
+		return nil
+	}
+
 	return &resources.Resource{
 		Obj:  subnet,
 		Type: typeSubnet,
-		ID:   *subnet.Name,
+		ID:   *subnet.ID,
 		Name: *subnet.Name,
 		Deleter: func(_ fi.Cloud, r *resources.Resource) error {
-			return g.deleteSubnet(vnetName, r)
+			return g.deleteSubnet(vnet.Name, r)
 		},
-		Blocks: []string{
-			toKey(typeVirtualNetwork, vnetName),
-			toKey(typeResourceGroup, g.resourceGroupName()),
-		},
-		Shared: g.cluster.SharedVPC(),
+		Blocks: blocks,
+		Shared: g.clusterInfo.AzureNetworkShared,
 	}
 }
 
 func (g *resourceGetter) deleteSubnet(vnetName string, r *resources.Resource) error {
 	return g.cloud.Subnet().Delete(context.TODO(), g.resourceGroupName(), vnetName, r.Name)
+}
+
+func (g *resourceGetter) listNetworkSecurityGroups(ctx context.Context) ([]*resources.Resource, error) {
+	NetworkSecurityGroups, err := g.cloud.NetworkSecurityGroup().List(ctx, g.resourceGroupName())
+	if err != nil {
+		return nil, err
+	}
+
+	var rs []*resources.Resource
+	for i := range NetworkSecurityGroups {
+		r, err := g.toNetworkSecurityGroupResource(NetworkSecurityGroups[i])
+		if err != nil {
+			return nil, err
+		}
+		rs = append(rs, r)
+	}
+	return rs, nil
+}
+
+func (g *resourceGetter) toNetworkSecurityGroupResource(NetworkSecurityGroup *network.SecurityGroup) (*resources.Resource, error) {
+	var blocks []string
+	blocks = append(blocks, toKey(typeResourceGroup, g.resourceGroupID()))
+
+	asgs := set.New[string]()
+	if NetworkSecurityGroup.Properties.SecurityRules != nil {
+		for _, nsr := range NetworkSecurityGroup.Properties.SecurityRules {
+			if nsr.Properties.SourceApplicationSecurityGroups != nil {
+				for _, sasg := range nsr.Properties.SourceApplicationSecurityGroups {
+					asgs.Insert(*sasg.ID)
+				}
+			}
+			if nsr.Properties.DestinationApplicationSecurityGroups != nil {
+				for _, dasg := range nsr.Properties.DestinationApplicationSecurityGroups {
+					asgs.Insert(*dasg.ID)
+				}
+			}
+		}
+	}
+	for asg := range asgs {
+		blocks = append(blocks, toKey(typeApplicationSecurityGroup, asg))
+	}
+
+	return &resources.Resource{
+		Obj:  NetworkSecurityGroup,
+		Type: typeNetworkSecurityGroup,
+		ID:   *NetworkSecurityGroup.ID,
+		Name: *NetworkSecurityGroup.Name,
+		Deleter: func(_ fi.Cloud, r *resources.Resource) error {
+			return g.deleteNetworkSecurityGroup(r)
+		},
+		Blocks: blocks,
+	}, nil
+}
+
+func (g *resourceGetter) deleteNetworkSecurityGroup(r *resources.Resource) error {
+	return g.cloud.NetworkSecurityGroup().Delete(context.TODO(), g.resourceGroupName(), r.Name)
+}
+
+func (g *resourceGetter) listApplicationSecurityGroups(ctx context.Context) ([]*resources.Resource, error) {
+	ApplicationSecurityGroups, err := g.cloud.ApplicationSecurityGroup().List(ctx, g.resourceGroupName())
+	if err != nil {
+		return nil, err
+	}
+
+	var rs []*resources.Resource
+	for _, asg := range ApplicationSecurityGroups {
+		rs = append(rs, g.toApplicationSecurityGroupResource(asg))
+	}
+	return rs, nil
+}
+
+func (g *resourceGetter) toApplicationSecurityGroupResource(ApplicationSecurityGroup *network.ApplicationSecurityGroup) *resources.Resource {
+	return &resources.Resource{
+		Obj:  ApplicationSecurityGroup,
+		Type: typeApplicationSecurityGroup,
+		ID:   *ApplicationSecurityGroup.ID,
+		Name: *ApplicationSecurityGroup.Name,
+		Deleter: func(_ fi.Cloud, r *resources.Resource) error {
+			return g.deleteApplicationSecurityGroup(r)
+		},
+		Blocks: []string{
+			toKey(typeResourceGroup, g.resourceGroupID()),
+		},
+	}
+}
+
+func (g *resourceGetter) deleteApplicationSecurityGroup(r *resources.Resource) error {
+	return g.cloud.ApplicationSecurityGroup().Delete(context.TODO(), g.resourceGroupName(), r.Name)
 }
 
 func (g *resourceGetter) listRouteTables(ctx context.Context) ([]*resources.Resource, error) {
@@ -217,8 +364,7 @@ func (g *resourceGetter) listRouteTables(ctx context.Context) ([]*resources.Reso
 	}
 
 	var rs []*resources.Resource
-	for i := range rts {
-		rt := &rts[i]
+	for _, rt := range rts {
 		if !g.isOwnedByCluster(rt.Tags) {
 			continue
 		}
@@ -231,11 +377,11 @@ func (g *resourceGetter) toRouteTableResource(rt *network.RouteTable) *resources
 	return &resources.Resource{
 		Obj:     rt,
 		Type:    typeRouteTable,
-		ID:      *rt.Name,
+		ID:      *rt.ID,
 		Name:    *rt.Name,
 		Deleter: g.deleteRouteTable,
-		Blocks:  []string{toKey(typeResourceGroup, g.resourceGroupName())},
-		Shared:  g.cluster.IsSharedAzureRouteTable(),
+		Blocks:  []string{toKey(typeResourceGroup, g.resourceGroupID())},
+		Shared:  g.clusterInfo.AzureRouteTableShared,
 	}
 }
 
@@ -251,8 +397,7 @@ func (g *resourceGetter) listVMScaleSetsAndRoleAssignments(ctx context.Context) 
 
 	var rs []*resources.Resource
 	principalIDs := map[string]*compute.VirtualMachineScaleSet{}
-	for i := range vmsses {
-		vmss := &vmsses[i]
+	for _, vmss := range vmsses {
 		if !g.isOwnedByCluster(vmss.Tags) {
 			continue
 		}
@@ -262,39 +407,89 @@ func (g *resourceGetter) listVMScaleSetsAndRoleAssignments(ctx context.Context) 
 			return nil, err
 		}
 
+		for _, vm := range vms {
+			vmr, err := g.toVMScaleSetVMResource(vmss, vm)
+			if err != nil {
+				return nil, err
+			}
+			rs = append(rs, vmr)
+		}
+
 		r, err := g.toVMScaleSetResource(vmss, vms)
 		if err != nil {
 			return nil, err
 		}
 		rs = append(rs, r)
 
-		principalIDs[*vmss.Identity.PrincipalID] = vmss
+		if vmss.Identity != nil && vmss.Identity.PrincipalID != nil {
+			principalIDs[*vmss.Identity.PrincipalID] = vmss
+		}
 	}
 
-	ras, err := g.listRoleAssignments(ctx, principalIDs)
+	resourceGroupRAs, err := g.listRoleAssignments(ctx, principalIDs, g.resourceGroupID())
 	if err != nil {
 		return nil, err
 	}
-	rs = append(rs, ras...)
+	rs = append(rs, resourceGroupRAs...)
+
+	storageAccountRAs, err := g.listRoleAssignments(ctx, principalIDs, g.storageAccountID())
+	if err != nil {
+		return nil, err
+	}
+	rs = append(rs, storageAccountRAs...)
 
 	return rs, nil
 }
 
-func (g *resourceGetter) toVMScaleSetResource(vmss *compute.VirtualMachineScaleSet, vms []compute.VirtualMachineScaleSetVM) (*resources.Resource, error) {
+func (g *resourceGetter) toVMScaleSetResource(vmss *compute.VirtualMachineScaleSet, vms []*compute.VirtualMachineScaleSetVM) (*resources.Resource, error) {
 	// Add resources whose deletion is blocked by this VMSS.
 	var blocks []string
-	blocks = append(blocks, toKey(typeResourceGroup, g.resourceGroupName()))
+	blocks = append(blocks, toKey(typeResourceGroup, g.resourceGroupID()))
 
-	vnets := map[string]struct{}{}
-	subnets := map[string]struct{}{}
-	for _, iface := range *vmss.VirtualMachineProfile.NetworkProfile.NetworkInterfaceConfigurations {
-		for _, ip := range *iface.IPConfigurations {
-			subnetID, err := azuretasks.ParseSubnetID(*ip.Subnet.ID)
-			if err != nil {
-				return nil, fmt.Errorf("error on parsing subnet ID: %s", err)
+	// The VM Scale Set deletion is blocked by its instances.
+	var blocked []string
+	for _, vm := range vms {
+		if vm == nil || vm.ID == nil {
+			continue
+		}
+		blocked = append(blocked, toKey(typeVMScaleSetVM, *vm.ID))
+	}
+
+	vnets := set.New[string]()
+	subnets := set.New[string]()
+	asgs := set.New[string]()
+	lbs := set.New[string]()
+	if vmss.Properties == nil || vmss.Properties.VirtualMachineProfile == nil || vmss.Properties.VirtualMachineProfile.NetworkProfile == nil {
+		return nil, fmt.Errorf("VMSS %s has no network profile", fi.ValueOf(vmss.Name))
+	}
+	for _, iface := range vmss.Properties.VirtualMachineProfile.NetworkProfile.NetworkInterfaceConfigurations {
+		if iface.Properties == nil {
+			continue
+		}
+		for _, ip := range iface.Properties.IPConfigurations {
+			if ip.Properties == nil || ip.Properties.Subnet == nil {
+				continue
 			}
-			vnets[subnetID.VirtualNetworkName] = struct{}{}
-			subnets[subnetID.SubnetName] = struct{}{}
+			subnet, err := arm.ParseResourceID(*ip.Properties.Subnet.ID)
+			if err != nil {
+				return nil, err
+			}
+			vnets.Insert(subnet.Parent.String())
+			subnets.Insert(subnet.String())
+			if ip.Properties.ApplicationSecurityGroups != nil {
+				for _, asg := range ip.Properties.ApplicationSecurityGroups {
+					asgs.Insert(*asg.ID)
+				}
+			}
+			if ip.Properties.LoadBalancerBackendAddressPools != nil {
+				for _, lbbap := range ip.Properties.LoadBalancerBackendAddressPools {
+					pool, err := arm.ParseResourceID(*lbbap.ID)
+					if err != nil {
+						return nil, err
+					}
+					lbs.Insert(pool.Parent.String())
+				}
+			}
 		}
 	}
 	for vnet := range vnets {
@@ -303,22 +498,61 @@ func (g *resourceGetter) toVMScaleSetResource(vmss *compute.VirtualMachineScaleS
 	for subnet := range subnets {
 		blocks = append(blocks, toKey(typeSubnet, subnet))
 	}
-
-	for _, vm := range vms {
-		if disks := vm.StorageProfile.DataDisks; disks != nil {
-			for _, d := range *disks {
-				blocks = append(blocks, toKey(typeDisk, *d.Name))
-			}
-		}
+	for asg := range asgs {
+		blocks = append(blocks, toKey(typeApplicationSecurityGroup, asg))
+	}
+	for lb := range lbs {
+		blocks = append(blocks, toKey(typeLoadBalancer, lb))
 	}
 
 	return &resources.Resource{
 		Obj:     vmss,
 		Type:    typeVMScaleSet,
-		ID:      *vmss.Name,
+		ID:      *vmss.ID,
 		Name:    *vmss.Name,
 		Deleter: g.deleteVMScaleSet,
 		Blocks:  blocks,
+		Blocked: blocked,
+		Dumper:  DumpVMScaleSet,
+	}, nil
+}
+
+func (g *resourceGetter) toVMScaleSetVMResource(vmss *compute.VirtualMachineScaleSet, vm *compute.VirtualMachineScaleSetVM) (*resources.Resource, error) {
+	if vm == nil || vm.ID == nil {
+		return nil, fmt.Errorf("VMScaleSetVM is missing ID")
+	}
+	if vmss == nil || vmss.Name == nil || vmss.ID == nil {
+		return nil, fmt.Errorf("VMScaleSet is missing ID or Name")
+	}
+
+	rid, err := arm.ParseResourceID(*vm.ID)
+	if err != nil {
+		return nil, err
+	}
+	instanceID := rid.Name
+
+	name := ""
+	if vm.Properties != nil && vm.Properties.OSProfile != nil && vm.Properties.OSProfile.ComputerName != nil {
+		name = *vm.Properties.OSProfile.ComputerName
+	} else if vm.Name != nil {
+		name = *vm.Name
+	} else {
+		name = instanceID
+	}
+
+	return &resources.Resource{
+		Obj:    vm,
+		Type:   typeVMScaleSetVM,
+		ID:     *vm.ID,
+		Name:   name,
+		Dumper: DumpVMScaleSetVM,
+		Deleter: func(_ fi.Cloud, r *resources.Resource) error {
+			return g.cloud.VMScaleSetVM().Delete(context.TODO(), g.resourceGroupName(), *vmss.Name, instanceID)
+		},
+		Blocks: []string{
+			toKey(typeResourceGroup, g.resourceGroupID()),
+			toKey(typeVMScaleSet, *vmss.ID),
+		},
 	}, nil
 }
 
@@ -333,8 +567,7 @@ func (g *resourceGetter) listDisks(ctx context.Context) ([]*resources.Resource, 
 	}
 
 	var rs []*resources.Resource
-	for i := range disks {
-		disk := &disks[i]
+	for _, disk := range disks {
 		if !g.isOwnedByCluster(disk.Tags) {
 			continue
 		}
@@ -344,13 +577,25 @@ func (g *resourceGetter) listDisks(ctx context.Context) ([]*resources.Resource, 
 }
 
 func (g *resourceGetter) toDiskResource(disk *compute.Disk) *resources.Resource {
+	var blocked []string
+	if disk.ManagedBy != nil {
+		// Block on the parent VMScaleSet, not the individual VM instance.
+		// The raw ManagedBy path may not match the listed VM's resource ID,
+		// but parsing it to extract the parent VMSS gives a reliable match.
+		vmID, err := arm.ParseResourceID(*disk.ManagedBy)
+		if err == nil && vmID.Parent != nil {
+			blocked = append(blocked, toKey(typeVMScaleSet, vmID.Parent.String()))
+		}
+	}
+
 	return &resources.Resource{
 		Obj:     disk,
 		Type:    typeDisk,
-		ID:      *disk.Name,
+		ID:      *disk.ID,
 		Name:    *disk.Name,
 		Deleter: g.deleteDisk,
-		Blocks:  []string{toKey(typeResourceGroup, g.resourceGroupName())},
+		Blocks:  []string{toKey(typeResourceGroup, g.resourceGroupID())},
+		Blocked: blocked,
 	}
 }
 
@@ -358,20 +603,19 @@ func (g *resourceGetter) deleteDisk(_ fi.Cloud, r *resources.Resource) error {
 	return g.cloud.Disk().Delete(context.TODO(), g.resourceGroupName(), r.Name)
 }
 
-func (g *resourceGetter) listRoleAssignments(ctx context.Context, principalIDs map[string]*compute.VirtualMachineScaleSet) ([]*resources.Resource, error) {
-	ras, err := g.cloud.RoleAssignment().List(ctx, g.resourceGroupName())
+func (g *resourceGetter) listRoleAssignments(ctx context.Context, principalIDs map[string]*compute.VirtualMachineScaleSet, scope string) ([]*resources.Resource, error) {
+	ras, err := g.cloud.RoleAssignment().List(ctx, scope)
 	if err != nil {
 		return nil, err
 	}
 
 	var rs []*resources.Resource
-	for i := range ras {
+	for _, ra := range ras {
 		// Add a Role Assignment to the slice if its principal ID is that of one of the VM Scale Sets.
-		ra := &ras[i]
-		if ra.PrincipalID == nil {
+		if ra.Properties == nil || ra.Properties.PrincipalID == nil {
 			continue
 		}
-		vmss, ok := principalIDs[*ra.PrincipalID]
+		vmss, ok := principalIDs[*ra.Properties.PrincipalID]
 		if !ok {
 			continue
 		}
@@ -384,13 +628,15 @@ func (g *resourceGetter) toRoleAssignmentResource(ra *authz.RoleAssignment, vmss
 	return &resources.Resource{
 		Obj:     ra,
 		Type:    typeRoleAssignment,
-		ID:      *ra.Name,
+		ID:      *ra.ID,
 		Name:    *ra.Name,
 		Deleter: g.deleteRoleAssignment,
 		Blocks: []string{
-			toKey(typeResourceGroup, g.resourceGroupName()),
-			toKey(typeVMScaleSet, *vmss.Name),
+			toKey(typeResourceGroup, g.resourceGroupID()),
 		},
+		// Wait for the VMSS to be deleted before removing role assignments,
+		// to avoid permission issues during VMSS teardown.
+		Blocked: []string{toKey(typeVMScaleSet, *vmss.ID)},
 	}
 }
 
@@ -399,7 +645,7 @@ func (g *resourceGetter) deleteRoleAssignment(_ fi.Cloud, r *resources.Resource)
 	if !ok {
 		return fmt.Errorf("expected RoleAssignment, but got %T", r)
 	}
-	return g.cloud.RoleAssignment().Delete(context.TODO(), *ra.Scope, *ra.Name)
+	return g.cloud.RoleAssignment().Delete(context.TODO(), *ra.Properties.Scope, *ra.Name)
 }
 
 func (g *resourceGetter) listLoadBalancers(ctx context.Context) ([]*resources.Resource, error) {
@@ -409,25 +655,45 @@ func (g *resourceGetter) listLoadBalancers(ctx context.Context) ([]*resources.Re
 	}
 
 	var rs []*resources.Resource
-	for i := range loadBalancers {
-		lb := &loadBalancers[i]
+	for _, lb := range loadBalancers {
 		if !g.isOwnedByCluster(lb.Tags) {
 			continue
 		}
-		rs = append(rs, g.toLoadBalancerResource(lb))
+		r, err := g.toLoadBalancerResource(lb)
+		if err != nil {
+			return nil, err
+		}
+		rs = append(rs, r)
 	}
 	return rs, nil
 }
 
-func (g *resourceGetter) toLoadBalancerResource(loadBalancer *network.LoadBalancer) *resources.Resource {
+func (g *resourceGetter) toLoadBalancerResource(loadBalancer *network.LoadBalancer) (*resources.Resource, error) {
+	var blocks []string
+	blocks = append(blocks, toKey(typeResourceGroup, g.resourceGroupID()))
+
+	pips := set.New[string]()
+	if loadBalancer.Properties != nil {
+		for _, fip := range loadBalancer.Properties.FrontendIPConfigurations {
+			if fip.Properties == nil || fip.Properties.PublicIPAddress == nil {
+				continue
+			}
+			pips.Insert(*fip.Properties.PublicIPAddress.ID)
+		}
+	}
+	for pip := range pips {
+		blocks = append(blocks, toKey(typePublicIPAddress, pip))
+	}
+
 	return &resources.Resource{
 		Obj:     loadBalancer,
 		Type:    typeLoadBalancer,
-		ID:      *loadBalancer.Name,
+		ID:      *loadBalancer.ID,
 		Name:    *loadBalancer.Name,
 		Deleter: g.deleteLoadBalancer,
-		Blocks:  []string{toKey(typeResourceGroup, g.resourceGroupName())},
-	}
+		Blocks:  blocks,
+		Dumper:  DumpLoadBalancer,
+	}, nil
 }
 
 func (g *resourceGetter) deleteLoadBalancer(_ fi.Cloud, r *resources.Resource) error {
@@ -441,12 +707,11 @@ func (g *resourceGetter) listPublicIPAddresses(ctx context.Context) ([]*resource
 	}
 
 	var rs []*resources.Resource
-	for i := range publicIPAddresses {
-		p := &publicIPAddresses[i]
-		if !g.isOwnedByCluster(p.Tags) {
+	for _, pip := range publicIPAddresses {
+		if !g.isOwnedByCluster(pip.Tags) {
 			continue
 		}
-		rs = append(rs, g.toPublicIPAddressResource(p))
+		rs = append(rs, g.toPublicIPAddressResource(pip))
 	}
 	return rs, nil
 }
@@ -455,10 +720,10 @@ func (g *resourceGetter) toPublicIPAddressResource(publicIPAddress *network.Publ
 	return &resources.Resource{
 		Obj:     publicIPAddress,
 		Type:    typePublicIPAddress,
-		ID:      *publicIPAddress.Name,
+		ID:      *publicIPAddress.ID,
 		Name:    *publicIPAddress.Name,
 		Deleter: g.deletePublicIPAddress,
-		Blocks:  []string{toKey(typeResourceGroup, g.resourceGroupName())},
+		Blocks:  []string{toKey(typeResourceGroup, g.resourceGroupID())},
 	}
 }
 
@@ -466,10 +731,58 @@ func (g *resourceGetter) deletePublicIPAddress(_ fi.Cloud, r *resources.Resource
 	return g.cloud.PublicIPAddress().Delete(context.TODO(), g.resourceGroupName(), r.Name)
 }
 
+func (g *resourceGetter) listNatGateways(ctx context.Context) ([]*resources.Resource, error) {
+	natGateways, err := g.cloud.NatGateway().List(ctx, g.resourceGroupName())
+	if err != nil {
+		return nil, err
+	}
+
+	var rs []*resources.Resource
+	for _, ngw := range natGateways {
+		if !g.isOwnedByCluster(ngw.Tags) {
+			continue
+		}
+		r, err := g.toNatGatewayResource(ngw)
+		if err != nil {
+			return nil, err
+		}
+		rs = append(rs, r)
+	}
+	return rs, nil
+}
+
+func (g *resourceGetter) toNatGatewayResource(natGateway *network.NatGateway) (*resources.Resource, error) {
+	var blocks []string
+	blocks = append(blocks, toKey(typeResourceGroup, g.resourceGroupID()))
+
+	pips := set.New[string]()
+	if natGateway.Properties != nil && natGateway.Properties.PublicIPAddresses != nil {
+		for _, pip := range natGateway.Properties.PublicIPAddresses {
+			pips.Insert(*pip.ID)
+		}
+	}
+	for pip := range pips {
+		blocks = append(blocks, toKey(typePublicIPAddress, pip))
+	}
+
+	return &resources.Resource{
+		Obj:     natGateway,
+		Type:    typeNatGateway,
+		ID:      *natGateway.ID,
+		Name:    *natGateway.Name,
+		Deleter: g.deleteNatGateway,
+		Blocks:  blocks,
+	}, nil
+}
+
+func (g *resourceGetter) deleteNatGateway(_ fi.Cloud, r *resources.Resource) error {
+	return g.cloud.NatGateway().Delete(context.TODO(), g.resourceGroupName(), r.Name)
+}
+
 // isOwnedByCluster returns true if the resource is owned by the cluster.
 func (g *resourceGetter) isOwnedByCluster(tags map[string]*string) bool {
 	for k, v := range tags {
-		if k == azure.TagClusterName && *v == g.cluster.Name {
+		if k == azure.TagClusterName && *v == g.clusterInfo.Name {
 			return true
 		}
 	}
@@ -477,5 +790,5 @@ func (g *resourceGetter) isOwnedByCluster(tags map[string]*string) bool {
 }
 
 func toKey(rtype, id string) string {
-	return rtype + ":" + id
+	return rtype + ":" + strings.ToLower(id)
 }

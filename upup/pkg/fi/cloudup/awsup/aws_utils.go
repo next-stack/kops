@@ -17,50 +17,33 @@ limitations under the License.
 package awsup
 
 import (
-	"encoding/base32"
+	"context"
+	"errors"
 	"fmt"
-	"hash/fnv"
 	"os"
 	"strings"
 	"sync"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/arn"
-	"github.com/aws/aws-sdk-go/aws/awserr"
-	"github.com/aws/aws-sdk-go/aws/endpoints"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/autoscaling"
-	"github.com/aws/aws-sdk-go/service/ec2"
-	"github.com/aws/aws-sdk-go/service/elb"
-	elbv2 "github.com/aws/aws-sdk-go/service/elbv2"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/arn"
+	autoscalingtypes "github.com/aws/aws-sdk-go-v2/service/autoscaling/types"
+	ec2 "github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	elbtypes "github.com/aws/aws-sdk-go-v2/service/elasticloadbalancing/types"
+	elbv2types "github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2/types"
+	iamtypes "github.com/aws/aws-sdk-go-v2/service/iam/types"
+	"github.com/aws/smithy-go"
 	"k8s.io/klog/v2"
 	"k8s.io/kops/pkg/apis/kops"
+	"k8s.io/kops/pkg/truncate"
 )
 
 // allRegions is the list of all regions; tests will set the values
-var allRegions []*ec2.Region
+var allRegions []ec2types.Region
 var allRegionsMutex sync.Mutex
 
-// isRegionCompiledInToAWSSDK checks if the specified region is in the AWS SDK
-func isRegionCompiledInToAWSSDK(region string) bool {
-	resolver := endpoints.DefaultResolver()
-	partitions := resolver.(endpoints.EnumPartitions).Partitions()
-	for _, p := range partitions {
-		for _, r := range p.Regions() {
-			if r.ID() == region {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // ValidateRegion checks that an AWS region name is valid
-func ValidateRegion(region string) error {
-	if isRegionCompiledInToAWSSDK(region) {
-		return nil
-	}
-
+func ValidateRegion(ctx context.Context, region string) error {
 	allRegionsMutex.Lock()
 	defer allRegionsMutex.Unlock()
 
@@ -72,20 +55,18 @@ func ValidateRegion(region string) error {
 		if awsRegion == "" {
 			awsRegion = "us-east-1"
 		}
-		config := aws.NewConfig().WithRegion(awsRegion)
-		config = config.WithCredentialsChainVerboseErrors(true)
+		cfg, err := loadAWSConfig(ctx, awsRegion)
+		if err != nil {
+			return fmt.Errorf("error loading AWS config: %v", err)
+		}
 
-		sess, err := session.NewSessionWithOptions(session.Options{
-			Config:            *config,
-			SharedConfigState: session.SharedConfigEnable,
-		})
 		if err != nil {
 			return fmt.Errorf("error starting a new AWS session: %v", err)
 		}
 
-		client := ec2.New(sess, config)
+		client := ec2.NewFromConfig(cfg)
 
-		response, err := client.DescribeRegions(request)
+		response, err := client.DescribeRegions(ctx, request)
 		if err != nil {
 			return fmt.Errorf("got an error while querying for valid regions (verify your AWS credentials?): %v", err)
 		}
@@ -93,7 +74,7 @@ func ValidateRegion(region string) error {
 	}
 
 	for _, r := range allRegions {
-		name := aws.StringValue(r.RegionName)
+		name := aws.ToString(r.RegionName)
 		if name == region {
 			return nil
 		}
@@ -111,13 +92,18 @@ func ValidateRegion(region string) error {
 func FindRegion(cluster *kops.Cluster) (string, error) {
 	region := ""
 
-	nodeZones := make(map[string]bool)
-	for _, subnet := range cluster.Spec.Subnets {
+	for _, subnet := range cluster.Spec.Networking.Subnets {
+		if subnet.Zone == "" {
+			// The zone of a subnet specified by ID is looked up from the cloud later.
+			if subnet.ID == "" {
+				return "", fmt.Errorf("subnet %q must specify a zone or the ID of an existing subnet", subnet.Name)
+			}
+			continue
+		}
+
 		if len(subnet.Zone) <= 2 {
 			return "", fmt.Errorf("invalid AWS zone: %q in subnet %q", subnet.Zone, subnet.Name)
 		}
-
-		nodeZones[subnet.Zone] = true
 
 		zoneRegion := subnet.Zone[:len(subnet.Zone)-1]
 		if region != "" && zoneRegion != region {
@@ -127,92 +113,111 @@ func FindRegion(cluster *kops.Cluster) (string, error) {
 		region = zoneRegion
 	}
 
+	if region == "" {
+		return "", fmt.Errorf("could not determine cluster region: no subnet specifies a zone")
+	}
+
 	return region, nil
 }
 
+// SupportsS3BootstrapEndpoint reports whether the region uses the amazonaws.com partition DNS
+// suffix hard-coded by the nodeup bootstrap script. EC2 uses the same partition suffix as S3 and
+// can be resolved without a bucket.
+func SupportsS3BootstrapEndpoint(ctx context.Context, region string) (bool, error) {
+	resolver := ec2.NewDefaultEndpointResolverV2()
+	endpoint, err := resolver.ResolveEndpoint(ctx, ec2.EndpointParameters{Region: aws.String(region)})
+	if err != nil {
+		return false, fmt.Errorf("resolving EC2 endpoint for region %q: %w", region, err)
+	}
+
+	return endpoint.URI.Hostname() == fmt.Sprintf("ec2.%s.amazonaws.com", region), nil
+}
+
 // FindEC2Tag find the value of the tag with the specified key
-func FindEC2Tag(tags []*ec2.Tag, key string) (string, bool) {
+func FindEC2Tag(tags []ec2types.Tag, key string) (string, bool) {
 	for _, tag := range tags {
-		if key == aws.StringValue(tag.Key) {
-			return aws.StringValue(tag.Value), true
+		if key == aws.ToString(tag.Key) {
+			return aws.ToString(tag.Value), true
 		}
 	}
 	return "", false
 }
 
 // FindASGTag find the value of the tag with the specified key
-func FindASGTag(tags []*autoscaling.TagDescription, key string) (string, bool) {
+func FindASGTag(tags []autoscalingtypes.TagDescription, key string) (string, bool) {
 	for _, tag := range tags {
-		if key == aws.StringValue(tag.Key) {
-			return aws.StringValue(tag.Value), true
+		if key == aws.ToString(tag.Key) {
+			return aws.ToString(tag.Value), true
 		}
 	}
 	return "", false
 }
 
 // FindELBTag find the value of the tag with the specified key
-func FindELBTag(tags []*elb.Tag, key string) (string, bool) {
+func FindELBTag(tags []elbtypes.Tag, key string) (string, bool) {
 	for _, tag := range tags {
-		if key == aws.StringValue(tag.Key) {
-			return aws.StringValue(tag.Value), true
+		if key == aws.ToString(tag.Key) {
+			return aws.ToString(tag.Value), true
 		}
 	}
 	return "", false
 }
 
 // FindELBV2Tag find the value of the tag with the specified key
-func FindELBV2Tag(tags []*elbv2.Tag, key string) (string, bool) {
+func FindELBV2Tag(tags []elbv2types.Tag, key string) (string, bool) {
 	for _, tag := range tags {
-		if key == aws.StringValue(tag.Key) {
-			return aws.StringValue(tag.Value), true
+		if key == aws.ToString(tag.Key) {
+			return aws.ToString(tag.Value), true
 		}
 	}
 	return "", false
 }
 
-// AWSErrorCode returns the aws error code, if it is an awserr.Error, otherwise ""
+// AWSErrorCode returns the aws error code, if it is an awserr.Error or smithy.APIError, otherwise ""
 func AWSErrorCode(err error) string {
-	if awsError, ok := err.(awserr.Error); ok {
-		return awsError.Code()
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.ErrorCode()
 	}
 	return ""
 }
 
-// AWSErrorMessage returns the aws error message, if it is an awserr.Error, otherwise ""
+// AWSErrorMessage returns the aws error message, if it is an awserr.Error or smithy.APIError, otherwise ""
 func AWSErrorMessage(err error) string {
-	if awsError, ok := err.(awserr.Error); ok {
-		return awsError.Message()
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.ErrorMessage()
 	}
 	return ""
 }
 
 // EC2TagSpecification converts a map of tags to an EC2 TagSpecification
-func EC2TagSpecification(resourceType string, tags map[string]string) []*ec2.TagSpecification {
+func EC2TagSpecification(resourceType ec2types.ResourceType, tags map[string]string) []ec2types.TagSpecification {
 	if len(tags) == 0 {
 		return nil
 	}
-	specification := &ec2.TagSpecification{
-		ResourceType: aws.String(resourceType),
-		Tags:         make([]*ec2.Tag, 0),
+	specification := ec2types.TagSpecification{
+		ResourceType: resourceType,
+		Tags:         make([]ec2types.Tag, 0),
 	}
 	for k, v := range tags {
-		specification.Tags = append(specification.Tags, &ec2.Tag{
+		specification.Tags = append(specification.Tags, ec2types.Tag{
 			Key:   aws.String(k),
 			Value: aws.String(v),
 		})
 	}
 
-	return []*ec2.TagSpecification{specification}
+	return []ec2types.TagSpecification{specification}
 }
 
 // ELBv2Tags converts a map of tags to ELBv2 Tags
-func ELBv2Tags(tags map[string]string) []*elbv2.Tag {
+func ELBv2Tags(tags map[string]string) []elbv2types.Tag {
 	if len(tags) == 0 {
 		return nil
 	}
-	elbv2Tags := make([]*elbv2.Tag, 0)
+	elbv2Tags := make([]elbv2types.Tag, 0)
 	for k, v := range tags {
-		elbv2Tags = append(elbv2Tags, &elbv2.Tag{
+		elbv2Tags = append(elbv2Tags, elbv2types.Tag{
 			Key:   aws.String(k),
 			Value: aws.String(v),
 		})
@@ -223,7 +228,7 @@ func ELBv2Tags(tags map[string]string) []*elbv2.Tag {
 
 // GetClusterName40 will attempt to calculate a meaningful cluster name with a max length of 40
 func GetClusterName40(cluster string) string {
-	return TruncateString(cluster, TruncateStringOptions{
+	return truncate.TruncateString(cluster, truncate.TruncateStringOptions{
 		MaxLength: 40,
 	})
 }
@@ -231,67 +236,19 @@ func GetClusterName40(cluster string) string {
 // GetResourceName32 will attempt to calculate a meaningful name for a resource given a prefix
 // Will never return a string longer than 32 chars
 func GetResourceName32(cluster string, prefix string) string {
-	s := prefix + "-" + strings.Replace(cluster, ".", "-", -1)
+	s := prefix + "-" + strings.ReplaceAll(cluster, ".", "-")
 
 	// We always compute the hash and add it, lest we trick users into assuming that we never do this
-	opt := TruncateStringOptions{
+	opt := truncate.TruncateStringOptions{
 		MaxLength:     32,
 		AlwaysAddHash: true,
 		HashLength:    6,
 	}
-	return TruncateString(s, opt)
+	return truncate.TruncateString(s, opt)
 }
 
-// TruncateStringOptions contains parameters for how we truncate strings
-type TruncateStringOptions struct {
-	// AlwaysAddHash will always cause the hash to be appended.
-	// Useful to stop users assuming that the name will never be truncated.
-	AlwaysAddHash bool
-
-	// MaxLength controls the maximum length of the string.
-	MaxLength int
-
-	// HashLength controls the length of the hash to be appended.
-	HashLength int
-}
-
-// TruncateString will attempt to truncate a string to a max, adding a prefix to avoid collisions.
-// Will never return a string longer than maxLength chars
-func TruncateString(s string, opt TruncateStringOptions) string {
-	if opt.MaxLength == 0 {
-		klog.Fatalf("MaxLength must be set")
-	}
-
-	if !opt.AlwaysAddHash && len(s) <= opt.MaxLength {
-		return s
-	}
-
-	if opt.HashLength == 0 {
-		opt.HashLength = 6
-	}
-
-	// We always compute the hash and add it, lest we trick users into assuming that we never do this
-	h := fnv.New32a()
-	if _, err := h.Write([]byte(s)); err != nil {
-		klog.Fatalf("error hashing values: %v", err)
-	}
-	hashString := base32.HexEncoding.EncodeToString(h.Sum(nil))
-	hashString = strings.ToLower(hashString)
-	if len(hashString) > opt.HashLength {
-		hashString = hashString[:opt.HashLength]
-	}
-
-	maxBaseLength := opt.MaxLength - len(hashString) - 1
-	if len(s) > maxBaseLength {
-		s = s[:maxBaseLength]
-	}
-	s = s + "-" + hashString
-
-	return s
-}
-
-// GetTargetGroupNameFromARN will attempt to parse a target group ARN and return its name
-func GetTargetGroupNameFromARN(targetGroupARN string) (string, error) {
+// NameForExternalTargetGroup will attempt to calculate a meaningful name for a target group given an ARN.
+func NameForExternalTargetGroup(targetGroupARN string) (string, error) {
 	parsed, err := arn.Parse(targetGroupARN)
 	if err != nil {
 		return "", fmt.Errorf("error parsing target group ARN: %v", err)
@@ -301,4 +258,12 @@ func GetTargetGroupNameFromARN(targetGroupARN string) (string, error) {
 		return "", fmt.Errorf("error parsing target group ARN resource: %q", parsed.Resource)
 	}
 	return resource[1], nil
+}
+
+func IsIAMNoSuchEntityException(err error) bool {
+	if err == nil {
+		return false
+	}
+	var nse *iamtypes.NoSuchEntityException
+	return errors.As(err, &nse)
 }

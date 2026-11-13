@@ -18,6 +18,7 @@ package model
 
 import (
 	"fmt"
+	"net"
 	"strings"
 
 	"k8s.io/kops/pkg/apis/kops"
@@ -31,10 +32,10 @@ type SysctlBuilder struct {
 	*NodeupModelContext
 }
 
-var _ fi.ModelBuilder = &SysctlBuilder{}
+var _ fi.NodeupModelBuilder = &SysctlBuilder{}
 
 // Build is responsible for configuring sysctl settings
-func (b *SysctlBuilder) Build(c *fi.ModelBuilderContext) error {
+func (b *SysctlBuilder) Build(c *fi.NodeupModelBuilderContext) error {
 	var sysctls []string
 
 	// Common settings
@@ -43,9 +44,9 @@ func (b *SysctlBuilder) Build(c *fi.ModelBuilderContext) error {
 			"# Kubernetes Settings",
 			"")
 
-		// A higher vm.max_map_count is great for elasticsearch, mongo, or other mmap users
+		// A higher vm.max_map_count is great for elasticsearch, mongo, arangodb or other mmap users
 		// See https://github.com/kubernetes/kops/issues/1340
-		sysctls = append(sysctls, "vm.max_map_count = 262144",
+		sysctls = append(sysctls, "vm.max_map_count = 1048576",
 			"")
 
 		// See https://github.com/kubernetes/kubernetes/pull/38001
@@ -55,7 +56,7 @@ func (b *SysctlBuilder) Build(c *fi.ModelBuilderContext) error {
 			"")
 
 		// See https://github.com/kubernetes/kops/issues/6342
-		portRange := b.Cluster.Spec.KubeAPIServer.ServiceNodePortRange
+		portRange := b.NodeupConfig.ServiceNodePortRange
 		if portRange == "" {
 			portRange = "30000-32767" // Default kube-apiserver ServiceNodePortRange
 		}
@@ -110,11 +111,10 @@ func (b *SysctlBuilder) Build(c *fi.ModelBuilderContext) error {
 			"fs.file-max = 2097152",
 			"",
 
-			"# Max number of inotify instances and watches for a user",
+			"# Max number of inotify instances for a user",
 			"# Since dockerd runs as a single user, the default instances value of 128 per user is too low",
 			"# e.g. uses of inotify: nginx ingress controller, kubectl logs -f",
 			"fs.inotify.max_user_instances = 8192",
-			"fs.inotify.max_user_watches = 524288",
 
 			"# Additional sysctl flags that kubelet expects",
 			"vm.overcommit_memory = 1",
@@ -124,24 +124,7 @@ func (b *SysctlBuilder) Build(c *fi.ModelBuilderContext) error {
 		)
 	}
 
-	// Running Flannel on CentOS7 / rhel7 needs custom settings
-	if b.Cluster.Spec.Networking.Flannel != nil {
-		proxyMode := b.Cluster.Spec.KubeProxy.ProxyMode
-		if proxyMode == "" {
-			proxyMode = "iptables"
-		}
-
-		if proxyMode == "iptables" && (b.Distribution == distributions.DistributionCentos7 || b.Distribution == distributions.DistributionRhel7) {
-			sysctls = append(sysctls,
-				"# Flannel settings on CentOS 7",
-				"# Issue https://github.com/coreos/flannel/issues/902",
-				"net.bridge.bridge-nf-call-ip6tables=1",
-				"net.bridge.bridge-nf-call-iptables=1",
-				"")
-		}
-	}
-
-	if b.Cluster.Spec.CloudProvider == string(kops.CloudProviderAWS) {
+	if b.CloudProvider() == kops.CloudProviderAWS {
 		sysctls = append(sysctls,
 			"# AWS settings",
 			"",
@@ -150,7 +133,24 @@ func (b *SysctlBuilder) Build(c *fi.ModelBuilderContext) error {
 			"")
 	}
 
-	if b.Cluster.Spec.IsIPv6Only() {
+	if b.IsIPv6Only() {
+		if b.Distribution == distributions.DistributionDebian11 {
+			// Accepting Router Advertisements must be enabled for each existing network interface to take effect.
+			// net.ipv6.conf.all.accept_ra takes effect only for newly created network interfaces.
+			// https://bugzilla.kernel.org/show_bug.cgi?id=11655
+			sysctls = append(sysctls, "# Enable Router Advertisements to get the default IPv6 route")
+			ifaces, err := net.Interfaces()
+			if err != nil {
+				return err
+			}
+			for _, iface := range ifaces {
+				// Accept Router Advertisements for ethernet network interfaces with slot position.
+				// https://www.freedesktop.org/software/systemd/man/systemd.net-naming-scheme.html
+				if strings.HasPrefix(iface.Name, "ens") {
+					sysctls = append(sysctls, fmt.Sprintf("net.ipv6.conf.%s.accept_ra=2", iface.Name))
+				}
+			}
+		}
 		sysctls = append(sysctls,
 			"# Enable IPv6 forwarding for network plugins that don't do it themselves",
 			"net.ipv6.conf.all.forwarding=1",
@@ -162,29 +162,17 @@ func (b *SysctlBuilder) Build(c *fi.ModelBuilderContext) error {
 			"")
 	}
 
-	if params := b.NodeupConfig.SysctlParameters; len(params) > 0 {
+	if b.NodeupConfig.Networking.Cilium != nil {
 		sysctls = append(sysctls,
-			"# Custom sysctl parameters from instance group spec",
+			"# Depending on systemd version, cloud and distro, rp_filters may be enabled.",
+			"# Cilium requires this to be disabled. See https://github.com/cilium/cilium/issues/10645",
+			"net.ipv4.conf.all.rp_filter=0",
+			"net.ipv4.conf.lxc*.rp_filter=0",
+			"net.ipv4.conf.cilium_*.rp_filter=0",
 			"")
-		for _, param := range params {
-			if !strings.ContainsRune(param, '=') {
-				return fmt.Errorf("Invalid SysctlParameter: expected %q to contain '='", param)
-			}
-			sysctls = append(sysctls, param)
-		}
 	}
 
-	if params := b.Cluster.Spec.SysctlParameters; len(params) > 0 {
-		sysctls = append(sysctls,
-			"# Custom sysctl parameters from cluster spec",
-			"")
-		for _, param := range params {
-			if !strings.ContainsRune(param, '=') {
-				return fmt.Errorf("Invalid SysctlParameter: expected %q to contain '='", param)
-			}
-			sysctls = append(sysctls, param)
-		}
-	}
+	sysctls = append(sysctls, b.NodeupConfig.SysctlParameters...)
 
 	c.AddTask(&nodetasks.File{
 		Path:            "/etc/sysctl.d/99-k8s-general.conf",

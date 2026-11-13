@@ -17,7 +17,10 @@ locals {
   subnet_ids                    = ["subnet-12345678", "subnet-abcdef"]
   subnet_us-test-1a_id          = "subnet-12345678"
   subnet_utility-us-test-1a_id  = "subnet-abcdef"
+  vpc_cidr_block                = data.aws_vpc.private-shared-subnet-example-com.cidr_block
   vpc_id                        = "vpc-12345678"
+  vpc_ipv6_cidr_block           = element(concat([for a in data.aws_vpc.private-shared-subnet-example-com.ipv6_cidr_block_associations : a.ipv6_cidr_block if a.state == "associated"], [""]), 0)
+  vpc_ipv6_cidr_length          = local.vpc_ipv6_cidr_block == "" ? null : tonumber(regex(".*/(\\d+)", local.vpc_ipv6_cidr_block)[0])
 }
 
 output "bastion_autoscaling_group_ids" {
@@ -92,8 +95,20 @@ output "subnet_utility-us-test-1a_id" {
   value = "subnet-abcdef"
 }
 
+output "vpc_cidr_block" {
+  value = data.aws_vpc.private-shared-subnet-example-com.cidr_block
+}
+
 output "vpc_id" {
   value = "vpc-12345678"
+}
+
+output "vpc_ipv6_cidr_block" {
+  value = element(concat([for a in data.aws_vpc.private-shared-subnet-example-com.ipv6_cidr_block_associations : a.ipv6_cidr_block if a.state == "associated"], [""]), 0)
+}
+
+output "vpc_ipv6_cidr_length" {
+  value = local.vpc_ipv6_cidr_block == "" ? null : tonumber(regex(".*/(\\d+)", local.vpc_ipv6_cidr_block)[0])
 }
 
 provider "aws" {
@@ -111,7 +126,7 @@ resource "aws_autoscaling_group" "bastion-private-shared-subnet-example-com" {
     id      = aws_launch_template.bastion-private-shared-subnet-example-com.id
     version = aws_launch_template.bastion-private-shared-subnet-example-com.latest_version
   }
-  load_balancers        = [aws_elb.bastion-private-shared-subnet-example-com.id]
+  max_instance_lifetime = 0
   max_size              = 1
   metrics_granularity   = "1Minute"
   min_size              = 1
@@ -128,12 +143,7 @@ resource "aws_autoscaling_group" "bastion-private-shared-subnet-example-com" {
     value               = "bastion.private-shared-subnet.example.com"
   }
   tag {
-    key                 = "k8s.io/cluster-autoscaler/node-template/label/kubernetes.io/role"
-    propagate_at_launch = true
-    value               = "node"
-  }
-  tag {
-    key                 = "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/node"
+    key                 = "aws-node-termination-handler/managed"
     propagate_at_launch = true
     value               = ""
   }
@@ -152,6 +162,7 @@ resource "aws_autoscaling_group" "bastion-private-shared-subnet-example-com" {
     propagate_at_launch = true
     value               = "owned"
   }
+  target_group_arns   = [aws_lb_target_group.bastion-private-shared-su-5ol32q.id]
   vpc_zone_identifier = ["subnet-abcdef"]
 }
 
@@ -161,7 +172,7 @@ resource "aws_autoscaling_group" "master-us-test-1a-masters-private-shared-subne
     id      = aws_launch_template.master-us-test-1a-masters-private-shared-subnet-example-com.id
     version = aws_launch_template.master-us-test-1a-masters-private-shared-subnet-example-com.latest_version
   }
-  load_balancers        = [aws_elb.api-private-shared-subnet-example-com.id]
+  max_instance_lifetime = 0
   max_size              = 1
   metrics_granularity   = "1Minute"
   min_size              = 1
@@ -178,14 +189,14 @@ resource "aws_autoscaling_group" "master-us-test-1a-masters-private-shared-subne
     value               = "master-us-test-1a.masters.private-shared-subnet.example.com"
   }
   tag {
-    key                 = "k8s.io/cluster-autoscaler/node-template/label/kops.k8s.io/kops-controller-pki"
+    key                 = "aws-node-termination-handler/managed"
     propagate_at_launch = true
     value               = ""
   }
   tag {
-    key                 = "k8s.io/cluster-autoscaler/node-template/label/kubernetes.io/role"
+    key                 = "k8s.io/cluster-autoscaler/node-template/label/kops.k8s.io/kops-controller-pki"
     propagate_at_launch = true
-    value               = "master"
+    value               = ""
   }
   tag {
     key                 = "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/control-plane"
@@ -193,14 +204,14 @@ resource "aws_autoscaling_group" "master-us-test-1a-masters-private-shared-subne
     value               = ""
   }
   tag {
-    key                 = "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/master"
+    key                 = "k8s.io/cluster-autoscaler/node-template/label/node.kubernetes.io/exclude-from-external-load-balancers"
     propagate_at_launch = true
     value               = ""
   }
   tag {
-    key                 = "k8s.io/cluster-autoscaler/node-template/label/node.kubernetes.io/exclude-from-external-load-balancers"
+    key                 = "k8s.io/role/control-plane"
     propagate_at_launch = true
-    value               = ""
+    value               = "1"
   }
   tag {
     key                 = "k8s.io/role/master"
@@ -217,6 +228,7 @@ resource "aws_autoscaling_group" "master-us-test-1a-masters-private-shared-subne
     propagate_at_launch = true
     value               = "owned"
   }
+  target_group_arns   = [aws_lb_target_group.tcp-private-shared-subnet-ou2df6.id]
   vpc_zone_identifier = ["subnet-12345678"]
 }
 
@@ -226,6 +238,7 @@ resource "aws_autoscaling_group" "nodes-private-shared-subnet-example-com" {
     id      = aws_launch_template.nodes-private-shared-subnet-example-com.id
     version = aws_launch_template.nodes-private-shared-subnet-example-com.latest_version
   }
+  max_instance_lifetime = 0
   max_size              = 2
   metrics_granularity   = "1Minute"
   min_size              = 2
@@ -242,9 +255,9 @@ resource "aws_autoscaling_group" "nodes-private-shared-subnet-example-com" {
     value               = "nodes.private-shared-subnet.example.com"
   }
   tag {
-    key                 = "k8s.io/cluster-autoscaler/node-template/label/kubernetes.io/role"
+    key                 = "aws-node-termination-handler/managed"
     propagate_at_launch = true
-    value               = "node"
+    value               = ""
   }
   tag {
     key                 = "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/node"
@@ -269,6 +282,90 @@ resource "aws_autoscaling_group" "nodes-private-shared-subnet-example-com" {
   vpc_zone_identifier = ["subnet-12345678"]
 }
 
+resource "aws_autoscaling_lifecycle_hook" "bastion-NTHLifecycleHook" {
+  autoscaling_group_name = aws_autoscaling_group.bastion-private-shared-subnet-example-com.id
+  default_result         = "CONTINUE"
+  heartbeat_timeout      = 300
+  lifecycle_transition   = "autoscaling:EC2_INSTANCE_TERMINATING"
+  name                   = "bastion-NTHLifecycleHook"
+}
+
+resource "aws_autoscaling_lifecycle_hook" "master-us-test-1a-NTHLifecycleHook" {
+  autoscaling_group_name = aws_autoscaling_group.master-us-test-1a-masters-private-shared-subnet-example-com.id
+  default_result         = "CONTINUE"
+  heartbeat_timeout      = 300
+  lifecycle_transition   = "autoscaling:EC2_INSTANCE_TERMINATING"
+  name                   = "master-us-test-1a-NTHLifecycleHook"
+}
+
+resource "aws_autoscaling_lifecycle_hook" "nodes-NTHLifecycleHook" {
+  autoscaling_group_name = aws_autoscaling_group.nodes-private-shared-subnet-example-com.id
+  default_result         = "CONTINUE"
+  heartbeat_timeout      = 300
+  lifecycle_transition   = "autoscaling:EC2_INSTANCE_TERMINATING"
+  name                   = "nodes-NTHLifecycleHook"
+}
+
+resource "aws_cloudwatch_event_rule" "private-shared-subnet-example-com-ASGLifecycle" {
+  event_pattern = file("${path.module}/data/aws_cloudwatch_event_rule_private-shared-subnet.example.com-ASGLifecycle_event_pattern")
+  name          = "private-shared-subnet.example.com-ASGLifecycle"
+  tags = {
+    "KubernetesCluster"                                       = "private-shared-subnet.example.com"
+    "Name"                                                    = "private-shared-subnet.example.com-ASGLifecycle"
+    "kubernetes.io/cluster/private-shared-subnet.example.com" = "owned"
+  }
+}
+
+resource "aws_cloudwatch_event_rule" "private-shared-subnet-example-com-InstanceScheduledChange" {
+  event_pattern = file("${path.module}/data/aws_cloudwatch_event_rule_private-shared-subnet.example.com-InstanceScheduledChange_event_pattern")
+  name          = "private-shared-subnet.example.com-InstanceScheduledChange"
+  tags = {
+    "KubernetesCluster"                                       = "private-shared-subnet.example.com"
+    "Name"                                                    = "private-shared-subnet.example.com-InstanceScheduledChange"
+    "kubernetes.io/cluster/private-shared-subnet.example.com" = "owned"
+  }
+}
+
+resource "aws_cloudwatch_event_rule" "private-shared-subnet-example-com-InstanceStateChange" {
+  event_pattern = file("${path.module}/data/aws_cloudwatch_event_rule_private-shared-subnet.example.com-InstanceStateChange_event_pattern")
+  name          = "private-shared-subnet.example.com-InstanceStateChange"
+  tags = {
+    "KubernetesCluster"                                       = "private-shared-subnet.example.com"
+    "Name"                                                    = "private-shared-subnet.example.com-InstanceStateChange"
+    "kubernetes.io/cluster/private-shared-subnet.example.com" = "owned"
+  }
+}
+
+resource "aws_cloudwatch_event_rule" "private-shared-subnet-example-com-SpotInterruption" {
+  event_pattern = file("${path.module}/data/aws_cloudwatch_event_rule_private-shared-subnet.example.com-SpotInterruption_event_pattern")
+  name          = "private-shared-subnet.example.com-SpotInterruption"
+  tags = {
+    "KubernetesCluster"                                       = "private-shared-subnet.example.com"
+    "Name"                                                    = "private-shared-subnet.example.com-SpotInterruption"
+    "kubernetes.io/cluster/private-shared-subnet.example.com" = "owned"
+  }
+}
+
+resource "aws_cloudwatch_event_target" "private-shared-subnet-example-com-ASGLifecycle-Target" {
+  arn  = aws_sqs_queue.private-shared-subnet-example-com-nth.arn
+  rule = aws_cloudwatch_event_rule.private-shared-subnet-example-com-ASGLifecycle.id
+}
+
+resource "aws_cloudwatch_event_target" "private-shared-subnet-example-com-InstanceScheduledChange-Target" {
+  arn  = aws_sqs_queue.private-shared-subnet-example-com-nth.arn
+  rule = aws_cloudwatch_event_rule.private-shared-subnet-example-com-InstanceScheduledChange.id
+}
+
+resource "aws_cloudwatch_event_target" "private-shared-subnet-example-com-InstanceStateChange-Target" {
+  arn  = aws_sqs_queue.private-shared-subnet-example-com-nth.arn
+  rule = aws_cloudwatch_event_rule.private-shared-subnet-example-com-InstanceStateChange.id
+}
+
+resource "aws_cloudwatch_event_target" "private-shared-subnet-example-com-SpotInterruption-Target" {
+  arn  = aws_sqs_queue.private-shared-subnet-example-com-nth.arn
+  rule = aws_cloudwatch_event_rule.private-shared-subnet-example-com-SpotInterruption.id
+}
+
 resource "aws_ebs_volume" "us-test-1a-etcd-events-private-shared-subnet-example-com" {
   availability_zone = "us-test-1a"
   encrypted         = false
@@ -278,6 +375,7 @@ resource "aws_ebs_volume" "us-test-1a-etcd-events-private-shared-subnet-example-
     "KubernetesCluster"                                       = "private-shared-subnet.example.com"
     "Name"                                                    = "us-test-1a.etcd-events.private-shared-subnet.example.com"
     "k8s.io/etcd/events"                                      = "us-test-1a/us-test-1a"
+    "k8s.io/role/control-plane"                               = "1"
     "k8s.io/role/master"                                      = "1"
     "kubernetes.io/cluster/private-shared-subnet.example.com" = "owned"
   }
@@ -294,62 +392,12 @@ resource "aws_ebs_volume" "us-test-1a-etcd-main-private-shared-subnet-example-co
     "KubernetesCluster"                                       = "private-shared-subnet.example.com"
     "Name"                                                    = "us-test-1a.etcd-main.private-shared-subnet.example.com"
     "k8s.io/etcd/main"                                        = "us-test-1a/us-test-1a"
+    "k8s.io/role/control-plane"                               = "1"
     "k8s.io/role/master"                                      = "1"
     "kubernetes.io/cluster/private-shared-subnet.example.com" = "owned"
   }
   throughput = 125
   type       = "gp3"
-}
-
-resource "aws_elb" "api-private-shared-subnet-example-com" {
-  cross_zone_load_balancing = false
-  health_check {
-    healthy_threshold   = 2
-    interval            = 10
-    target              = "SSL:443"
-    timeout             = 5
-    unhealthy_threshold = 2
-  }
-  idle_timeout = 300
-  listener {
-    instance_port     = 443
-    instance_protocol = "TCP"
-    lb_port           = 443
-    lb_protocol       = "TCP"
-  }
-  name            = "api-private-shared-subnet-n2f8ak"
-  security_groups = [aws_security_group.api-elb-private-shared-subnet-example-com.id]
-  subnets         = ["subnet-abcdef"]
-  tags = {
-    "KubernetesCluster"                                       = "private-shared-subnet.example.com"
-    "Name"                                                    = "api.private-shared-subnet.example.com"
-    "kubernetes.io/cluster/private-shared-subnet.example.com" = "owned"
-  }
-}
-
-resource "aws_elb" "bastion-private-shared-subnet-example-com" {
-  health_check {
-    healthy_threshold   = 2
-    interval            = 10
-    target              = "TCP:22"
-    timeout             = 5
-    unhealthy_threshold = 2
-  }
-  idle_timeout = 300
-  listener {
-    instance_port     = 22
-    instance_protocol = "TCP"
-    lb_port           = 22
-    lb_protocol       = "TCP"
-  }
-  name            = "bastion-private-shared-su-5ol32q"
-  security_groups = [aws_security_group.bastion-elb-private-shared-subnet-example-com.id]
-  subnets         = ["subnet-abcdef"]
-  tags = {
-    "KubernetesCluster"                                       = "private-shared-subnet.example.com"
-    "Name"                                                    = "bastion.private-shared-subnet.example.com"
-    "kubernetes.io/cluster/private-shared-subnet.example.com" = "owned"
-  }
 }
 
 resource "aws_iam_instance_profile" "bastions-private-shared-subnet-example-com" {
@@ -412,22 +460,10 @@ resource "aws_iam_role" "nodes-private-shared-subnet-example-com" {
   }
 }
 
-resource "aws_iam_role_policy" "bastions-private-shared-subnet-example-com" {
-  name   = "bastions.private-shared-subnet.example.com"
-  policy = file("${path.module}/data/aws_iam_role_policy_bastions.private-shared-subnet.example.com_policy")
-  role   = aws_iam_role.bastions-private-shared-subnet-example-com.name
-}
-
 resource "aws_iam_role_policy" "masters-private-shared-subnet-example-com" {
   name   = "masters.private-shared-subnet.example.com"
   policy = file("${path.module}/data/aws_iam_role_policy_masters.private-shared-subnet.example.com_policy")
   role   = aws_iam_role.masters-private-shared-subnet-example-com.name
-}
-
-resource "aws_iam_role_policy" "nodes-private-shared-subnet-example-com" {
-  name   = "nodes.private-shared-subnet.example.com"
-  policy = file("${path.module}/data/aws_iam_role_policy_nodes.private-shared-subnet.example.com_policy")
-  role   = aws_iam_role.nodes-private-shared-subnet-example-com.name
 }
 
 resource "aws_key_pair" "kubernetes-private-shared-subnet-example-com-c4a6ed9aa889b9e2c39cd663eb9c7157" {
@@ -455,7 +491,7 @@ resource "aws_launch_template" "bastion-private-shared-subnet-example-com" {
   iam_instance_profile {
     name = aws_iam_instance_profile.bastions-private-shared-subnet-example-com.id
   }
-  image_id      = "ami-11400000"
+  image_id      = "ami-12345678"
   instance_type = "t2.micro"
   key_name      = aws_key_pair.kubernetes-private-shared-subnet-example-com-c4a6ed9aa889b9e2c39cd663eb9c7157.id
   lifecycle {
@@ -465,7 +501,7 @@ resource "aws_launch_template" "bastion-private-shared-subnet-example-com" {
     http_endpoint               = "enabled"
     http_protocol_ipv6          = "disabled"
     http_put_response_hop_limit = 1
-    http_tokens                 = "optional"
+    http_tokens                 = "required"
   }
   monitoring {
     enabled = false
@@ -480,35 +516,43 @@ resource "aws_launch_template" "bastion-private-shared-subnet-example-com" {
   tag_specifications {
     resource_type = "instance"
     tags = {
-      "KubernetesCluster"                                                          = "private-shared-subnet.example.com"
-      "Name"                                                                       = "bastion.private-shared-subnet.example.com"
-      "k8s.io/cluster-autoscaler/node-template/label/kubernetes.io/role"           = "node"
-      "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/node" = ""
-      "k8s.io/role/bastion"                                                        = "1"
-      "kops.k8s.io/instancegroup"                                                  = "bastion"
-      "kubernetes.io/cluster/private-shared-subnet.example.com"                    = "owned"
+      "KubernetesCluster"                                       = "private-shared-subnet.example.com"
+      "Name"                                                    = "bastion.private-shared-subnet.example.com"
+      "aws-node-termination-handler/managed"                    = ""
+      "k8s.io/role/bastion"                                     = "1"
+      "kops.k8s.io/instancegroup"                               = "bastion"
+      "kubernetes.io/cluster/private-shared-subnet.example.com" = "owned"
     }
   }
   tag_specifications {
     resource_type = "volume"
     tags = {
-      "KubernetesCluster"                                                          = "private-shared-subnet.example.com"
-      "Name"                                                                       = "bastion.private-shared-subnet.example.com"
-      "k8s.io/cluster-autoscaler/node-template/label/kubernetes.io/role"           = "node"
-      "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/node" = ""
-      "k8s.io/role/bastion"                                                        = "1"
-      "kops.k8s.io/instancegroup"                                                  = "bastion"
-      "kubernetes.io/cluster/private-shared-subnet.example.com"                    = "owned"
+      "KubernetesCluster"                                       = "private-shared-subnet.example.com"
+      "Name"                                                    = "bastion.private-shared-subnet.example.com"
+      "aws-node-termination-handler/managed"                    = ""
+      "k8s.io/role/bastion"                                     = "1"
+      "kops.k8s.io/instancegroup"                               = "bastion"
+      "kubernetes.io/cluster/private-shared-subnet.example.com" = "owned"
+    }
+  }
+  tag_specifications {
+    resource_type = "network-interface"
+    tags = {
+      "KubernetesCluster"                                       = "private-shared-subnet.example.com"
+      "Name"                                                    = "bastion.private-shared-subnet.example.com"
+      "aws-node-termination-handler/managed"                    = ""
+      "k8s.io/role/bastion"                                     = "1"
+      "kops.k8s.io/instancegroup"                               = "bastion"
+      "kubernetes.io/cluster/private-shared-subnet.example.com" = "owned"
     }
   }
   tags = {
-    "KubernetesCluster"                                                          = "private-shared-subnet.example.com"
-    "Name"                                                                       = "bastion.private-shared-subnet.example.com"
-    "k8s.io/cluster-autoscaler/node-template/label/kubernetes.io/role"           = "node"
-    "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/node" = ""
-    "k8s.io/role/bastion"                                                        = "1"
-    "kops.k8s.io/instancegroup"                                                  = "bastion"
-    "kubernetes.io/cluster/private-shared-subnet.example.com"                    = "owned"
+    "KubernetesCluster"                                       = "private-shared-subnet.example.com"
+    "Name"                                                    = "bastion.private-shared-subnet.example.com"
+    "aws-node-termination-handler/managed"                    = ""
+    "k8s.io/role/bastion"                                     = "1"
+    "kops.k8s.io/instancegroup"                               = "bastion"
+    "kubernetes.io/cluster/private-shared-subnet.example.com" = "owned"
   }
 }
 
@@ -531,7 +575,7 @@ resource "aws_launch_template" "master-us-test-1a-masters-private-shared-subnet-
   iam_instance_profile {
     name = aws_iam_instance_profile.masters-private-shared-subnet-example-com.id
   }
-  image_id      = "ami-11400000"
+  image_id      = "ami-12345678"
   instance_type = "m3.medium"
   key_name      = aws_key_pair.kubernetes-private-shared-subnet-example-com-c4a6ed9aa889b9e2c39cd663eb9c7157.id
   lifecycle {
@@ -541,7 +585,7 @@ resource "aws_launch_template" "master-us-test-1a-masters-private-shared-subnet-
     http_endpoint               = "enabled"
     http_protocol_ipv6          = "disabled"
     http_put_response_hop_limit = 1
-    http_tokens                 = "optional"
+    http_tokens                 = "required"
   }
   monitoring {
     enabled = false
@@ -558,11 +602,11 @@ resource "aws_launch_template" "master-us-test-1a-masters-private-shared-subnet-
     tags = {
       "KubernetesCluster"                                                                                     = "private-shared-subnet.example.com"
       "Name"                                                                                                  = "master-us-test-1a.masters.private-shared-subnet.example.com"
+      "aws-node-termination-handler/managed"                                                                  = ""
       "k8s.io/cluster-autoscaler/node-template/label/kops.k8s.io/kops-controller-pki"                         = ""
-      "k8s.io/cluster-autoscaler/node-template/label/kubernetes.io/role"                                      = "master"
       "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/control-plane"                   = ""
-      "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/master"                          = ""
       "k8s.io/cluster-autoscaler/node-template/label/node.kubernetes.io/exclude-from-external-load-balancers" = ""
+      "k8s.io/role/control-plane"                                                                             = "1"
       "k8s.io/role/master"                                                                                    = "1"
       "kops.k8s.io/instancegroup"                                                                             = "master-us-test-1a"
       "kubernetes.io/cluster/private-shared-subnet.example.com"                                               = "owned"
@@ -573,11 +617,26 @@ resource "aws_launch_template" "master-us-test-1a-masters-private-shared-subnet-
     tags = {
       "KubernetesCluster"                                                                                     = "private-shared-subnet.example.com"
       "Name"                                                                                                  = "master-us-test-1a.masters.private-shared-subnet.example.com"
+      "aws-node-termination-handler/managed"                                                                  = ""
       "k8s.io/cluster-autoscaler/node-template/label/kops.k8s.io/kops-controller-pki"                         = ""
-      "k8s.io/cluster-autoscaler/node-template/label/kubernetes.io/role"                                      = "master"
       "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/control-plane"                   = ""
-      "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/master"                          = ""
       "k8s.io/cluster-autoscaler/node-template/label/node.kubernetes.io/exclude-from-external-load-balancers" = ""
+      "k8s.io/role/control-plane"                                                                             = "1"
+      "k8s.io/role/master"                                                                                    = "1"
+      "kops.k8s.io/instancegroup"                                                                             = "master-us-test-1a"
+      "kubernetes.io/cluster/private-shared-subnet.example.com"                                               = "owned"
+    }
+  }
+  tag_specifications {
+    resource_type = "network-interface"
+    tags = {
+      "KubernetesCluster"                                                                                     = "private-shared-subnet.example.com"
+      "Name"                                                                                                  = "master-us-test-1a.masters.private-shared-subnet.example.com"
+      "aws-node-termination-handler/managed"                                                                  = ""
+      "k8s.io/cluster-autoscaler/node-template/label/kops.k8s.io/kops-controller-pki"                         = ""
+      "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/control-plane"                   = ""
+      "k8s.io/cluster-autoscaler/node-template/label/node.kubernetes.io/exclude-from-external-load-balancers" = ""
+      "k8s.io/role/control-plane"                                                                             = "1"
       "k8s.io/role/master"                                                                                    = "1"
       "kops.k8s.io/instancegroup"                                                                             = "master-us-test-1a"
       "kubernetes.io/cluster/private-shared-subnet.example.com"                                               = "owned"
@@ -586,11 +645,11 @@ resource "aws_launch_template" "master-us-test-1a-masters-private-shared-subnet-
   tags = {
     "KubernetesCluster"                                                                                     = "private-shared-subnet.example.com"
     "Name"                                                                                                  = "master-us-test-1a.masters.private-shared-subnet.example.com"
+    "aws-node-termination-handler/managed"                                                                  = ""
     "k8s.io/cluster-autoscaler/node-template/label/kops.k8s.io/kops-controller-pki"                         = ""
-    "k8s.io/cluster-autoscaler/node-template/label/kubernetes.io/role"                                      = "master"
     "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/control-plane"                   = ""
-    "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/master"                          = ""
     "k8s.io/cluster-autoscaler/node-template/label/node.kubernetes.io/exclude-from-external-load-balancers" = ""
+    "k8s.io/role/control-plane"                                                                             = "1"
     "k8s.io/role/master"                                                                                    = "1"
     "kops.k8s.io/instancegroup"                                                                             = "master-us-test-1a"
     "kubernetes.io/cluster/private-shared-subnet.example.com"                                               = "owned"
@@ -613,7 +672,7 @@ resource "aws_launch_template" "nodes-private-shared-subnet-example-com" {
   iam_instance_profile {
     name = aws_iam_instance_profile.nodes-private-shared-subnet-example-com.id
   }
-  image_id      = "ami-11400000"
+  image_id      = "ami-12345678"
   instance_type = "t2.medium"
   key_name      = aws_key_pair.kubernetes-private-shared-subnet-example-com-c4a6ed9aa889b9e2c39cd663eb9c7157.id
   lifecycle {
@@ -623,7 +682,7 @@ resource "aws_launch_template" "nodes-private-shared-subnet-example-com" {
     http_endpoint               = "enabled"
     http_protocol_ipv6          = "disabled"
     http_put_response_hop_limit = 1
-    http_tokens                 = "optional"
+    http_tokens                 = "required"
   }
   monitoring {
     enabled = false
@@ -640,7 +699,7 @@ resource "aws_launch_template" "nodes-private-shared-subnet-example-com" {
     tags = {
       "KubernetesCluster"                                                          = "private-shared-subnet.example.com"
       "Name"                                                                       = "nodes.private-shared-subnet.example.com"
-      "k8s.io/cluster-autoscaler/node-template/label/kubernetes.io/role"           = "node"
+      "aws-node-termination-handler/managed"                                       = ""
       "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/node" = ""
       "k8s.io/role/node"                                                           = "1"
       "kops.k8s.io/instancegroup"                                                  = "nodes"
@@ -652,7 +711,19 @@ resource "aws_launch_template" "nodes-private-shared-subnet-example-com" {
     tags = {
       "KubernetesCluster"                                                          = "private-shared-subnet.example.com"
       "Name"                                                                       = "nodes.private-shared-subnet.example.com"
-      "k8s.io/cluster-autoscaler/node-template/label/kubernetes.io/role"           = "node"
+      "aws-node-termination-handler/managed"                                       = ""
+      "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/node" = ""
+      "k8s.io/role/node"                                                           = "1"
+      "kops.k8s.io/instancegroup"                                                  = "nodes"
+      "kubernetes.io/cluster/private-shared-subnet.example.com"                    = "owned"
+    }
+  }
+  tag_specifications {
+    resource_type = "network-interface"
+    tags = {
+      "KubernetesCluster"                                                          = "private-shared-subnet.example.com"
+      "Name"                                                                       = "nodes.private-shared-subnet.example.com"
+      "aws-node-termination-handler/managed"                                       = ""
       "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/node" = ""
       "k8s.io/role/node"                                                           = "1"
       "kops.k8s.io/instancegroup"                                                  = "nodes"
@@ -662,7 +733,7 @@ resource "aws_launch_template" "nodes-private-shared-subnet-example-com" {
   tags = {
     "KubernetesCluster"                                                          = "private-shared-subnet.example.com"
     "Name"                                                                       = "nodes.private-shared-subnet.example.com"
-    "k8s.io/cluster-autoscaler/node-template/label/kubernetes.io/role"           = "node"
+    "aws-node-termination-handler/managed"                                       = ""
     "k8s.io/cluster-autoscaler/node-template/label/node-role.kubernetes.io/node" = ""
     "k8s.io/role/node"                                                           = "1"
     "kops.k8s.io/instancegroup"                                                  = "nodes"
@@ -671,148 +742,275 @@ resource "aws_launch_template" "nodes-private-shared-subnet-example-com" {
   user_data = filebase64("${path.module}/data/aws_launch_template_nodes.private-shared-subnet.example.com_user_data")
 }
 
+resource "aws_lb" "api-private-shared-subnet-example-com" {
+  enable_cross_zone_load_balancing = false
+  internal                         = false
+  load_balancer_type               = "network"
+  name                             = "api-private-shared-subnet-n2f8ak"
+  security_groups                  = [aws_security_group.api-elb-private-shared-subnet-example-com.id]
+  subnet_mapping {
+    subnet_id = "subnet-abcdef"
+  }
+  tags = {
+    "KubernetesCluster"                                       = "private-shared-subnet.example.com"
+    "Name"                                                    = "api.private-shared-subnet.example.com"
+    "kubernetes.io/cluster/private-shared-subnet.example.com" = "owned"
+  }
+}
+
+resource "aws_lb" "bastion-private-shared-subnet-example-com" {
+  enable_cross_zone_load_balancing = false
+  internal                         = false
+  load_balancer_type               = "network"
+  name                             = "bastion-private-shared-su-5ol32q"
+  security_groups                  = [aws_security_group.bastion-elb-private-shared-subnet-example-com.id]
+  subnet_mapping {
+    subnet_id = "subnet-abcdef"
+  }
+  tags = {
+    "KubernetesCluster"                                       = "private-shared-subnet.example.com"
+    "Name"                                                    = "bastion.private-shared-subnet.example.com"
+    "kubernetes.io/cluster/private-shared-subnet.example.com" = "owned"
+  }
+}
+
+resource "aws_lb_listener" "api-private-shared-subnet-example-com-443" {
+  default_action {
+    target_group_arn = aws_lb_target_group.tcp-private-shared-subnet-ou2df6.id
+    type             = "forward"
+  }
+  load_balancer_arn = aws_lb.api-private-shared-subnet-example-com.id
+  port              = 443
+  protocol          = "TCP"
+}
+
+resource "aws_lb_listener" "bastion-private-shared-subnet-example-com-22" {
+  default_action {
+    target_group_arn = aws_lb_target_group.bastion-private-shared-su-5ol32q.id
+    type             = "forward"
+  }
+  load_balancer_arn = aws_lb.bastion-private-shared-subnet-example-com.id
+  port              = 22
+  protocol          = "TCP"
+}
+
+resource "aws_lb_target_group" "bastion-private-shared-su-5ol32q" {
+  connection_termination = "true"
+  deregistration_delay   = "30"
+  health_check {
+    healthy_threshold   = 2
+    interval            = 10
+    protocol            = "TCP"
+    unhealthy_threshold = 2
+  }
+  name     = "bastion-private-shared-su-5ol32q"
+  port     = 22
+  protocol = "TCP"
+  tags = {
+    "KubernetesCluster"                                       = "private-shared-subnet.example.com"
+    "Name"                                                    = "bastion-private-shared-su-5ol32q"
+    "kubernetes.io/cluster/private-shared-subnet.example.com" = "owned"
+  }
+  vpc_id = "vpc-12345678"
+}
+
+resource "aws_lb_target_group" "tcp-private-shared-subnet-ou2df6" {
+  connection_termination = "true"
+  deregistration_delay   = "30"
+  health_check {
+    healthy_threshold   = 2
+    interval            = 10
+    protocol            = "TCP"
+    unhealthy_threshold = 2
+  }
+  name     = "tcp-private-shared-subnet-ou2df6"
+  port     = 443
+  protocol = "TCP"
+  tags = {
+    "KubernetesCluster"                                       = "private-shared-subnet.example.com"
+    "Name"                                                    = "tcp-private-shared-subnet-ou2df6"
+    "kubernetes.io/cluster/private-shared-subnet.example.com" = "owned"
+  }
+  vpc_id = "vpc-12345678"
+}
+
 resource "aws_route53_record" "api-private-shared-subnet-example-com" {
   alias {
     evaluate_target_health = false
-    name                   = aws_elb.api-private-shared-subnet-example-com.dns_name
-    zone_id                = aws_elb.api-private-shared-subnet-example-com.zone_id
+    name                   = aws_lb.api-private-shared-subnet-example-com.dns_name
+    zone_id                = aws_lb.api-private-shared-subnet-example-com.zone_id
   }
   name    = "api.private-shared-subnet.example.com"
   type    = "A"
   zone_id = "/hostedzone/Z1AFAKE1ZON3YO"
 }
 
-resource "aws_s3_bucket_object" "cluster-completed-spec" {
+resource "aws_route53_record" "api-private-shared-subnet-example-com-AAAA" {
+  alias {
+    evaluate_target_health = false
+    name                   = aws_lb.api-private-shared-subnet-example-com.dns_name
+    zone_id                = aws_lb.api-private-shared-subnet-example-com.zone_id
+  }
+  name    = "api.private-shared-subnet.example.com"
+  type    = "AAAA"
+  zone_id = "/hostedzone/Z1AFAKE1ZON3YO"
+}
+
+resource "aws_s3_object" "cluster-completed-spec" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_cluster-completed.spec_content")
+  content                = file("${path.module}/data/aws_s3_object_cluster-completed.spec_content")
   key                    = "clusters.example.com/private-shared-subnet.example.com/cluster-completed.spec"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "etcd-cluster-spec-events" {
+resource "aws_s3_object" "etcd-cluster-spec-events" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_etcd-cluster-spec-events_content")
+  content                = file("${path.module}/data/aws_s3_object_etcd-cluster-spec-events_content")
   key                    = "clusters.example.com/private-shared-subnet.example.com/backups/etcd/events/control/etcd-cluster-spec"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "etcd-cluster-spec-main" {
+resource "aws_s3_object" "etcd-cluster-spec-main" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_etcd-cluster-spec-main_content")
+  content                = file("${path.module}/data/aws_s3_object_etcd-cluster-spec-main_content")
   key                    = "clusters.example.com/private-shared-subnet.example.com/backups/etcd/main/control/etcd-cluster-spec"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "kops-version-txt" {
+resource "aws_s3_object" "kops-version-txt" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_kops-version.txt_content")
+  content                = file("${path.module}/data/aws_s3_object_kops-version.txt_content")
   key                    = "clusters.example.com/private-shared-subnet.example.com/kops-version.txt"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "manifests-etcdmanager-events" {
+resource "aws_s3_object" "manifests-channels-kops-channels" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_manifests-etcdmanager-events_content")
-  key                    = "clusters.example.com/private-shared-subnet.example.com/manifests/etcd/events.yaml"
+  content                = file("${path.module}/data/aws_s3_object_manifests-channels-kops-channels_content")
+  key                    = "clusters.example.com/private-shared-subnet.example.com/manifests/channels/kops-channels.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "manifests-etcdmanager-main" {
+resource "aws_s3_object" "manifests-etcdmanager-events-master-us-test-1a" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_manifests-etcdmanager-main_content")
-  key                    = "clusters.example.com/private-shared-subnet.example.com/manifests/etcd/main.yaml"
+  content                = file("${path.module}/data/aws_s3_object_manifests-etcdmanager-events-master-us-test-1a_content")
+  key                    = "clusters.example.com/private-shared-subnet.example.com/manifests/etcd/events-master-us-test-1a.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "manifests-static-kube-apiserver-healthcheck" {
+resource "aws_s3_object" "manifests-etcdmanager-main-master-us-test-1a" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_manifests-static-kube-apiserver-healthcheck_content")
+  content                = file("${path.module}/data/aws_s3_object_manifests-etcdmanager-main-master-us-test-1a_content")
+  key                    = "clusters.example.com/private-shared-subnet.example.com/manifests/etcd/main-master-us-test-1a.yaml"
+  provider               = aws.files
+  server_side_encryption = "AES256"
+}
+
+resource "aws_s3_object" "manifests-static-kube-apiserver-healthcheck" {
+  bucket                 = "testingBucket"
+  content                = file("${path.module}/data/aws_s3_object_manifests-static-kube-apiserver-healthcheck_content")
   key                    = "clusters.example.com/private-shared-subnet.example.com/manifests/static/kube-apiserver-healthcheck.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "nodeupconfig-master-us-test-1a" {
+resource "aws_s3_object" "nodeupconfig-master-us-test-1a" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_nodeupconfig-master-us-test-1a_content")
-  key                    = "clusters.example.com/private-shared-subnet.example.com/igconfig/master/master-us-test-1a/nodeupconfig.yaml"
+  content                = file("${path.module}/data/aws_s3_object_nodeupconfig-master-us-test-1a_content")
+  key                    = "clusters.example.com/private-shared-subnet.example.com/igconfig/control-plane/master-us-test-1a/nodeupconfig.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "nodeupconfig-nodes" {
+resource "aws_s3_object" "nodeupconfig-nodes" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_nodeupconfig-nodes_content")
+  content                = file("${path.module}/data/aws_s3_object_nodeupconfig-nodes_content")
   key                    = "clusters.example.com/private-shared-subnet.example.com/igconfig/node/nodes/nodeupconfig.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "private-shared-subnet-example-com-addons-bootstrap" {
+resource "aws_s3_object" "private-shared-subnet-example-com-addons-aws-cloud-controller-addons-k8s-io-k8s-1-18" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_private-shared-subnet.example.com-addons-bootstrap_content")
+  content                = file("${path.module}/data/aws_s3_object_private-shared-subnet.example.com-addons-aws-cloud-controller.addons.k8s.io-k8s-1.18_content")
+  key                    = "clusters.example.com/private-shared-subnet.example.com/addons/aws-cloud-controller.addons.k8s.io/k8s-1.18.yaml"
+  provider               = aws.files
+  server_side_encryption = "AES256"
+}
+
+resource "aws_s3_object" "private-shared-subnet-example-com-addons-aws-ebs-csi-driver-addons-k8s-io-k8s-1-17" {
+  bucket                 = "testingBucket"
+  content                = file("${path.module}/data/aws_s3_object_private-shared-subnet.example.com-addons-aws-ebs-csi-driver.addons.k8s.io-k8s-1.17_content")
+  key                    = "clusters.example.com/private-shared-subnet.example.com/addons/aws-ebs-csi-driver.addons.k8s.io/k8s-1.17.yaml"
+  provider               = aws.files
+  server_side_encryption = "AES256"
+}
+
+resource "aws_s3_object" "private-shared-subnet-example-com-addons-bootstrap" {
+  bucket                 = "testingBucket"
+  content                = file("${path.module}/data/aws_s3_object_private-shared-subnet.example.com-addons-bootstrap_content")
   key                    = "clusters.example.com/private-shared-subnet.example.com/addons/bootstrap-channel.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "private-shared-subnet-example-com-addons-core-addons-k8s-io" {
+resource "aws_s3_object" "private-shared-subnet-example-com-addons-coredns-addons-k8s-io-k8s-1-12" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_private-shared-subnet.example.com-addons-core.addons.k8s.io_content")
-  key                    = "clusters.example.com/private-shared-subnet.example.com/addons/core.addons.k8s.io/v1.4.0.yaml"
-  provider               = aws.files
-  server_side_encryption = "AES256"
-}
-
-resource "aws_s3_bucket_object" "private-shared-subnet-example-com-addons-coredns-addons-k8s-io-k8s-1-12" {
-  bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_private-shared-subnet.example.com-addons-coredns.addons.k8s.io-k8s-1.12_content")
+  content                = file("${path.module}/data/aws_s3_object_private-shared-subnet.example.com-addons-coredns.addons.k8s.io-k8s-1.12_content")
   key                    = "clusters.example.com/private-shared-subnet.example.com/addons/coredns.addons.k8s.io/k8s-1.12.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "private-shared-subnet-example-com-addons-dns-controller-addons-k8s-io-k8s-1-12" {
+resource "aws_s3_object" "private-shared-subnet-example-com-addons-dns-controller-addons-k8s-io-k8s-1-12" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_private-shared-subnet.example.com-addons-dns-controller.addons.k8s.io-k8s-1.12_content")
+  content                = file("${path.module}/data/aws_s3_object_private-shared-subnet.example.com-addons-dns-controller.addons.k8s.io-k8s-1.12_content")
   key                    = "clusters.example.com/private-shared-subnet.example.com/addons/dns-controller.addons.k8s.io/k8s-1.12.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "private-shared-subnet-example-com-addons-kops-controller-addons-k8s-io-k8s-1-16" {
+resource "aws_s3_object" "private-shared-subnet-example-com-addons-kops-controller-addons-k8s-io-k8s-1-16" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_private-shared-subnet.example.com-addons-kops-controller.addons.k8s.io-k8s-1.16_content")
+  content                = file("${path.module}/data/aws_s3_object_private-shared-subnet.example.com-addons-kops-controller.addons.k8s.io-k8s-1.16_content")
   key                    = "clusters.example.com/private-shared-subnet.example.com/addons/kops-controller.addons.k8s.io/k8s-1.16.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "private-shared-subnet-example-com-addons-kubelet-api-rbac-addons-k8s-io-k8s-1-9" {
+resource "aws_s3_object" "private-shared-subnet-example-com-addons-kubelet-api-rbac-addons-k8s-io-k8s-1-9" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_private-shared-subnet.example.com-addons-kubelet-api.rbac.addons.k8s.io-k8s-1.9_content")
+  content                = file("${path.module}/data/aws_s3_object_private-shared-subnet.example.com-addons-kubelet-api.rbac.addons.k8s.io-k8s-1.9_content")
   key                    = "clusters.example.com/private-shared-subnet.example.com/addons/kubelet-api.rbac.addons.k8s.io/k8s-1.9.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "private-shared-subnet-example-com-addons-limit-range-addons-k8s-io" {
+resource "aws_s3_object" "private-shared-subnet-example-com-addons-limit-range-addons-k8s-io" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_private-shared-subnet.example.com-addons-limit-range.addons.k8s.io_content")
+  content                = file("${path.module}/data/aws_s3_object_private-shared-subnet.example.com-addons-limit-range.addons.k8s.io_content")
   key                    = "clusters.example.com/private-shared-subnet.example.com/addons/limit-range.addons.k8s.io/v1.5.0.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
 }
 
-resource "aws_s3_bucket_object" "private-shared-subnet-example-com-addons-storage-aws-addons-k8s-io-v1-15-0" {
+resource "aws_s3_object" "private-shared-subnet-example-com-addons-node-termination-handler-aws-k8s-1-11" {
   bucket                 = "testingBucket"
-  content                = file("${path.module}/data/aws_s3_bucket_object_private-shared-subnet.example.com-addons-storage-aws.addons.k8s.io-v1.15.0_content")
+  content                = file("${path.module}/data/aws_s3_object_private-shared-subnet.example.com-addons-node-termination-handler.aws-k8s-1.11_content")
+  key                    = "clusters.example.com/private-shared-subnet.example.com/addons/node-termination-handler.aws/k8s-1.11.yaml"
+  provider               = aws.files
+  server_side_encryption = "AES256"
+}
+
+resource "aws_s3_object" "private-shared-subnet-example-com-addons-storage-aws-addons-k8s-io-v1-15-0" {
+  bucket                 = "testingBucket"
+  content                = file("${path.module}/data/aws_s3_object_private-shared-subnet.example.com-addons-storage-aws.addons.k8s.io-v1.15.0_content")
   key                    = "clusters.example.com/private-shared-subnet.example.com/addons/storage-aws.addons.k8s.io/v1.15.0.yaml"
   provider               = aws.files
   server_side_encryption = "AES256"
@@ -891,6 +1089,15 @@ resource "aws_security_group_rule" "from-0-0-0-0--0-ingress-tcp-443to443-api-elb
   type              = "ingress"
 }
 
+resource "aws_security_group_rule" "from-172-20-4-0--22-ingress-tcp-22to22-bastion-elb-private-shared-subnet-example-com" {
+  cidr_blocks       = ["172.20.4.0/22"]
+  from_port         = 22
+  protocol          = "tcp"
+  security_group_id = aws_security_group.bastion-elb-private-shared-subnet-example-com.id
+  to_port           = 22
+  type              = "ingress"
+}
+
 resource "aws_security_group_rule" "from-api-elb-private-shared-subnet-example-com-egress-all-0to0-0-0-0-0--0" {
   cidr_blocks       = ["0.0.0.0/0"]
   from_port         = 0
@@ -927,6 +1134,15 @@ resource "aws_security_group_rule" "from-bastion-elb-private-shared-subnet-examp
   type              = "egress"
 }
 
+resource "aws_security_group_rule" "from-bastion-elb-private-shared-subnet-example-com-ingress-icmp-3to4-bastion-private-shared-subnet-example-com" {
+  from_port                = 3
+  protocol                 = "icmp"
+  security_group_id        = aws_security_group.bastion-private-shared-subnet-example-com.id
+  source_security_group_id = aws_security_group.bastion-elb-private-shared-subnet-example-com.id
+  to_port                  = 4
+  type                     = "ingress"
+}
+
 resource "aws_security_group_rule" "from-bastion-elb-private-shared-subnet-example-com-ingress-tcp-22to22-bastion-private-shared-subnet-example-com" {
   from_port                = 22
   protocol                 = "tcp"
@@ -952,6 +1168,15 @@ resource "aws_security_group_rule" "from-bastion-private-shared-subnet-example-c
   security_group_id = aws_security_group.bastion-private-shared-subnet-example-com.id
   to_port           = 0
   type              = "egress"
+}
+
+resource "aws_security_group_rule" "from-bastion-private-shared-subnet-example-com-ingress-icmp-3to4-bastion-elb-private-shared-subnet-example-com" {
+  from_port                = 3
+  protocol                 = "icmp"
+  security_group_id        = aws_security_group.bastion-elb-private-shared-subnet-example-com.id
+  source_security_group_id = aws_security_group.bastion-private-shared-subnet-example-com.id
+  to_port                  = 4
+  type                     = "ingress"
 }
 
 resource "aws_security_group_rule" "from-bastion-private-shared-subnet-example-com-ingress-tcp-22to22-masters-private-shared-subnet-example-com" {
@@ -1089,13 +1314,64 @@ resource "aws_security_group_rule" "icmp-pmtu-api-elb-0-0-0-0--0" {
   type              = "ingress"
 }
 
+resource "aws_security_group_rule" "icmp-pmtu-cp-to-elb" {
+  from_port                = 3
+  protocol                 = "icmp"
+  security_group_id        = aws_security_group.api-elb-private-shared-subnet-example-com.id
+  source_security_group_id = aws_security_group.masters-private-shared-subnet-example-com.id
+  to_port                  = 4
+  type                     = "ingress"
+}
+
+resource "aws_security_group_rule" "icmp-pmtu-elb-to-cp" {
+  from_port                = 3
+  protocol                 = "icmp"
+  security_group_id        = aws_security_group.masters-private-shared-subnet-example-com.id
+  source_security_group_id = aws_security_group.api-elb-private-shared-subnet-example-com.id
+  to_port                  = 4
+  type                     = "ingress"
+}
+
+resource "aws_security_group_rule" "icmp-pmtu-ssh-nlb-0-0-0-0--0" {
+  cidr_blocks       = ["0.0.0.0/0"]
+  from_port         = 3
+  protocol          = "icmp"
+  security_group_id = aws_security_group.bastion-elb-private-shared-subnet-example-com.id
+  to_port           = 4
+  type              = "ingress"
+}
+
+resource "aws_security_group_rule" "icmp-pmtu-ssh-nlb-172-20-4-0--22" {
+  cidr_blocks       = ["172.20.4.0/22"]
+  from_port         = 3
+  protocol          = "icmp"
+  security_group_id = aws_security_group.bastion-elb-private-shared-subnet-example-com.id
+  to_port           = 4
+  type              = "ingress"
+}
+
+resource "aws_sqs_queue" "private-shared-subnet-example-com-nth" {
+  message_retention_seconds = 300
+  name                      = "private-shared-subnet-example-com-nth"
+  policy                    = file("${path.module}/data/aws_sqs_queue_private-shared-subnet-example-com-nth_policy")
+  tags = {
+    "KubernetesCluster"                                       = "private-shared-subnet.example.com"
+    "Name"                                                    = "private-shared-subnet-example-com-nth"
+    "kubernetes.io/cluster/private-shared-subnet.example.com" = "owned"
+  }
+}
+
+data "aws_vpc" "private-shared-subnet-example-com" {
+  id = "vpc-12345678"
+}
+
 terraform {
   required_version = ">= 0.15.0"
   required_providers {
     aws = {
       "configuration_aliases" = [aws.files]
       "source"                = "hashicorp/aws"
-      "version"               = ">= 3.59.0"
+      "version"               = ">= 6.57.1"
     }
   }
 }

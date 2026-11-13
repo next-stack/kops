@@ -53,7 +53,15 @@ func Test_ParseInstanceGroupRole(t *testing.T) {
 		},
 		{
 			"Masters", true,
-			InstanceGroupRoleMaster, true,
+			InstanceGroupRoleControlPlane, true,
+		},
+		{
+			"ControlPlanes", true,
+			InstanceGroupRoleControlPlane, true,
+		},
+		{
+			"Control-Planes", true,
+			InstanceGroupRoleControlPlane, true,
 		},
 		{
 			"NotARole", true,
@@ -115,51 +123,6 @@ func TestParseConfigYAML(t *testing.T) {
 					return
 				} else if actual.AsDec().Cmp(g.ExpectedValue) != 0 {
 					t.Errorf("expected %v value for KubeAPIServer.AuditWebhookBatchThrottleQps, got %v", g.ExpectedValue.String(), actual.AsDec().String())
-					return
-				}
-			}
-		})
-	}
-}
-
-func TestWeaveParseConfigYAML(t *testing.T) {
-	grid := []struct {
-		Config        string
-		ExpectedValue string
-	}{
-		{
-			Config:        "networking: {  weave: { memoryRequest: 500Mi, cpuRequest: 100m, npcMemoryRequest: 100Mi, npcCPURequest: 50m} }",
-			ExpectedValue: "50m",
-		},
-		{
-			Config:        "networking: {}",
-			ExpectedValue: "",
-		},
-	}
-	for i := range grid {
-		g := grid[i]
-		t.Run(fmt.Sprintf("%q", g.Config), func(t *testing.T) {
-			config := ClusterSpec{}
-			err := utils.YamlUnmarshal([]byte(g.Config), &config)
-			if err != nil {
-				t.Errorf("error parsing configuration %q: %v", g.Config, err)
-				return
-			}
-			var actual string
-			if nil != config.Networking.Weave {
-				actual = config.Networking.Weave.NPCCPURequest.String()
-			}
-			if g.ExpectedValue == "" {
-				if actual != "" {
-					t.Errorf("expected empty value for Networking.Weave.NPCCPURequest.String(), got %v", actual)
-					return
-				}
-			} else {
-				if actual == "" {
-					t.Errorf("expected %v value for Networking.Weave.NPCCPURequest.String(), got empty string", g.ExpectedValue)
-					return
-				} else if actual != g.ExpectedValue {
-					t.Errorf("expected %v value for Networking.Weave.NPCCPURequest.String(), got %v", g.ExpectedValue, actual)
 					return
 				}
 			}

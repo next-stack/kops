@@ -17,16 +17,17 @@ limitations under the License.
 package awstasks
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/klog/v2"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
-	"k8s.io/kops/upup/pkg/fi/cloudup/cloudformation"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraform"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraformWriter"
 	"k8s.io/kops/upup/pkg/fi/utils"
@@ -43,18 +44,21 @@ type Subnet struct {
 
 	Lifecycle fi.Lifecycle
 
-	ID               *string
-	VPC              *VPC
-	AmazonIPv6CIDR   *VPCAmazonIPv6CIDRBlock
-	AvailabilityZone *string
-	CIDR             *string
-	IPv6CIDR         *string
-	Shared           *bool
+	ID                          *string
+	VPC                         *VPC
+	VPCCIDRBlock                *VPCCIDRBlock
+	AmazonIPv6CIDR              *VPCAmazonIPv6CIDRBlock
+	AvailabilityZone            *string
+	CIDR                        *string
+	IPv6CIDR                    *string
+	ResourceBasedNaming         *bool
+	AssignIPv6AddressOnCreation *bool
+	Shared                      *bool
 
 	Tags map[string]string
 }
 
-var _ fi.CompareWithID = &Subnet{}
+var _ fi.CompareWithID = (*Subnet)(nil)
 
 func (e *Subnet) CompareWithID() *string {
 	return e.ID
@@ -66,10 +70,12 @@ type OrderSubnetsById []*Subnet
 func (a OrderSubnetsById) Len() int      { return len(a) }
 func (a OrderSubnetsById) Swap(i, j int) { a[i], a[j] = a[j], a[i] }
 func (a OrderSubnetsById) Less(i, j int) bool {
-	return fi.StringValue(a[i].ID) < fi.StringValue(a[j].ID)
+	return fi.ValueOf(a[i].ID) < fi.ValueOf(a[j].ID)
 }
 
-func (e *Subnet) Find(c *fi.Context) (*Subnet, error) {
+func (e *Subnet) Find(c *fi.CloudupContext) (*Subnet, error) {
+	e.AssignIPv6AddressOnCreation = new(e.IPv6CIDR != nil)
+
 	subnet, err := e.findEc2Subnet(c)
 	if err != nil {
 		return nil, err
@@ -90,12 +96,12 @@ func (e *Subnet) Find(c *fi.Context) (*Subnet, error) {
 	}
 
 	for _, association := range subnet.Ipv6CidrBlockAssociationSet {
-		if association == nil || association.Ipv6CidrBlockState == nil {
+		if association.Ipv6CidrBlockState == nil {
 			continue
 		}
 
-		state := aws.StringValue(association.Ipv6CidrBlockState.State)
-		if state != ec2.SubnetCidrBlockStateCodeAssociated && state != ec2.SubnetCidrBlockStateCodeAssociating {
+		state := association.Ipv6CidrBlockState.State
+		if state != ec2types.SubnetCidrBlockStateCodeAssociated && state != ec2types.SubnetCidrBlockStateCodeAssociating {
 			continue
 		}
 
@@ -103,11 +109,23 @@ func (e *Subnet) Find(c *fi.Context) (*Subnet, error) {
 		break
 	}
 
+	actual.AssignIPv6AddressOnCreation = subnet.AssignIpv6AddressOnCreation
+
+	actual.ResourceBasedNaming = new(subnet.PrivateDnsNameOptionsOnLaunch.HostnameType == ec2types.HostnameTypeResourceName)
+	if *actual.ResourceBasedNaming {
+		if fi.ValueOf(actual.CIDR) != "" && !aws.ToBool(subnet.PrivateDnsNameOptionsOnLaunch.EnableResourceNameDnsARecord) {
+			actual.ResourceBasedNaming = nil
+		}
+		if fi.ValueOf(actual.IPv6CIDR) != "" && !aws.ToBool(subnet.PrivateDnsNameOptionsOnLaunch.EnableResourceNameDnsAAAARecord) {
+			actual.ResourceBasedNaming = nil
+		}
+	}
+
 	klog.V(2).Infof("found matching subnet %q", *actual.ID)
 	e.ID = actual.ID
 
 	// Calculate expected IPv6 CIDR if possible and in the "/64#N" format
-	if e.VPC.IPv6CIDR != nil && strings.HasPrefix(aws.StringValue(e.IPv6CIDR), "/") {
+	if e.VPC.IPv6CIDR != nil && strings.HasPrefix(aws.ToString(e.IPv6CIDR), "/") {
 		subnetIPv6CIDR, err := calculateSubnetCIDR(e.VPC.IPv6CIDR, e.IPv6CIDR)
 		if err != nil {
 			return nil, err
@@ -120,22 +138,23 @@ func (e *Subnet) Find(c *fi.Context) (*Subnet, error) {
 	actual.ShortName = e.ShortName // Not materialized in AWS
 	actual.Name = e.Name           // Name is part of Tags
 	// Task dependencies
+	actual.VPCCIDRBlock = e.VPCCIDRBlock
 	actual.AmazonIPv6CIDR = e.AmazonIPv6CIDR
 
 	return actual, nil
 }
 
-func (e *Subnet) findEc2Subnet(c *fi.Context) (*ec2.Subnet, error) {
-	cloud := c.Cloud.(awsup.AWSCloud)
+func (e *Subnet) findEc2Subnet(c *fi.CloudupContext) (*ec2types.Subnet, error) {
+	cloud := awsup.GetCloud(c)
 
 	request := &ec2.DescribeSubnetsInput{}
 	if e.ID != nil {
-		request.SubnetIds = []*string{e.ID}
+		request.SubnetIds = []string{fi.ValueOf(e.ID)}
 	} else {
 		request.Filters = cloud.BuildFilters(e.Name)
 	}
 
-	response, err := cloud.EC2().DescribeSubnets(request)
+	response, err := cloud.EC2().DescribeSubnets(c.Context(), request)
 	if err != nil {
 		return nil, fmt.Errorf("error listing Subnets: %v", err)
 	}
@@ -148,11 +167,11 @@ func (e *Subnet) findEc2Subnet(c *fi.Context) (*ec2.Subnet, error) {
 	}
 
 	subnet := response.Subnets[0]
-	return subnet, nil
+	return &subnet, nil
 }
 
-func (e *Subnet) Run(c *fi.Context) error {
-	return fi.DefaultDeltaRunMethod(e, c)
+func (e *Subnet) Run(c *fi.CloudupContext) error {
+	return fi.CloudupDefaultDeltaRunMethod(e, c)
 }
 
 func (s *Subnet) CheckChanges(a, e, changes *Subnet) error {
@@ -164,9 +183,8 @@ func (s *Subnet) CheckChanges(a, e, changes *Subnet) error {
 			errors = append(errors, field.Required(fieldPath.Child("VPC"), "must specify a VPC"))
 		}
 
-		if e.CIDR == nil {
-			// TODO: Auto-assign CIDR?
-			errors = append(errors, field.Required(fieldPath.Child("CIDR"), "must specify a CIDR"))
+		if e.CIDR == nil && e.IPv6CIDR == nil {
+			errors = append(errors, field.Required(fieldPath.Child("CIDR"), "must specify a CIDR or IPv6CIDR"))
 		}
 	}
 
@@ -192,6 +210,12 @@ func (s *Subnet) CheckChanges(a, e, changes *Subnet) error {
 		if changes.IPv6CIDR != nil && a.IPv6CIDR != nil {
 			errors = append(errors, fi.FieldIsImmutable(e.IPv6CIDR, a.IPv6CIDR, fieldPath.Child("IPv6CIDR")))
 		}
+
+		if fi.ValueOf(e.Shared) {
+			if changes.IPv6CIDR != nil && a.IPv6CIDR == nil {
+				errors = append(errors, field.Forbidden(fieldPath.Child("IPv6CIDR"), "field cannot be set on shared subnet"))
+			}
+		}
 	}
 
 	if len(errors) != 0 {
@@ -201,16 +225,25 @@ func (s *Subnet) CheckChanges(a, e, changes *Subnet) error {
 	return nil
 }
 
+func (_ *Subnet) ShouldCreate(a, e, changes *Subnet) (bool, error) {
+	if fi.ValueOf(e.Shared) {
+		changes.ResourceBasedNaming = nil
+		return changes.Tags != nil, nil
+	}
+	return true, nil
+}
+
 func (_ *Subnet) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *Subnet) error {
-	shared := fi.BoolValue(e.Shared)
+	ctx := context.TODO()
+	shared := fi.ValueOf(e.Shared)
 	if shared {
 		// Verify the subnet was found
 		if a == nil {
-			return fmt.Errorf("Subnet with id %q not found", fi.StringValue(e.ID))
+			return fmt.Errorf("subnet with id %q not found", fi.ValueOf(e.ID))
 		}
 	}
 
-	if strings.HasPrefix(aws.StringValue(e.IPv6CIDR), "/") {
+	if strings.HasPrefix(aws.ToString(e.IPv6CIDR), "/") {
 		vpcIPv6CIDR := e.VPC.IPv6CIDR
 		if vpcIPv6CIDR == nil {
 			cidr, err := findVPCIPv6CIDR(t.Cloud, e.VPC.ID)
@@ -231,17 +264,21 @@ func (_ *Subnet) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *Subnet) error {
 	}
 
 	if a == nil {
-		klog.V(2).Infof("Creating Subnet with CIDR: %q", *e.CIDR)
+		klog.V(2).Infof("Creating Subnet with CIDR: %q IPv6CIDR: %q", fi.ValueOf(e.CIDR), fi.ValueOf(e.IPv6CIDR))
 
 		request := &ec2.CreateSubnetInput{
 			CidrBlock:         e.CIDR,
 			Ipv6CidrBlock:     e.IPv6CIDR,
 			AvailabilityZone:  e.AvailabilityZone,
 			VpcId:             e.VPC.ID,
-			TagSpecifications: awsup.EC2TagSpecification(ec2.ResourceTypeSubnet, e.Tags),
+			TagSpecifications: awsup.EC2TagSpecification(ec2types.ResourceTypeSubnet, e.Tags),
 		}
 
-		response, err := t.Cloud.EC2().CreateSubnet(request)
+		if e.CIDR == nil {
+			request.Ipv6Native = aws.Bool(true)
+		}
+
+		response, err := t.Cloud.EC2().CreateSubnet(ctx, request)
 		if err != nil {
 			return fmt.Errorf("error creating subnet: %v", err)
 		}
@@ -254,9 +291,66 @@ func (_ *Subnet) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *Subnet) error {
 				SubnetId:      e.ID,
 			}
 
-			_, err := t.Cloud.EC2().AssociateSubnetCidrBlock(request)
+			_, err := t.Cloud.EC2().AssociateSubnetCidrBlock(ctx, request)
 			if err != nil {
 				return fmt.Errorf("error associating subnet cidr block: %v", err)
+			}
+		}
+	}
+
+	if a == nil || changes.AssignIPv6AddressOnCreation != nil {
+		request := &ec2.ModifySubnetAttributeInput{
+			SubnetId:                    e.ID,
+			AssignIpv6AddressOnCreation: &ec2types.AttributeBooleanValue{Value: e.AssignIPv6AddressOnCreation},
+		}
+		_, err := t.Cloud.EC2().ModifySubnetAttribute(ctx, request)
+		if err != nil {
+			return fmt.Errorf("error modifying AssignIPv6AddressOnCreation: %w", err)
+		}
+	}
+
+	if changes.ResourceBasedNaming != nil {
+		hostnameType := ec2types.HostnameTypeIpName
+		if *changes.ResourceBasedNaming {
+			hostnameType = ec2types.HostnameTypeResourceName
+		}
+		request := &ec2.ModifySubnetAttributeInput{
+			SubnetId:                       e.ID,
+			PrivateDnsHostnameTypeOnLaunch: hostnameType,
+		}
+		_, err := t.Cloud.EC2().ModifySubnetAttribute(ctx, request)
+		if err != nil {
+			return fmt.Errorf("error modifying hostname type: %w", err)
+		}
+
+		if fi.ValueOf(e.CIDR) == "" {
+			request = &ec2.ModifySubnetAttributeInput{
+				SubnetId:    e.ID,
+				EnableDns64: &ec2types.AttributeBooleanValue{Value: aws.Bool(true)},
+			}
+			_, err = t.Cloud.EC2().ModifySubnetAttribute(ctx, request)
+			if err != nil {
+				return fmt.Errorf("error enabling DNS64: %w", err)
+			}
+		} else {
+			request = &ec2.ModifySubnetAttributeInput{
+				SubnetId:                             e.ID,
+				EnableResourceNameDnsARecordOnLaunch: &ec2types.AttributeBooleanValue{Value: changes.ResourceBasedNaming},
+			}
+			_, err = t.Cloud.EC2().ModifySubnetAttribute(ctx, request)
+			if err != nil {
+				return fmt.Errorf("error modifying A records: %w", err)
+			}
+		}
+
+		if fi.ValueOf(e.IPv6CIDR) != "" {
+			request = &ec2.ModifySubnetAttributeInput{
+				SubnetId:                                e.ID,
+				EnableResourceNameDnsAAAARecordOnLaunch: &ec2types.AttributeBooleanValue{Value: changes.ResourceBasedNaming},
+			}
+			_, err = t.Cloud.EC2().ModifySubnetAttribute(ctx, request)
+			if err != nil {
+				return fmt.Errorf("error modifying AAAA records: %w", err)
 			}
 		}
 	}
@@ -281,22 +375,28 @@ func subnetSlicesEqualIgnoreOrder(l, r []*Subnet) bool {
 }
 
 type terraformSubnet struct {
-	VPCID            *terraformWriter.Literal `json:"vpc_id" cty:"vpc_id"`
-	CIDR             *string                  `json:"cidr_block" cty:"cidr_block"`
-	IPv6CIDR         *string                  `json:"ipv6_cidr_block" cty:"ipv6_cidr_block"`
-	AvailabilityZone *string                  `json:"availability_zone" cty:"availability_zone"`
-	Tags             map[string]string        `json:"tags,omitempty" cty:"tags"`
+	VPCID                                   *terraformWriter.Literal `cty:"vpc_id"`
+	CIDR                                    *string                  `cty:"cidr_block"`
+	IPv6CIDR                                *terraformWriter.Literal `cty:"ipv6_cidr_block"`
+	IPv6Native                              *bool                    `cty:"ipv6_native"`
+	AssignIPv6AddressOnCreation             *bool                    `cty:"assign_ipv6_address_on_creation"`
+	AvailabilityZone                        *string                  `cty:"availability_zone"`
+	EnableDNS64                             *bool                    `cty:"enable_dns64"`
+	EnableResourceNameDNSAAAARecordOnLaunch *bool                    `cty:"enable_resource_name_dns_aaaa_record_on_launch"`
+	EnableResourceNameDNSARecordOnLaunch    *bool                    `cty:"enable_resource_name_dns_a_record_on_launch"`
+	PrivateDNSHostnameTypeOnLaunch          *string                  `cty:"private_dns_hostname_type_on_launch"`
+	Tags                                    map[string]string        `cty:"tags"`
 }
 
 func (_ *Subnet) RenderTerraform(t *terraform.TerraformTarget, a, e, changes *Subnet) error {
-	if fi.StringValue(e.ShortName) != "" {
-		name := fi.StringValue(e.ShortName)
+	if fi.ValueOf(e.ShortName) != "" {
+		name := fi.ValueOf(e.ShortName)
 		if err := t.AddOutputVariable("subnet_"+name+"_id", e.TerraformLink()); err != nil {
 			return err
 		}
 	}
 
-	shared := fi.BoolValue(e.Shared)
+	shared := fi.ValueOf(e.Shared)
 	if shared {
 		// Not terraform owned / managed
 		// We won't apply changes, but our validation (kops update) will still warn
@@ -307,25 +407,60 @@ func (_ *Subnet) RenderTerraform(t *terraform.TerraformTarget, a, e, changes *Su
 		return t.AddOutputVariableArray("subnet_ids", terraformWriter.LiteralFromStringValue(*e.ID))
 	}
 
-	if strings.HasPrefix(aws.StringValue(e.IPv6CIDR), "/") {
-		// TODO: Implement using "cidrsubnet"
-		// https://www.terraform.io/docs/language/functions/cidrsubnet.html
-		return fmt.Errorf("<cidrsubnet> in not supported with Terraform target: %q", aws.StringValue(e.IPv6CIDR))
+	var ipv6CIDR *terraformWriter.Literal
+	if strings.HasPrefix(aws.ToString(e.IPv6CIDR), "/") {
+		newSize, netNum, err := utils.ParseCIDRNotation(*e.IPv6CIDR)
+		if err != nil {
+			return fmt.Errorf("error parsing CIDR subnet: %v", err)
+		}
+
+		newBits := terraformWriter.LiteralBinaryExpression(
+			terraformWriter.LiteralFromIntValue(newSize),
+			"-",
+			terraformWriter.LiteralTokens("local", "vpc_ipv6_cidr_length"),
+		)
+		ipv6CIDR = terraformWriter.LiteralFunctionExpression("cidrsubnet",
+			terraformWriter.LiteralTokens("local", "vpc_ipv6_cidr_block"),
+			newBits,
+			terraformWriter.LiteralFromIntValue(netNum),
+		)
+	} else if e.IPv6CIDR != nil {
+		ipv6CIDR = terraformWriter.LiteralFromStringValue(aws.ToString(e.IPv6CIDR))
 	}
 
 	tf := &terraformSubnet{
 		VPCID:            e.VPC.TerraformLink(),
 		CIDR:             e.CIDR,
-		IPv6CIDR:         e.IPv6CIDR,
+		IPv6CIDR:         ipv6CIDR,
 		AvailabilityZone: e.AvailabilityZone,
 		Tags:             e.Tags,
+	}
+	if fi.ValueOf(e.CIDR) == "" {
+		tf.EnableDNS64 = new(true)
+		tf.IPv6Native = new(true)
+	}
+	if fi.ValueOf(e.IPv6CIDR) != "" {
+		tf.AssignIPv6AddressOnCreation = new(true)
+	}
+	if e.ResourceBasedNaming != nil {
+		hostnameType := ec2types.HostnameTypeIpName
+		if *e.ResourceBasedNaming {
+			hostnameType = ec2types.HostnameTypeResourceName
+		}
+		tf.PrivateDNSHostnameTypeOnLaunch = new(string(hostnameType))
+		if fi.ValueOf(e.CIDR) != "" {
+			tf.EnableResourceNameDNSARecordOnLaunch = e.ResourceBasedNaming
+		}
+		if fi.ValueOf(e.IPv6CIDR) != "" {
+			tf.EnableResourceNameDNSAAAARecordOnLaunch = e.ResourceBasedNaming
+		}
 	}
 
 	return t.RenderResource("aws_subnet", *e.Name, tf)
 }
 
 func (e *Subnet) TerraformLink() *terraformWriter.Literal {
-	shared := fi.BoolValue(e.Shared)
+	shared := fi.ValueOf(e.Shared)
 	if shared {
 		if e.ID == nil {
 			klog.Fatalf("ID must be set, if subnet is shared: %s", e)
@@ -338,55 +473,8 @@ func (e *Subnet) TerraformLink() *terraformWriter.Literal {
 	return terraformWriter.LiteralProperty("aws_subnet", *e.Name, "id")
 }
 
-type cloudformationSubnet struct {
-	VPCID            *cloudformation.Literal `json:"VpcId,omitempty"`
-	CIDR             *string                 `json:"CidrBlock,omitempty"`
-	IPv6CIDR         *string                 `json:"Ipv6CidrBlock,omitempty"`
-	AvailabilityZone *string                 `json:"AvailabilityZone,omitempty"`
-	Tags             []cloudformationTag     `json:"Tags,omitempty"`
-}
-
-func (_ *Subnet) RenderCloudformation(t *cloudformation.CloudformationTarget, a, e, changes *Subnet) error {
-	shared := fi.BoolValue(e.Shared)
-	if shared {
-		// Not cloudformation owned / managed
-		// We won't apply changes, but our validation (kops update) will still warn
-		return nil
-	}
-
-	if strings.HasPrefix(aws.StringValue(e.IPv6CIDR), "/") {
-		// TODO: Implement using "Fn::Cidr"
-		// https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/intrinsic-function-reference-cidr.html
-		return fmt.Errorf("<cidrsubnet> in not supported with CloudFormation target: %q", aws.StringValue(e.IPv6CIDR))
-	}
-
-	cf := &cloudformationSubnet{
-		VPCID:            e.VPC.CloudformationLink(),
-		CIDR:             e.CIDR,
-		IPv6CIDR:         e.IPv6CIDR,
-		AvailabilityZone: e.AvailabilityZone,
-		Tags:             buildCloudformationTags(e.Tags),
-	}
-
-	return t.RenderResource("AWS::EC2::Subnet", *e.Name, cf)
-}
-
-func (e *Subnet) CloudformationLink() *cloudformation.Literal {
-	shared := fi.BoolValue(e.Shared)
-	if shared {
-		if e.ID == nil {
-			klog.Fatalf("ID must be set, if subnet is shared: %s", e)
-		}
-
-		klog.V(4).Infof("reusing existing subnet with id %q", *e.ID)
-		return cloudformation.LiteralString(*e.ID)
-	}
-
-	return cloudformation.Ref("AWS::EC2::Subnet", *e.Name)
-}
-
-func (e *Subnet) FindDeletions(c *fi.Context) ([]fi.Deletion, error) {
-	if e.ID == nil || aws.BoolValue(e.Shared) {
+func (e *Subnet) FindDeletions(c *fi.CloudupContext) ([]fi.CloudupDeletion, error) {
+	if e.ID == nil || aws.ToBool(e.Shared) {
 		return nil, nil
 	}
 
@@ -399,21 +487,21 @@ func (e *Subnet) FindDeletions(c *fi.Context) ([]fi.Deletion, error) {
 		return nil, nil
 	}
 
-	var removals []fi.Deletion
+	var removals []fi.CloudupDeletion
 	for _, association := range subnet.Ipv6CidrBlockAssociationSet {
 		// Skip when without state
-		if association == nil || association.Ipv6CidrBlockState == nil {
+		if association.Ipv6CidrBlockState == nil {
 			continue
 		}
 
 		// Skip when already disassociated
-		state := aws.StringValue(association.Ipv6CidrBlockState.State)
-		if state == ec2.SubnetCidrBlockStateCodeDisassociated || state == ec2.SubnetCidrBlockStateCodeDisassociating {
+		state := association.Ipv6CidrBlockState.State
+		if state == ec2types.SubnetCidrBlockStateCodeDisassociated || state == ec2types.SubnetCidrBlockStateCodeDisassociating {
 			continue
 		}
 
 		// Skip when current IPv6CIDR
-		if aws.StringValue(e.IPv6CIDR) == aws.StringValue(association.Ipv6CidrBlock) {
+		if aws.ToString(e.IPv6CIDR) == aws.ToString(association.Ipv6CidrBlock) {
 			continue
 		}
 
@@ -433,9 +521,10 @@ type deleteSubnetIPv6CIDRBlock struct {
 	associationID *string
 }
 
-var _ fi.Deletion = &deleteSubnetIPv6CIDRBlock{}
+var _ fi.CloudupDeletion = (*deleteSubnetIPv6CIDRBlock)(nil)
 
-func (d *deleteSubnetIPv6CIDRBlock) Delete(t fi.Target) error {
+func (d *deleteSubnetIPv6CIDRBlock) Delete(t fi.CloudupTarget) error {
+	ctx := context.TODO()
 	awsTarget, ok := t.(*awsup.AWSAPITarget)
 	if !ok {
 		return fmt.Errorf("unexpected target type for deletion: %T", t)
@@ -444,7 +533,7 @@ func (d *deleteSubnetIPv6CIDRBlock) Delete(t fi.Target) error {
 	request := &ec2.DisassociateSubnetCidrBlockInput{
 		AssociationId: d.associationID,
 	}
-	_, err := awsTarget.Cloud.EC2().DisassociateSubnetCidrBlock(request)
+	_, err := awsTarget.Cloud.EC2().DisassociateSubnetCidrBlock(ctx, request)
 	return err
 }
 
@@ -456,6 +545,10 @@ func (d *deleteSubnetIPv6CIDRBlock) Item() string {
 	return fmt.Sprintf("%v: ipv6cidr=%v", *d.vpcID, *d.ipv6CidrBlock)
 }
 
+func (d *deleteSubnetIPv6CIDRBlock) DeferDeletion() bool {
+	return false // TODO: should we defer this?
+}
+
 func calculateSubnetCIDR(vpcCIDR, subnetCIDR *string) (*string, error) {
 	if vpcCIDR == nil {
 		return nil, fmt.Errorf("expecting VPC CIDR to not be <nil>")
@@ -463,16 +556,16 @@ func calculateSubnetCIDR(vpcCIDR, subnetCIDR *string) (*string, error) {
 	if subnetCIDR == nil {
 		return nil, fmt.Errorf("expecting subnet CIDR to not be <nil>")
 	}
-	if !strings.HasPrefix(aws.StringValue(subnetCIDR), "/") {
-		return nil, fmt.Errorf("expecting subnet cidr to start with %q: %q", "/", aws.StringValue(subnetCIDR))
+	if !strings.HasPrefix(aws.ToString(subnetCIDR), "/") {
+		return nil, fmt.Errorf("expecting subnet cidr to start with %q: %q", "/", aws.ToString(subnetCIDR))
 	}
 
-	newSize, netNum, err := utils.ParseCIDRNotation(aws.StringValue(subnetCIDR))
+	newSize, netNum, err := utils.ParseCIDRNotation(aws.ToString(subnetCIDR))
 	if err != nil {
 		return nil, fmt.Errorf("error parsing CIDR subnet: %v", err)
 	}
 
-	newCIDR, err := utils.CIDRSubnet(aws.StringValue(vpcCIDR), newSize, netNum)
+	newCIDR, err := utils.CIDRSubnet(aws.ToString(vpcCIDR), newSize, netNum)
 	if err != nil {
 		return nil, fmt.Errorf("error calculating CIDR subnet: %v", err)
 	}

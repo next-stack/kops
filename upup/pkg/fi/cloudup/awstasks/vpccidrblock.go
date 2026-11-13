@@ -17,13 +17,14 @@ limitations under the License.
 package awstasks
 
 import (
+	"context"
 	"fmt"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
-	"k8s.io/kops/upup/pkg/fi/cloudup/cloudformation"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraform"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraformWriter"
 )
@@ -40,10 +41,10 @@ type VPCCIDRBlock struct {
 	Shared *bool
 }
 
-func (e *VPCCIDRBlock) Find(c *fi.Context) (*VPCCIDRBlock, error) {
-	cloud := c.Cloud.(awsup.AWSCloud)
+func (e *VPCCIDRBlock) Find(c *fi.CloudupContext) (*VPCCIDRBlock, error) {
+	cloud := awsup.GetCloud(c)
 
-	vpcID := aws.StringValue(e.VPC.ID)
+	vpcID := aws.ToString(e.VPC.ID)
 
 	// If the VPC doesn't (yet) exist, there is no association
 	if vpcID == "" {
@@ -58,16 +59,16 @@ func (e *VPCCIDRBlock) Find(c *fi.Context) (*VPCCIDRBlock, error) {
 	found := false
 	if e.CIDRBlock != nil {
 		for _, cba := range vpc.CidrBlockAssociationSet {
-			if cba == nil || cba.CidrBlockState == nil {
+			if cba.CidrBlockState == nil {
 				continue
 			}
 
-			state := aws.StringValue(cba.CidrBlockState.State)
-			if state != ec2.VpcCidrBlockStateCodeAssociated && state != ec2.VpcCidrBlockStateCodeAssociating {
+			state := cba.CidrBlockState.State
+			if state != ec2types.VpcCidrBlockStateCodeAssociated && state != ec2types.VpcCidrBlockStateCodeAssociating {
 				continue
 			}
 
-			if aws.StringValue(cba.CidrBlock) == aws.StringValue(e.CIDRBlock) {
+			if aws.ToString(cba.CidrBlock) == aws.ToString(e.CIDRBlock) {
 				found = true
 				break
 			}
@@ -90,8 +91,8 @@ func (e *VPCCIDRBlock) Find(c *fi.Context) (*VPCCIDRBlock, error) {
 	return actual, nil
 }
 
-func (e *VPCCIDRBlock) Run(c *fi.Context) error {
-	return fi.DefaultDeltaRunMethod(e, c)
+func (e *VPCCIDRBlock) Run(c *fi.CloudupContext) error {
+	return fi.CloudupDefaultDeltaRunMethod(e, c)
 }
 
 func (s *VPCCIDRBlock) CheckChanges(a, e, changes *VPCCIDRBlock) error {
@@ -117,11 +118,12 @@ func (s *VPCCIDRBlock) CheckChanges(a, e, changes *VPCCIDRBlock) error {
 }
 
 func (_ *VPCCIDRBlock) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *VPCCIDRBlock) error {
-	shared := aws.BoolValue(e.Shared)
+	ctx := context.TODO()
+	shared := aws.ToBool(e.Shared)
 	if shared && a == nil {
 		// VPC not owned by kOps, no changes will be applied
 		// Verify that the CIDR block was found.
-		return fmt.Errorf("CIDR block %q not found", aws.StringValue(e.CIDRBlock))
+		return fmt.Errorf("CIDR block %q not found", aws.ToString(e.CIDRBlock))
 	}
 
 	if changes.CIDRBlock != nil {
@@ -130,7 +132,7 @@ func (_ *VPCCIDRBlock) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *VPCCIDRBl
 			CidrBlock: e.CIDRBlock,
 		}
 
-		_, err := t.Cloud.EC2().AssociateVpcCidrBlock(request)
+		_, err := t.Cloud.EC2().AssociateVpcCidrBlock(ctx, request)
 		if err != nil {
 			return fmt.Errorf("error associating AdditionalCIDR to VPC: %v", err)
 		}
@@ -140,16 +142,16 @@ func (_ *VPCCIDRBlock) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *VPCCIDRBl
 }
 
 type terraformVPCCIDRBlock struct {
-	VPCID     *terraformWriter.Literal `json:"vpc_id" cty:"vpc_id"`
-	CIDRBlock *string                  `json:"cidr_block" cty:"cidr_block"`
+	VPCID     *terraformWriter.Literal `cty:"vpc_id"`
+	CIDRBlock *string                  `cty:"cidr_block"`
 }
 
 func (_ *VPCCIDRBlock) RenderTerraform(t *terraform.TerraformTarget, a, e, changes *VPCCIDRBlock) error {
-	shared := aws.BoolValue(e.Shared)
+	shared := aws.ToBool(e.Shared)
 	if shared && a == nil {
 		// VPC not owned by kOps, no changes will be applied
 		// Verify that the CIDR block was found.
-		return fmt.Errorf("CIDR block %q not found", aws.StringValue(e.CIDRBlock))
+		return fmt.Errorf("CIDR block %q not found", aws.ToString(e.CIDRBlock))
 	}
 
 	// When this has been enabled please fix test TestAdditionalCIDR in integration_test.go to run runTestAWS.
@@ -162,25 +164,4 @@ func (_ *VPCCIDRBlock) RenderTerraform(t *terraform.TerraformTarget, a, e, chang
 	// and https://www.terraform.io/upgrade-guides/0-12.html#pre-upgrade-checklist
 	name := fmt.Sprintf("cidr-%v", *e.Name)
 	return t.RenderResource("aws_vpc_ipv4_cidr_block_association", name, tf)
-}
-
-type cloudformationVPCCIDRBlock struct {
-	VPCID     *cloudformation.Literal `json:"VpcId"`
-	CIDRBlock *string                 `json:"CidrBlock"`
-}
-
-func (_ *VPCCIDRBlock) RenderCloudformation(t *cloudformation.CloudformationTarget, a, e, changes *VPCCIDRBlock) error {
-	shared := aws.BoolValue(e.Shared)
-	if shared && a == nil {
-		// VPC not owned by kOps, no changes will be applied
-		// Verify that the CIDR block was found.
-		return fmt.Errorf("CIDR block %q not found", aws.StringValue(e.CIDRBlock))
-	}
-
-	cf := &cloudformationVPCCIDRBlock{
-		VPCID:     e.VPC.CloudformationLink(),
-		CIDRBlock: e.CIDRBlock,
-	}
-
-	return t.RenderResource("AWS::EC2::VPCCidrBlock", *e.Name, cf)
 }

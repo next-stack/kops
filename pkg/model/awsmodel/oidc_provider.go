@@ -24,18 +24,16 @@ import (
 // OIDCProviderBuilder configures IAM OIDC Provider
 type OIDCProviderBuilder struct {
 	*AWSModelContext
-	KeyStore  fi.Keystore
 	Lifecycle fi.Lifecycle
 }
 
-var _ fi.ModelBuilder = &OIDCProviderBuilder{}
+var _ fi.CloudupModelBuilder = &OIDCProviderBuilder{}
 
 const (
 	defaultAudience = "amazonaws.com"
 )
 
-func (b *OIDCProviderBuilder) Build(c *fi.ModelBuilderContext) error {
-
+func (b *OIDCProviderBuilder) Build(c *fi.CloudupModelBuilderContext) error {
 	if b.Cluster.Spec.ServiceAccountIssuerDiscovery == nil ||
 		!b.Cluster.Spec.ServiceAccountIssuerDiscovery.EnableAWSOIDCProvider {
 		return nil
@@ -43,35 +41,27 @@ func (b *OIDCProviderBuilder) Build(c *fi.ModelBuilderContext) error {
 
 	fingerprints := getFingerprints()
 
-	thumbprints := []*string{}
-
-	for _, fingerprint := range fingerprints {
-		thumbprints = append(thumbprints, fi.String(fingerprint))
-	}
-
 	audiences := []string{defaultAudience}
 	if b.Cluster.Spec.ServiceAccountIssuerDiscovery.AdditionalAudiences != nil {
 		audiences = append(audiences, b.Cluster.Spec.ServiceAccountIssuerDiscovery.AdditionalAudiences...)
 	}
 
 	c.AddTask(&awstasks.IAMOIDCProvider{
-		Name:        fi.String(b.ClusterName()),
+		Name:        new(b.ClusterName()),
 		Lifecycle:   b.Lifecycle,
 		URL:         b.Cluster.Spec.KubeAPIServer.ServiceAccountIssuer,
-		ClientIDs:   fi.StringSlice(audiences),
+		ClientIDs:   audiences,
 		Tags:        b.CloudTags(b.ClusterName(), false),
-		Thumbprints: thumbprints,
+		Thumbprints: fingerprints,
 	})
 
 	return nil
 }
 
 func getFingerprints() []string {
-
-	//These strings are the sha1 of the two possible S3 root CAs.
+	// These strings are the sha1 of the two possible S3 root CAs.
 	return []string{
 		"9e99a48a9960b14926bb7f3b02e22da2b0ab7280",
 		"a9d53002e97e00e043244f3d170d6f4c414104fd",
 	}
-
 }

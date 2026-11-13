@@ -24,10 +24,18 @@ import (
 
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/bootstrap"
+	"k8s.io/kops/pkg/bootstrap/awsbootstrap"
+	"k8s.io/kops/pkg/bootstrap/pkibootstrap"
+	"k8s.io/kops/pkg/kopscontrollerclient"
 	"k8s.io/kops/pkg/wellknownports"
 	"k8s.io/kops/upup/pkg/fi"
-	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
+	"k8s.io/kops/upup/pkg/fi/cloudup/azure/azuremetadata"
+	"k8s.io/kops/upup/pkg/fi/cloudup/do/dometadata"
 	"k8s.io/kops/upup/pkg/fi/cloudup/gce/tpm/gcetpmsigner"
+	"k8s.io/kops/upup/pkg/fi/cloudup/hetzner/hetznermetadata"
+	"k8s.io/kops/upup/pkg/fi/cloudup/linode/linodemetadata"
+	"k8s.io/kops/upup/pkg/fi/cloudup/openstack/openstackmetadata"
+	"k8s.io/kops/upup/pkg/fi/cloudup/scaleway/scalewaymetadata"
 	"k8s.io/kops/upup/pkg/fi/nodeup/nodetasks"
 )
 
@@ -36,42 +44,88 @@ type BootstrapClientBuilder struct {
 	*NodeupModelContext
 }
 
-func (b BootstrapClientBuilder) Build(c *fi.ModelBuilderContext) error {
-	if b.IsMaster || !b.UseKopsControllerForNodeBootstrap() {
+func (b BootstrapClientBuilder) Build(c *fi.NodeupModelBuilderContext) error {
+	if b.canSignCertificates() {
 		return nil
 	}
 
 	var authenticator bootstrap.Authenticator
-	var err error
-	switch kops.CloudProviderID(b.Cluster.Spec.CloudProvider) {
+
+	switch b.CloudProvider() {
 	case kops.CloudProviderAWS:
-		authenticator, err = awsup.NewAWSAuthenticator(b.Cloud.Region())
+		a, err := awsbootstrap.NewAWSAuthenticator(c.Context(), b.Cloud.Region())
+		if err != nil {
+			return err
+		}
+		authenticator = a
 	case kops.CloudProviderGCE:
-		authenticator, err = gcetpmsigner.NewTPMAuthenticator()
+		a, err := gcetpmsigner.NewTPMAuthenticator()
+		if err != nil {
+			return err
+		}
+		authenticator = a
+	case kops.CloudProviderHetzner:
+		a, err := hetznermetadata.NewHetznerAuthenticator()
+		if err != nil {
+			return err
+		}
+		authenticator = a
+	case kops.CloudProviderOpenstack:
+		a, err := openstackmetadata.NewOpenstackAuthenticator()
+		if err != nil {
+			return err
+		}
+		authenticator = a
+	case kops.CloudProviderDO:
+		a, err := dometadata.NewAuthenticator()
+		if err != nil {
+			return err
+		}
+		authenticator = a
+	case kops.CloudProviderScaleway:
+		a, err := scalewaymetadata.NewScalewayAuthenticator()
+		if err != nil {
+			return err
+		}
+		authenticator = a
+	case kops.CloudProviderAzure:
+		a, err := azuremetadata.NewAzureAuthenticator()
+		if err != nil {
+			return err
+		}
+		authenticator = a
+	case kops.CloudProviderLinode:
+		a, err := linodemetadata.NewLinodeAuthenticator()
+		if err != nil {
+			return err
+		}
+		authenticator = a
+
+	case kops.CloudProviderMetal:
+		a, err := pkibootstrap.NewAuthenticatorFromFile("/etc/kubernetes/kops/pki/machine/private.pem")
+		if err != nil {
+			return err
+		}
+		authenticator = a
+
 	default:
-		return fmt.Errorf("unsupported cloud provider %s", b.Cluster.Spec.CloudProvider)
-	}
-	if err != nil {
-		return err
+		return fmt.Errorf("unsupported cloud provider for authenticator %q", b.CloudProvider())
 	}
 
 	baseURL := url.URL{
 		Scheme: "https",
-		Host:   net.JoinHostPort("kops-controller.internal."+b.Cluster.ObjectMeta.Name, strconv.Itoa(wellknownports.KopsControllerPort)),
+		Host:   net.JoinHostPort("kops-controller.internal."+b.NodeupConfig.ClusterName, strconv.Itoa(wellknownports.KopsControllerPort)),
 		Path:   "/",
 	}
 
-	bootstrapClient := &nodetasks.KopsBootstrapClient{
-		Authenticator: authenticator,
-		CAs:           []byte(b.NodeupConfig.CAs[fi.CertificateIDCA]),
-		BaseURL:       baseURL,
-	}
-
+	bootstrapClient := kopscontrollerclient.New(authenticator, []byte(b.NodeupConfig.CAs[fi.CertificateIDCA]), baseURL)
 	bootstrapClientTask := &nodetasks.BootstrapClientTask{
 		Client:     bootstrapClient,
 		Certs:      b.bootstrapCerts,
 		KeypairIDs: b.bootstrapKeypairIDs,
 	}
+	bootstrapClientTask.UseChallengeCallback = b.UseChallengeCallback(b.CloudProvider())
+	bootstrapClientTask.ClusterName = b.NodeupConfig.ClusterName
 
 	for _, cert := range b.bootstrapCerts {
 		cert.Cert.Task = bootstrapClientTask
@@ -82,4 +136,4 @@ func (b BootstrapClientBuilder) Build(c *fi.ModelBuilderContext) error {
 	return nil
 }
 
-var _ fi.ModelBuilder = &BootstrapClientBuilder{}
+var _ fi.NodeupModelBuilder = &BootstrapClientBuilder{}

@@ -27,23 +27,21 @@ import (
 
 // PullImageTask is responsible for pulling a docker image
 type PullImageTask struct {
-	Name    string
-	Runtime string
+	Name string
 }
 
-var _ fi.Task = &PullImageTask{}
-var _ fi.HasDependencies = &PullImageTask{}
+var (
+	_ fi.NodeupTask            = &PullImageTask{}
+	_ fi.NodeupHasDependencies = &PullImageTask{}
+)
 
-func (t *PullImageTask) GetDependencies(tasks map[string]fi.Task) []fi.Task {
+func (t *PullImageTask) GetDependencies(tasks map[string]fi.NodeupTask) []fi.NodeupTask {
 	// ImagePullTask depends on the container runtime service to ensure we
 	// sideload images after the container runtime is completely updated and
 	// configured.
-	var deps []fi.Task
+	var deps []fi.NodeupTask
 	for _, v := range tasks {
 		if svc, ok := v.(*Service); ok && svc.Name == containerdService {
-			deps = append(deps, v)
-		}
-		if svc, ok := v.(*Service); ok && svc.Name == dockerService {
 			deps = append(deps, v)
 		}
 	}
@@ -57,22 +55,9 @@ func (t *PullImageTask) GetName() *string {
 	return &t.Name
 }
 
-func (e *PullImageTask) Run(c *fi.Context) error {
-	runtime := e.Runtime
-	if runtime != "docker" && runtime != "containerd" {
-		return fmt.Errorf("no runtime specified")
-	}
-
+func (e *PullImageTask) Run(c *fi.NodeupContext) error {
 	// Pull the container image
-	var args []string
-	switch runtime {
-	case "docker":
-		args = []string{"docker", "pull", e.Name}
-	case "containerd":
-		args = []string{"ctr", "--namespace", "k8s.io", "images", "pull", e.Name}
-	default:
-		return fmt.Errorf("unknown container runtime: %s", runtime)
-	}
+	args := []string{"ctr", "--namespace", "k8s.io", "images", "pull", e.Name}
 	human := strings.Join(args, " ")
 
 	klog.Infof("running command %s", human)

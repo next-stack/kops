@@ -21,9 +21,10 @@ import (
 	"sort"
 	"strings"
 
-	secgroup "github.com/gophercloud/gophercloud/openstack/networking/v2/extensions/security/groups"
-	"github.com/gophercloud/gophercloud/openstack/networking/v2/ports"
+	secgroup "github.com/gophercloud/gophercloud/v2/openstack/networking/v2/extensions/security/groups"
+	"github.com/gophercloud/gophercloud/v2/openstack/networking/v2/ports"
 	"k8s.io/klog/v2"
+	"k8s.io/kops/pkg/wellknownservices"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/openstack"
 )
@@ -39,11 +40,22 @@ type Port struct {
 	AdditionalSecurityGroups []string
 	Lifecycle                fi.Lifecycle
 	Tags                     []string
+	AllowedAddressPairs      []ports.AddressPair
+
+	// WellKnownServices indicates which services are supported by this resource.
+	// This field is internal and is not rendered to the cloud.
+	WellKnownServices []wellknownservices.WellKnownService
 }
 
+var (
+	_ fi.CloudupTask   = &Port{}
+	_ fi.CompareWithID = &Port{}
+	_ fi.HasAddress    = &Port{}
+)
+
 // GetDependencies returns the dependencies of the Port task
-func (e *Port) GetDependencies(tasks map[string]fi.Task) []fi.Task {
-	var deps []fi.Task
+func (e *Port) GetDependencies(tasks map[string]fi.CloudupTask) []fi.CloudupTask {
+	var deps []fi.CloudupTask
 	for _, task := range tasks {
 		if _, ok := task.(*Subnet); ok {
 			deps = append(deps, task)
@@ -58,10 +70,53 @@ func (e *Port) GetDependencies(tasks map[string]fi.Task) []fi.Task {
 	return deps
 }
 
-var _ fi.CompareWithID = &Port{}
-
 func (s *Port) CompareWithID() *string {
 	return s.ID
+}
+
+func (s *Port) FindAddresses(context *fi.CloudupContext) ([]string, error) {
+	cloud := context.T.Cloud.(openstack.OpenstackCloud)
+	if s.ID == nil {
+		return nil, nil
+	}
+	port, err := cloud.GetPort(fi.ValueOf(s.ID))
+	if err != nil {
+		return nil, err
+	}
+	addrs := []string{}
+	for _, addr := range port.FixedIPs {
+		addrs = append(addrs, addr.IPAddress)
+	}
+	return addrs, nil
+}
+
+// GetWellKnownServices implements fi.HasAddress::GetWellKnownServices.
+// It indicates which services we support with this load balancer.
+func (s *Port) GetWellKnownServices() []wellknownservices.WellKnownService {
+	return s.WellKnownServices
+}
+
+// getActualAllowedAddressPairs returns the actual allowed address pairs which kOps currently manages.
+func getActualAllowedAddressPairs(port *ports.Port, find *Port) []ports.AddressPair {
+	if find == nil {
+		return port.AllowedAddressPairs
+	}
+
+	var allowedAddressPairs []ports.AddressPair
+	for _, portAddressPair := range port.AllowedAddressPairs {
+		// TODO: what if user set the macaddress in the config to the same one as the port?
+		if portAddressPair.MACAddress == port.MACAddress {
+			portAddressPair.MACAddress = ""
+		}
+
+		allowedAddressPairs = append(allowedAddressPairs, portAddressPair)
+	}
+
+	sort.Slice(allowedAddressPairs, func(i, j int) bool {
+		return allowedAddressPairs[i].IPAddress < allowedAddressPairs[j].IPAddress
+	})
+
+	return allowedAddressPairs
 }
 
 func newPortTaskFromCloud(cloud openstack.OpenstackCloud, lifecycle fi.Lifecycle, port *ports.Port, find *Port) (*Port, error) {
@@ -87,7 +142,7 @@ func newPortTaskFromCloud(cloud openstack.OpenstackCloud, lifecycle fi.Lifecycle
 			continue
 		}
 		sgs = append(sgs, &SecurityGroup{
-			ID:        fi.String(sgid),
+			ID:        new(sgid),
 			Lifecycle: lifecycle,
 		})
 	}
@@ -98,7 +153,7 @@ func newPortTaskFromCloud(cloud openstack.OpenstackCloud, lifecycle fi.Lifecycle
 	subnets := make([]*Subnet, len(port.FixedIPs))
 	for i, subn := range port.FixedIPs {
 		subnets[i] = &Subnet{
-			ID:        fi.String(subn.SubnetID),
+			ID:        new(subn.SubnetID),
 			Lifecycle: lifecycle,
 		}
 	}
@@ -121,7 +176,7 @@ func newPortTaskFromCloud(cloud openstack.OpenstackCloud, lifecycle fi.Lifecycle
 		if !strings.HasPrefix(t, prefix) {
 			continue
 		}
-		cloudInstanceGroupName = fi.String("")
+		cloudInstanceGroupName = new("")
 		scanString := fmt.Sprintf("%s%%s", prefix)
 		if _, err := fmt.Sscanf(t, scanString, cloudInstanceGroupName); err != nil {
 			klog.V(2).Infof("Error extracting instance group for Port with name: %q", port.Name)
@@ -129,27 +184,29 @@ func newPortTaskFromCloud(cloud openstack.OpenstackCloud, lifecycle fi.Lifecycle
 	}
 
 	actual := &Port{
-		ID:                fi.String(port.ID),
-		InstanceGroupName: cloudInstanceGroupName,
-		Name:              fi.String(port.Name),
-		Network:           &Network{ID: fi.String(port.NetworkID)},
-		SecurityGroups:    sgs,
-		Subnets:           subnets,
-		Lifecycle:         lifecycle,
-		Tags:              tags,
+		ID:                  new(port.ID),
+		InstanceGroupName:   cloudInstanceGroupName,
+		Name:                new(port.Name),
+		Network:             &Network{ID: new(port.NetworkID)},
+		SecurityGroups:      sgs,
+		Subnets:             subnets,
+		Lifecycle:           lifecycle,
+		Tags:                tags,
+		AllowedAddressPairs: getActualAllowedAddressPairs(port, find),
 	}
 	if find != nil {
 		find.ID = actual.ID
 		actual.InstanceGroupName = find.InstanceGroupName
 		actual.AdditionalSecurityGroups = find.AdditionalSecurityGroups
+		actual.WellKnownServices = find.WellKnownServices
 	}
 	return actual, nil
 }
 
-func (s *Port) Find(context *fi.Context) (*Port, error) {
-	cloud := context.Cloud.(openstack.OpenstackCloud)
+func (s *Port) Find(context *fi.CloudupContext) (*Port, error) {
+	cloud := context.T.Cloud.(openstack.OpenstackCloud)
 	opt := ports.ListOpts{
-		Name: fi.StringValue(s.Name),
+		Name: fi.ValueOf(s.Name),
 	}
 	rs, err := cloud.ListPorts(opt)
 	if err != nil {
@@ -158,7 +215,7 @@ func (s *Port) Find(context *fi.Context) (*Port, error) {
 	if rs == nil {
 		return nil, nil
 	} else if len(rs) != 1 {
-		return nil, fmt.Errorf("found multiple ports with name: %s", fi.StringValue(s.Name))
+		return nil, fmt.Errorf("found multiple ports with name: %s", fi.ValueOf(s.Name))
 	}
 
 	// sort for consistent comparison
@@ -167,8 +224,8 @@ func (s *Port) Find(context *fi.Context) (*Port, error) {
 	return newPortTaskFromCloud(cloud, s.Lifecycle, &rs[0], s)
 }
 
-func (s *Port) Run(context *fi.Context) error {
-	return fi.DefaultDeltaRunMethod(s, context)
+func (s *Port) Run(context *fi.CloudupContext) error {
+	return fi.CloudupDefaultDeltaRunMethod(s, context)
 }
 
 func (_ *Port) CheckChanges(a, e, changes *Port) error {
@@ -192,7 +249,7 @@ func (_ *Port) CheckChanges(a, e, changes *Port) error {
 
 func (*Port) RenderOpenstack(t *openstack.OpenstackAPITarget, a, e, changes *Port) error {
 	if a == nil {
-		klog.V(2).Infof("Creating Port with name: %q", fi.StringValue(e.Name))
+		klog.V(2).Infof("Creating Port with name: %q", fi.ValueOf(e.Name))
 
 		opt, err := portCreateOptsFromPortTask(t, a, e, changes)
 		if err != nil {
@@ -212,28 +269,39 @@ func (*Port) RenderOpenstack(t *openstack.OpenstackAPITarget, a, e, changes *Por
 				}
 			}
 		}
-		e.ID = fi.String(v.ID)
+		e.ID = new(v.ID)
 		klog.V(2).Infof("Creating a new Openstack port, id=%s", v.ID)
 		return nil
 	}
-	if changes != nil && changes.Tags != nil {
-		klog.V(2).Infof("Updating tags for Port with name: %q", fi.StringValue(e.Name))
-		for _, tag := range e.Tags {
-			err := t.Cloud.AppendTag(openstack.ResourceTypePort, fi.StringValue(a.ID), tag)
+	if changes != nil {
+		if changes.Tags != nil {
+			klog.V(2).Infof("Updating tags for Port with name: %q", fi.ValueOf(e.Name))
+			for _, tag := range e.Tags {
+				err := t.Cloud.AppendTag(openstack.ResourceTypePort, fi.ValueOf(a.ID), tag)
+				if err != nil {
+					return fmt.Errorf("Error appending tag to port: %v", err)
+				}
+			}
+		}
+		if changes.AllowedAddressPairs != nil {
+			klog.V(2).Infof("Updating allowed address pairs for Port with name: %q", fi.ValueOf(e.Name))
+			_, err := t.Cloud.UpdatePort(fi.ValueOf(a.ID), ports.UpdateOpts{
+				AllowedAddressPairs: &e.AllowedAddressPairs,
+			})
 			if err != nil {
-				return fmt.Errorf("Error appending tag to port: %v", err)
+				return fmt.Errorf("error updating port: %v", err)
 			}
 		}
 	}
 	e.ID = a.ID
-	klog.V(2).Infof("Using an existing Openstack port, id=%s", fi.StringValue(e.ID))
+	klog.V(2).Infof("Using an existing Openstack port, id=%s", fi.ValueOf(e.ID))
 	return nil
 }
 
 func portCreateOptsFromPortTask(t *openstack.OpenstackAPITarget, a, e, changes *Port) (ports.CreateOptsBuilder, error) {
 	sgs := make([]string, len(e.SecurityGroups)+len(e.AdditionalSecurityGroups))
 	for i, sg := range e.SecurityGroups {
-		sgs[i] = fi.StringValue(sg.ID)
+		sgs[i] = fi.ValueOf(sg.ID)
 	}
 	for i, sg := range e.AdditionalSecurityGroups {
 		opt := secgroup.ListOpts{
@@ -251,14 +319,15 @@ func portCreateOptsFromPortTask(t *openstack.OpenstackAPITarget, a, e, changes *
 	fixedIPs := make([]ports.IP, len(e.Subnets))
 	for i, subn := range e.Subnets {
 		fixedIPs[i] = ports.IP{
-			SubnetID: fi.StringValue(subn.ID),
+			SubnetID: fi.ValueOf(subn.ID),
 		}
 	}
 
 	return ports.CreateOpts{
-		Name:           fi.StringValue(e.Name),
-		NetworkID:      fi.StringValue(e.Network.ID),
-		SecurityGroups: &sgs,
-		FixedIPs:       fixedIPs,
+		Name:                fi.ValueOf(e.Name),
+		NetworkID:           fi.ValueOf(e.Network.ID),
+		SecurityGroups:      &sgs,
+		FixedIPs:            fixedIPs,
+		AllowedAddressPairs: e.AllowedAddressPairs,
 	}, nil
 }

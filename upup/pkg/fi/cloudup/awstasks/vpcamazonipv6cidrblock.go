@@ -17,13 +17,14 @@ limitations under the License.
 package awstasks
 
 import (
+	"context"
 	"fmt"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
-	"k8s.io/kops/upup/pkg/fi/cloudup/cloudformation"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraform"
 )
 
@@ -38,8 +39,8 @@ type VPCAmazonIPv6CIDRBlock struct {
 	Shared *bool
 }
 
-func (e *VPCAmazonIPv6CIDRBlock) Find(c *fi.Context) (*VPCAmazonIPv6CIDRBlock, error) {
-	cloud := c.Cloud.(awsup.AWSCloud)
+func (e *VPCAmazonIPv6CIDRBlock) Find(c *fi.CloudupContext) (*VPCAmazonIPv6CIDRBlock, error) {
+	cloud := awsup.GetCloud(c)
 
 	// If the VPC doesn't (yet) exist, there is no association
 	if e.VPC.ID == nil {
@@ -66,8 +67,8 @@ func (e *VPCAmazonIPv6CIDRBlock) Find(c *fi.Context) (*VPCAmazonIPv6CIDRBlock, e
 	return actual, nil
 }
 
-func (e *VPCAmazonIPv6CIDRBlock) Run(c *fi.Context) error {
-	return fi.DefaultDeltaRunMethod(e, c)
+func (e *VPCAmazonIPv6CIDRBlock) Run(c *fi.CloudupContext) error {
+	return fi.CloudupDefaultDeltaRunMethod(e, c)
 }
 
 func (s *VPCAmazonIPv6CIDRBlock) CheckChanges(a, e, changes *VPCAmazonIPv6CIDRBlock) error {
@@ -85,7 +86,8 @@ func (s *VPCAmazonIPv6CIDRBlock) CheckChanges(a, e, changes *VPCAmazonIPv6CIDRBl
 }
 
 func (_ *VPCAmazonIPv6CIDRBlock) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *VPCAmazonIPv6CIDRBlock) error {
-	shared := aws.BoolValue(e.Shared)
+	ctx := context.TODO()
+	shared := aws.ToBool(e.Shared)
 	if shared && a == nil {
 		// VPC not owned by kOps, no changes will be applied
 		// Verify that the Amazon IPv6 provided CIDR block was found.
@@ -98,7 +100,7 @@ func (_ *VPCAmazonIPv6CIDRBlock) RenderAWS(t *awsup.AWSAPITarget, a, e, changes 
 	}
 
 	// Response doesn't contain the new CIDR block
-	_, err := t.Cloud.EC2().AssociateVpcCidrBlock(request)
+	_, err := t.Cloud.EC2().AssociateVpcCidrBlock(ctx, request)
 	if err != nil {
 		return fmt.Errorf("error associating Amazon IPv6 provided CIDR block to VPC: %v", err)
 	}
@@ -111,29 +113,8 @@ func (_ *VPCAmazonIPv6CIDRBlock) RenderTerraform(t *terraform.TerraformTarget, a
 	return nil
 }
 
-type cloudformationVPCAmazonIPv6CIDRBlock struct {
-	VPCID      *cloudformation.Literal `json:"VpcId"`
-	AmazonIPv6 *bool                   `json:"AmazonProvidedIpv6CidrBlock"`
-}
-
-func (_ *VPCAmazonIPv6CIDRBlock) RenderCloudformation(t *cloudformation.CloudformationTarget, a, e, changes *VPCAmazonIPv6CIDRBlock) error {
-	shared := aws.BoolValue(e.Shared)
-	if shared && a == nil {
-		// VPC not owned by kOps, no changes will be applied
-		// Verify that the Amazon IPv6 provided CIDR block was found.
-		return fmt.Errorf("IPv6 CIDR block provided by Amazon not found")
-	}
-
-	cf := &cloudformationVPCAmazonIPv6CIDRBlock{
-		VPCID:      e.VPC.CloudformationLink(),
-		AmazonIPv6: aws.Bool(true),
-	}
-
-	return t.RenderResource("AWS::EC2::VPCCidrBlock", *e.Name, cf)
-}
-
 func findVPCIPv6CIDR(cloud awsup.AWSCloud, vpcID *string) (*string, error) {
-	vpc, err := cloud.DescribeVPC(aws.StringValue(vpcID))
+	vpc, err := cloud.DescribeVPC(aws.ToString(vpcID))
 	if err != nil {
 		return nil, err
 	}
@@ -141,16 +122,16 @@ func findVPCIPv6CIDR(cloud awsup.AWSCloud, vpcID *string) (*string, error) {
 	var byoIPv6CidrBlock *string
 
 	for _, association := range vpc.Ipv6CidrBlockAssociationSet {
-		if association == nil || association.Ipv6CidrBlockState == nil {
+		if association.Ipv6CidrBlockState == nil {
 			continue
 		}
 
 		// Ipv6CidrBlock is available only when state is "associated"
-		if aws.StringValue(association.Ipv6CidrBlockState.State) != ec2.VpcCidrBlockStateCodeAssociated {
+		if association.Ipv6CidrBlockState.State != ec2types.VpcCidrBlockStateCodeAssociated {
 			continue
 		}
 
-		if aws.StringValue(association.Ipv6Pool) == "Amazon" {
+		if aws.ToString(association.Ipv6Pool) == "Amazon" {
 			return association.Ipv6CidrBlock, nil
 		}
 

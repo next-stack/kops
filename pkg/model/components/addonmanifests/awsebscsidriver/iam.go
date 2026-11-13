@@ -24,19 +24,17 @@ import (
 
 // ServiceAccount represents the service-account used by the dns-controller.
 // It implements iam.Subject to get AWS IAM permissions.
-type ServiceAccount struct {
-}
+type ServiceAccount struct{}
 
 var _ iam.Subject = &ServiceAccount{}
 
 // BuildAWSPolicy generates a custom policy for a ServiceAccount IAM role.
 func (r *ServiceAccount) BuildAWSPolicy(b *iam.PolicyBuilder) (*iam.Policy, error) {
-
 	clusterName := b.Cluster.ObjectMeta.Name
-	p := iam.NewPolicy(clusterName)
+	p := iam.NewPolicy(clusterName, b.Partition, b.Region)
 
-	addSnapshotControllerPermissions := b.Cluster.Spec.SnapshotController != nil && fi.BoolValue(b.Cluster.Spec.SnapshotController.Enabled)
-	iam.AddAWSEBSCSIDriverPermissions(p, addSnapshotControllerPermissions)
+	addSnapshotControllerPermissions := b.Cluster.Spec.SnapshotController != nil && fi.ValueOf(b.Cluster.Spec.SnapshotController.Enabled)
+	iam.AddAWSEBSCSIDriverPermissions(b, p, addSnapshotControllerPermissions)
 
 	return p, nil
 }

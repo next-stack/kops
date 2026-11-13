@@ -17,51 +17,171 @@ limitations under the License.
 package terraform
 
 import (
+	"bytes"
 	"fmt"
 	"sort"
 
-	"github.com/hashicorp/hcl/v2/hclwrite"
-	"github.com/zclconf/go-cty/cty"
-	"github.com/zclconf/go-cty/cty/gocty"
+	"k8s.io/klog/v2"
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/featureflag"
+	"k8s.io/kops/upup/pkg/fi/cloudup/scaleway"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraformWriter"
 )
 
+type subscriptionIDProvider interface {
+	SubscriptionID() string
+}
+
 func (t *TerraformTarget) finishHCL2() error {
-	f := hclwrite.NewEmptyFile()
-	rootBody := f.Body()
+	buf := &bytes.Buffer{}
 
 	outputs, err := t.GetOutputs()
 	if err != nil {
 		return err
 	}
-	writeLocalsOutputs(rootBody, outputs)
+	writeLocalsOutputs(buf, outputs)
 
-	providerName := string(t.Cloud.ProviderID())
-	if t.Cloud.ProviderID() == kops.CloudProviderGCE {
-		providerName = "google"
-	}
-	providerBlock := rootBody.AppendNewBlock("provider", []string{providerName})
-	providerBody := providerBlock.Body()
-	if t.Cloud.ProviderID() == kops.CloudProviderGCE {
-		providerBody.SetAttributeValue("project", cty.StringVal(t.Project))
-	}
-	providerBody.SetAttributeValue("region", cty.StringVal(t.Cloud.Region()))
-	for k, v := range tfGetProviderExtraConfig(t.clusterSpecTarget) {
-		providerBody.SetAttributeValue(k, cty.StringVal(v))
-	}
-	rootBody.AppendNewline()
-
-	if err := t.writeFilesProvider(rootBody); err != nil {
-		return err
-	}
+	t.writeProviders(buf)
 
 	resourcesByType, err := t.GetResourcesByType()
 	if err != nil {
 		return err
 	}
 
+	t.writeResources(buf, resourcesByType)
+
+	dataSourcesByType, err := t.GetDataSourcesByType()
+	if err != nil {
+		return err
+	}
+
+	t.writeDataSources(buf, dataSourcesByType)
+
+	t.writeTerraform(buf)
+
+	t.Files["kubernetes.tf"] = buf.Bytes()
+
+	return nil
+}
+
+type output struct {
+	Value *terraformWriter.Literal
+}
+
+// writeLocalsOutputs creates the locals block and output blocks for all output variables
+// Example:
+//
+//	locals {
+//	  key1 = "value1"
+//	  key2 = "value2"
+//	}
+//
+//	output "key1" {
+//	  value = "value1"
+//	}
+//
+//	output "key2" {
+//	  value = "value2"
+//	}
+func writeLocalsOutputs(buf *bytes.Buffer, outputs map[string]terraformWriter.OutputValue) {
+	if len(outputs) == 0 {
+		return
+	}
+
+	outputNames := make([]string, 0, len(outputs))
+	locals := make(map[string]*terraformWriter.Literal, len(outputs))
+	for k, v := range outputs {
+		if _, ok := locals[k]; ok {
+			panic(fmt.Sprintf("duplicate variable found: %s", k))
+		}
+		if v.Value != nil {
+			locals[k] = v.Value
+		} else {
+			locals[k] = terraformWriter.LiteralListExpression(v.ValueArray...)
+		}
+		outputNames = append(outputNames, k)
+	}
+	sort.Strings(outputNames)
+
+	mapToElement(locals).
+		ToObject().
+		Write(buf, 0, "locals")
+	buf.WriteString("\n")
+
+	for _, tfName := range outputNames {
+		toElement(&output{Value: locals[tfName]}).Write(buf, 0, fmt.Sprintf("output %q", tfName))
+		buf.WriteString("\n")
+	}
+}
+
+func (t *TerraformTarget) writeProviders(buf *bytes.Buffer) {
+	providerName := string(t.Cloud.ProviderID())
+	if t.Cloud.ProviderID() == kops.CloudProviderGCE {
+		providerName = "google"
+	}
+	if t.Cloud.ProviderID() == kops.CloudProviderHetzner {
+		providerName = "hcloud"
+	}
+	if t.Cloud.ProviderID() == kops.CloudProviderAzure {
+		providerName = "azurerm"
+	}
+	providerBody := map[string]string{}
+	if t.Cloud.ProviderID() == kops.CloudProviderGCE {
+		providerBody["project"] = t.Project
+	}
+	if t.Cloud.ProviderID() != kops.CloudProviderHetzner && t.Cloud.ProviderID() != kops.CloudProviderDO && t.Cloud.ProviderID() != kops.CloudProviderAzure {
+		providerBody["region"] = t.Cloud.Region()
+	}
+	if t.Cloud.ProviderID() == kops.CloudProviderAzure {
+		if cloud, ok := t.Cloud.(subscriptionIDProvider); ok && cloud.SubscriptionID() != "" {
+			providerBody["subscription_id"] = cloud.SubscriptionID()
+		}
+	}
+	if t.Cloud.ProviderID() == kops.CloudProviderScaleway {
+		providerBody["zone"] = t.Cloud.(scaleway.ScwCloud).Zone()
+	}
+	for k, v := range tfGetProviderExtraConfig(t.clusterSpecTarget) {
+		providerBody[k] = v
+	}
+	obj := mapToElement(providerBody).ToObject().(*object)
+	if providerName == "azurerm" {
+		// azurerm provider requires a features block
+		obj.field["features"] = &object{field: map[string]element{}}
+	}
+	obj.Write(buf, 0, fmt.Sprintf("provider %q", providerName))
+	buf.WriteString("\n")
+
+	// Add any additional provider definition for managed files
+	keys := sortedKeysForMap(t.TerraformWriter.Providers)
+	for _, key := range keys {
+		provider := t.TerraformWriter.Providers[key]
+		providerBody := map[string]string{}
+		providerBody["alias"] = "files"
+		for k, v := range provider.Arguments {
+			providerBody[k] = v
+		}
+		for k, v := range tfGetFilesProviderExtraConfig(t.clusterSpecTarget) {
+			providerBody[k] = v
+		}
+		obj := mapToElement(providerBody).ToObject().(*object)
+		if provider.Name == "azurerm" {
+			obj.field["features"] = &object{field: map[string]element{}}
+		}
+		obj.Write(buf, 0, fmt.Sprintf("provider %q", provider.Name))
+		buf.WriteString("\n")
+	}
+}
+
+func sortedKeysForMap[K ~string, V any](m map[K]V) []K {
+	var keys []K
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+	return keys
+}
+
+func (t *TerraformTarget) writeResources(buf *bytes.Buffer, resourcesByType map[string]map[string]interface{}) {
 	resourceTypes := make([]string, 0, len(resourcesByType))
 	for resourceType := range resourcesByType {
 		resourceTypes = append(resourceTypes, resourceType)
@@ -75,134 +195,120 @@ func (t *TerraformTarget) finishHCL2() error {
 		}
 		sort.Strings(resourceNames)
 		for _, resourceName := range resourceNames {
-			item := resources[resourceName]
-
-			resBlock := rootBody.AppendNewBlock("resource", []string{resourceType, resourceName})
-			resBody := resBlock.Body()
-			resType, err := gocty.ImpliedType(item)
-			if err != nil {
-				return err
-			}
-			resVal, err := gocty.ToCtyValue(item, resType)
-			if err != nil {
-				return err
-			}
-			if resVal.IsNull() {
-				continue
-			}
-			resVal.ForEachElement(func(key cty.Value, value cty.Value) bool {
-				writeValue(resBody, key.AsString(), value)
-				return false
-			})
-			rootBody.AppendNewline()
+			toElement(resources[resourceName]).
+				Write(buf, 0, fmt.Sprintf("resource %q %q", resourceType, resourceName))
+			buf.WriteString("\n")
 		}
 	}
+}
 
-	terraformBlock := rootBody.AppendNewBlock("terraform", []string{})
-	terraformBody := terraformBlock.Body()
-	terraformBody.SetAttributeValue("required_version", cty.StringVal(">= 0.15.0"))
+func (t *TerraformTarget) writeDataSources(buf *bytes.Buffer, dataSourcesByType map[string]map[string]interface{}) {
+	dataSourceTypes := make([]string, 0, len(dataSourcesByType))
+	for dataSourceType := range dataSourcesByType {
+		dataSourceTypes = append(dataSourceTypes, dataSourceType)
+	}
+	sort.Strings(dataSourceTypes)
+	for _, dataSourceType := range dataSourceTypes {
+		dataSources := dataSourcesByType[dataSourceType]
+		dataSourceNames := make([]string, 0, len(dataSources))
+		for dataSourceName := range dataSources {
+			dataSourceNames = append(dataSourceNames, dataSourceName)
+		}
+		sort.Strings(dataSourceNames)
+		for _, dataSourceName := range dataSourceNames {
+			toElement(dataSources[dataSourceName]).
+				Write(buf, 0, fmt.Sprintf("data %q %q", dataSourceType, dataSourceName))
+			buf.WriteString("\n")
+		}
+	}
+}
 
-	requiredProvidersBlock := terraformBody.AppendNewBlock("required_providers", []string{})
-	requiredProvidersBody := requiredProvidersBlock.Body()
+func (t *TerraformTarget) writeTerraform(buf *bytes.Buffer) {
+	buf.WriteString("terraform {\n")
+	buf.WriteString("  required_version = \">= 0.15.0\"\n")
+	buf.WriteString("  required_providers {\n")
 
+	providers := make(map[string]bool)
+	providerAliases := make(map[string][]string)
 	if t.Cloud.ProviderID() == kops.CloudProviderGCE {
-		writeMap(requiredProvidersBody, "google", map[string]cty.Value{
-			"source":  cty.StringVal("hashicorp/google"),
-			"version": cty.StringVal(">= 2.19.0"),
-		})
+		providers["google"] = true
+	} else if t.Cloud.ProviderID() == kops.CloudProviderHetzner {
+		providers["hcloud"] = true
+	} else if t.Cloud.ProviderID() == kops.CloudProviderScaleway {
+		providers["scaleway"] = true
 	} else if t.Cloud.ProviderID() == kops.CloudProviderAWS {
-		configurationAliases := []*terraformWriter.Literal{terraformWriter.LiteralTokens("aws", "files")}
-		aliasesType, err := gocty.ImpliedType(configurationAliases)
-		if err != nil {
-			return err
-		}
-		aliasesVal, err := gocty.ToCtyValue(configurationAliases, aliasesType)
-		if err != nil {
-			return err
-		}
-		writeMap(requiredProvidersBody, "aws", map[string]cty.Value{
-			"source":                cty.StringVal("hashicorp/aws"),
-			"version":               cty.StringVal(">= 3.59.0"),
-			"configuration_aliases": aliasesVal,
-		})
+		providers["aws"] = true
 		if featureflag.Spotinst.Enabled() {
-			writeMap(requiredProvidersBody, "spotinst", map[string]cty.Value{
-				"source":  cty.StringVal("spotinst/spotinst"),
-				"version": cty.StringVal(">= 1.33.0"),
-			})
+			providers["spotinst"] = true
 		}
+	} else if t.Cloud.ProviderID() == kops.CloudProviderDO {
+		providers["digitalocean"] = true
+	} else if t.Cloud.ProviderID() == kops.CloudProviderAzure {
+		providers["azurerm"] = true
 	}
 
-	bytes := hclwrite.Format(f.Bytes())
-	t.Files["kubernetes.tf"] = bytes
-
-	return nil
-}
-
-// writeLocalsOutputs creates the locals block and output blocks for all output variables
-// Example:
-// locals {
-//   key1 = "value1"
-//   key2 = "value2"
-// }
-// output "key1" {
-//   value = "value1"
-// }
-// output "key2" {
-//   value = "value2"
-// }
-func writeLocalsOutputs(body *hclwrite.Body, outputs map[string]terraformWriter.OutputValue) error {
-	if len(outputs) == 0 {
-		return nil
+	for _, tfProvider := range t.TerraformWriter.Providers {
+		providers[tfProvider.Name] = true
+		providerAliases[tfProvider.Name] = append(providerAliases[tfProvider.Name], "files")
 	}
 
-	localsBlock := body.AppendNewBlock("locals", []string{})
-	body.AppendNewline()
-	// each output is added to a single locals block and its own output block
-	localsBody := localsBlock.Body()
-	existingOutputVars := make(map[string]bool)
-
-	outputNames := make([]string, 0, len(outputs))
-	for k := range outputs {
-		outputNames = append(outputNames, k)
-	}
-	sort.Strings(outputNames)
-
-	for _, tfName := range outputNames {
-		v := outputs[tfName]
-		outputBlock := body.AppendNewBlock("output", []string{tfName})
-		outputBody := outputBlock.Body()
-		if v.Value != nil {
-			writeLiteral(outputBody, "value", v.Value)
-			writeLiteral(localsBody, tfName, v.Value)
-		} else {
-			writeLiteralList(outputBody, "value", v.ValueArray)
-			writeLiteralList(localsBody, tfName, v.ValueArray)
+	providerKeys := sortedKeysForMap(providers)
+	for _, provider := range providerKeys {
+		// providerVersions could be a constant, but keeping it here
+		// because it isn't shared and to allow for more complex logic in future.
+		providerVersions := map[string]map[string]string{
+			"aws": {
+				"source":  "hashicorp/aws",
+				"version": ">= 6.57.1",
+			},
+			"google": {
+				"source":  "hashicorp/google",
+				"version": ">= 6.8.0",
+			},
+			"hcloud": {
+				"source":  "hetznercloud/hcloud",
+				"version": ">= 1.35.1",
+			},
+			"spotinst": {
+				"source":  "spotinst/spotinst",
+				"version": ">= 1.33.0",
+			},
+			"scaleway": {
+				"source":  "scaleway/scaleway",
+				"version": ">= 2.54.0",
+			},
+			"digitalocean": {
+				"source":  "digitalocean/digitalocean",
+				"version": "~>2.0",
+			},
+			"azurerm": {
+				"source":  "hashicorp/azurerm",
+				"version": ">= 5.0.0",
+			},
 		}
 
-		if existingOutputVars[tfName] {
-			return fmt.Errorf("duplicate variable found: %s", tfName)
+		providerVersion := providerVersions[provider]
+		if providerVersion == nil {
+			klog.Fatalf("unhandled provider %q", provider)
 		}
-		existingOutputVars[tfName] = true
-		body.AppendNewline()
-	}
-	return nil
-}
 
-// writeFilesProvider adds the second provider definition for managed files
-func (t *TerraformTarget) writeFilesProvider(body *hclwrite.Body) error {
-	if t.filesProvider == nil {
-		return nil
+		tf := make(map[string]*terraformWriter.Literal)
+		for k, v := range providerVersion {
+			tf[k] = terraformWriter.LiteralFromStringValue(v)
+		}
+
+		if aliases := providerAliases[provider]; len(aliases) != 0 {
+			var configurationAliases []*terraformWriter.Literal
+			for _, alias := range providerAliases[provider] {
+				configurationAlias := terraformWriter.LiteralTokens(provider, alias)
+				configurationAliases = append(configurationAliases, configurationAlias)
+			}
+			tf["configuration_aliases"] = terraformWriter.LiteralListExpression(configurationAliases...)
+		}
+
+		mapToElement(tf).Write(buf, 4, provider)
 	}
-	providerBlock := body.AppendNewBlock("provider", []string{t.filesProvider.Name})
-	providerBody := providerBlock.Body()
-	providerBody.SetAttributeValue("alias", cty.StringVal("files"))
-	for k, v := range t.filesProvider.Arguments {
-		providerBody.SetAttributeValue(k, cty.StringVal(v))
-	}
-	for k, v := range tfGetFilesProviderExtraConfig(t.clusterSpecTarget) {
-		providerBody.SetAttributeValue(k, cty.StringVal(v))
-	}
-	body.AppendNewline()
-	return nil
+
+	buf.WriteString("  }\n")
+	buf.WriteString("}\n")
 }

@@ -23,8 +23,7 @@ import (
 	"k8s.io/klog/v2"
 )
 
-type visitorBase struct {
-}
+type visitorBase struct{}
 
 func (m *visitorBase) VisitString(path []string, v string, mutator func(string)) error {
 	klog.V(10).Infof("string value at %s: %s", strings.Join(path, "."), v)
@@ -41,10 +40,16 @@ func (m *visitorBase) VisitFloat64(path []string, v float64, mutator func(float6
 	return nil
 }
 
+func (m *visitorBase) VisitMap(path []string, v map[string]interface{}) error {
+	klog.V(10).Infof("object value at %s: %v", strings.Join(path, "."), v)
+	return nil
+}
+
 type Visitor interface {
 	VisitBool(path []string, v bool, mutator func(bool)) error
 	VisitString(path []string, v string, mutator func(string)) error
 	VisitFloat64(path []string, v float64, mutator func(float64)) error
+	VisitMap(path []string, v map[string]interface{}) error
 }
 
 func visit(visitor Visitor, data interface{}, path []string, mutator func(interface{})) error {
@@ -79,6 +84,11 @@ func visit(visitor Visitor, data interface{}, path []string, mutator func(interf
 	case nil:
 	case map[string]interface{}:
 		m := data
+
+		if err := visitor.VisitMap(path, m); err != nil {
+			return err
+		}
+
 		for k, v := range m {
 			path = append(path, k)
 
@@ -104,6 +114,9 @@ func visit(visitor Visitor, data interface{}, path []string, mutator func(interf
 			}
 			path = path[:len(path)-1]
 		}
+
+	case []string:
+		// ignore - we don't have any visitors for this currently
 
 	default:
 		return fmt.Errorf("unhandled type in manifest: %T", data)

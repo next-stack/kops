@@ -24,9 +24,7 @@ import (
 	"k8s.io/kubectl/pkg/util/i18n"
 )
 
-var (
-	createSecretShort = i18n.T(`Create a secret.`)
-)
+var createSecretShort = i18n.T(`Create a secret.`)
 
 func NewCmdCreateSecret(f *util.Factory, out io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
@@ -38,7 +36,6 @@ func NewCmdCreateSecret(f *util.Factory, out io.Writer) *cobra.Command {
 	cmd.AddCommand(NewCmdCreateSecretCiliumPassword(f, out))
 	cmd.AddCommand(NewCmdCreateSecretDockerConfig(f, out))
 	cmd.AddCommand(NewCmdCreateSecretEncryptionConfig(f, out))
-	cmd.AddCommand(NewCmdCreateSecretWeavePassword(f, out))
 
 	sshPublicKey := NewCmdCreateSSHPublicKey(f, out)
 	sshPublicKey.Hidden = true

@@ -5,35 +5,57 @@ import (
 	"bytes"
 	"crypto"
 	"crypto/subtle"
+	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 
 	"github.com/google/go-tpm-tools/internal"
 	pb "github.com/google/go-tpm-tools/proto/tpm"
-	"github.com/google/go-tpm/tpm2"
+	tpmquote "github.com/google/go-tpm-tools/quote"
+	"github.com/google/go-tpm/legacy/tpm2"
 	"github.com/google/go-tpm/tpmutil"
 )
 
 // Key wraps an active asymmetric TPM2 key. This can either be a signing key or
 // an encryption key. Users of Key should be sure to call Close() when the Key
 // is no longer needed, so that the underlying TPM handle can be freed.
+// Concurrent accesses on Key are not safe, with the exception of the
+// Sign method called on the crypto.Signer returned by Key.GetSigner.
 type Key struct {
 	rw      io.ReadWriter
 	handle  tpmutil.Handle
 	pubArea tpm2.Public
 	pubKey  crypto.PublicKey
 	name    tpm2.Name
-	session session
+	session Session
+	cert    *x509.Certificate
 }
 
 // EndorsementKeyRSA generates and loads a key from DefaultEKTemplateRSA.
 func EndorsementKeyRSA(rw io.ReadWriter) (*Key, error) {
-	return NewCachedKey(rw, tpm2.HandleEndorsement, DefaultEKTemplateRSA(), EKReservedHandle)
+	ekRsa, err := NewCachedKey(rw, tpm2.HandleEndorsement, DefaultEKTemplateRSA(), EKReservedHandle)
+	if err != nil {
+		return nil, err
+	}
+	if err := ekRsa.trySetCertificateFromNvram(EKCertNVIndexRSA); err != nil {
+		ekRsa.Close()
+		return nil, err
+	}
+	return ekRsa, nil
 }
 
 // EndorsementKeyECC generates and loads a key from DefaultEKTemplateECC.
 func EndorsementKeyECC(rw io.ReadWriter) (*Key, error) {
-	return NewCachedKey(rw, tpm2.HandleEndorsement, DefaultEKTemplateECC(), EKECCReservedHandle)
+	ekEcc, err := NewCachedKey(rw, tpm2.HandleEndorsement, DefaultEKTemplateECC(), EKECCReservedHandle)
+	if err != nil {
+		return nil, err
+	}
+	if err := ekEcc.trySetCertificateFromNvram(EKCertNVIndexECC); err != nil {
+		ekEcc.Close()
+		return nil, err
+	}
+	return ekEcc, nil
 }
 
 // StorageRootKeyRSA generates and loads a key from SRKTemplateRSA.
@@ -67,14 +89,43 @@ func EndorsementKeyFromNvIndex(rw io.ReadWriter, idx uint32) (*Key, error) {
 // function will only work on a GCE VM. Unlike AttestationKeyRSA, this key uses
 // the Endorsement Hierarchy and its template loaded from GceAKTemplateNVIndexRSA.
 func GceAttestationKeyRSA(rw io.ReadWriter) (*Key, error) {
-	return EndorsementKeyFromNvIndex(rw, GceAKTemplateNVIndexRSA)
+	akRsa, err := EndorsementKeyFromNvIndex(rw, GceAKTemplateNVIndexRSA)
+	if err != nil {
+		return nil, err
+	}
+	if err := akRsa.trySetCertificateFromNvram(GceAKCertNVIndexRSA); err != nil {
+		akRsa.Close()
+		return nil, err
+	}
+	return akRsa, nil
 }
 
 // GceAttestationKeyECC generates and loads the GCE ECC AK. Note that this
 // function will only work on a GCE VM. Unlike AttestationKeyECC, this key uses
 // the Endorsement Hierarchy and its template loaded from GceAKTemplateNVIndexECC.
 func GceAttestationKeyECC(rw io.ReadWriter) (*Key, error) {
-	return EndorsementKeyFromNvIndex(rw, GceAKTemplateNVIndexECC)
+	akEcc, err := EndorsementKeyFromNvIndex(rw, GceAKTemplateNVIndexECC)
+	if err != nil {
+		return nil, err
+	}
+	if err := akEcc.trySetCertificateFromNvram(GceAKCertNVIndexECC); err != nil {
+		akEcc.Close()
+		return nil, err
+	}
+	return akEcc, nil
+}
+
+// LoadCachedKey loads a key from cachedHandle.
+// If the key is not found, an error is returned.
+// This function will not overwrite an existing key, unlike NewCachedKey.
+func LoadCachedKey(rw io.ReadWriter, cachedHandle tpmutil.Handle, keySession Session) (k *Key, err error) {
+	cachedPub, _, _, err := tpm2.ReadPublic(rw, cachedHandle)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read public area of cached key: %w", err)
+	}
+
+	k = &Key{rw: rw, handle: cachedHandle, pubArea: cachedPub, session: keySession}
+	return k, k.finish()
 }
 
 // KeyFromNvIndex generates and loads a key under the provided parent
@@ -98,9 +149,10 @@ func KeyFromNvIndex(rw io.ReadWriter, parent tpmutil.Handle, idx uint32) (*Key, 
 // is persisted to the cachedHandle, overwriting any existing key there.
 func NewCachedKey(rw io.ReadWriter, parent tpmutil.Handle, template tpm2.Public, cachedHandle tpmutil.Handle) (k *Key, err error) {
 	owner := tpm2.HandleOwner
-	if parent == tpm2.HandlePlatform {
+	switch parent {
+	case tpm2.HandlePlatform:
 		owner = tpm2.HandlePlatform
-	} else if parent == tpm2.HandleNull {
+	case tpm2.HandleNull:
 		return nil, fmt.Errorf("cannot cache objects in the null hierarchy")
 	}
 
@@ -135,6 +187,7 @@ func NewCachedKey(rw io.ReadWriter, parent tpmutil.Handle, template tpm2.Public,
 //     is created in the specified hierarchy (using CreatePrimary).
 //   - If parent is a valid key handle, a normal key object is created under
 //     that parent (using Create and Load). NOTE: Not yet supported.
+//
 // This function also assumes that the desired key:
 //   - Does not have its usage locked to specific PCR values
 //   - Usable with empty authorization sessions (i.e. doesn't need a password)
@@ -144,8 +197,7 @@ func NewKey(rw io.ReadWriter, parent tpmutil.Handle, template tpm2.Public) (k *K
 		return nil, fmt.Errorf("unsupported parent handle: %x", parent)
 	}
 
-	handle, pubArea, _, _, _, _, err :=
-		tpm2.CreatePrimaryEx(rw, parent, tpm2.PCRSelection{}, "", "", template)
+	handle, pubArea, _, _, _, _, err := tpm2.CreatePrimaryEx(rw, parent, tpm2.PCRSelection{}, "", "", template)
 	if err != nil {
 		return nil, err
 	}
@@ -173,11 +225,11 @@ func (k *Key) finish() error {
 	// We determine the right type of session based on the auth policy
 	if k.session == nil {
 		if bytes.Equal(k.pubArea.AuthPolicy, defaultEKAuthPolicy()) {
-			if k.session, err = newEKSession(k.rw); err != nil {
+			if k.session, err = NewEKSession(k.rw); err != nil {
 				return err
 			}
 		} else if len(k.pubArea.AuthPolicy) == 0 {
-			k.session = nullSession{}
+			k.session = NullSession{}
 		} else {
 			return fmt.Errorf("unknown auth policy when creating key")
 		}
@@ -338,7 +390,12 @@ func (k *Key) Unseal(in *pb.SealedBytes, opts UnsealOpts) ([]byte, error) {
 		// ECC signing key.
 		// We can detect this bug, as it triggers a RCInsufficient
 		// Unmarshaling error.
-		if paramErr, ok := certErr.(tpm2.ParameterError); ok && paramErr.Code == tpm2.RCInsufficient {
+		var (
+			paramError  tpm2.ParameterError
+			handleError tpm2.HandleError
+		)
+		if (errors.As(certErr, &paramError) && paramError.Code == tpm2.RCInsufficient) ||
+			(errors.As(certErr, &handleError) && handleError.Code == tpm2.RCInsufficient) {
 			signer, err := AttestationKeyECC(k.rw)
 			if err != nil {
 				return nil, fmt.Errorf("failed to create fallback signing key: %w", err)
@@ -369,7 +426,7 @@ func (k *Key) Unseal(in *pb.SealedBytes, opts UnsealOpts) ([]byte, error) {
 		sel.PCRs = append(sel.PCRs, int(pcr))
 	}
 
-	session, err := newPCRSession(k.rw, sel)
+	session, err := NewPCRSession(k.rw, sel)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create session: %w", err)
 	}
@@ -407,7 +464,7 @@ func (k *Key) Quote(selpcr tpm2.PCRSelection, extraData []byte) (*pb.Quote, erro
 	}
 	// Verify the quote client-side to make sure we didn't mess things up.
 	// NOTE: the quote still must be verified server-side as well.
-	if err := internal.VerifyQuote(quote, k.PublicKey(), extraData); err != nil {
+	if err := tpmquote.Verify(quote, k.PublicKey(), extraData); err != nil {
 		return nil, fmt.Errorf("failed to verify quote: %w", err)
 	}
 	return quote, nil
@@ -426,4 +483,51 @@ func (k *Key) Reseal(in *pb.SealedBytes, uOpts UnsealOpts, sOpts SealOpts) (*pb.
 
 func (k *Key) hasAttribute(attr tpm2.KeyProp) bool {
 	return k.pubArea.Attributes&attr != 0
+}
+
+// Cert returns the parsed certificate (or nil) for the given key.
+func (k *Key) Cert() *x509.Certificate {
+	return k.cert
+}
+
+// CertDERBytes provides the ASN.1 DER content of the key's certificate. If the
+// key does not have a certficate, returns nil.
+func (k *Key) CertDERBytes() []byte {
+	if k.cert == nil {
+		return nil
+	}
+	return k.cert.Raw
+}
+
+// SetCert assigns the provided certificate to the key after verifying it matches the key.
+func (k *Key) SetCert(cert *x509.Certificate) error {
+	if cert == nil || cert.PublicKey == nil {
+		return errors.New("no certificate publickey provided")
+	}
+
+	certPubKey := cert.PublicKey.(crypto.PublicKey) // This cast cannot fail
+	if !internal.PubKeysEqual(certPubKey, k.pubKey) {
+		return errors.New("certificate does not match key")
+	}
+
+	k.cert = cert
+	return nil
+}
+
+// Attempt to fetch a key's certificate from NVRAM. If the certificate is simply
+// missing, this function succeeds (and no certificate is set). This is to allow
+// for AKs and EKs that simply don't have a certificate. However, if the
+// certificate read from NVRAM is either malformed or does not match the key, we
+// return an error.
+func (k *Key) trySetCertificateFromNvram(index uint32) error {
+	certASN1, err := tpm2.NVReadEx(k.rw, tpmutil.Handle(index), tpm2.HandleOwner, "", 0)
+	if err != nil {
+		// Either the cert data is missing, or we are not allowed to read it
+		return nil
+	}
+	x509Cert, err := x509.ParseCertificate(certASN1)
+	if err != nil {
+		return fmt.Errorf("failed to parse certificate from NV memory: %w", err)
+	}
+	return k.SetCert(x509Cert)
 }

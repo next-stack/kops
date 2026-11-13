@@ -17,14 +17,15 @@ limitations under the License.
 // Package featureflag implements simple feature-flagging.
 // Feature flags can become an anti-pattern if abused.
 // We should try to use them for two use-cases:
-// * `Preview` feature flags enable a piece of functionality we haven't yet fully baked.  The user needs to 'opt-in'.
-//   We expect these flags to be removed at some time.  Normally these will default to false.
-// * Escape-hatch feature flags turn off a default that we consider risky (e.g. pre-creating DNS records).
-//   This lets us ship a behaviour, and if we encounter unusual circumstances in the field, we can
-//   allow the user to turn the behaviour off.  Normally these will default to true.
+//   - `Preview` feature flags enable a piece of functionality we haven't yet fully baked.  The user needs to 'opt-in'.
+//     We expect these flags to be removed at some time.  Normally these will default to false.
+//   - Escape-hatch feature flags turn off a default that we consider risky (e.g. pre-creating DNS records).
+//     This lets us ship a behaviour, and if we encounter unusual circumstances in the field, we can
+//     allow the user to turn the behaviour off.  Normally these will default to true.
 package featureflag
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -50,52 +51,68 @@ var (
 	// CacheNodeidentityInfo enables NodeidentityInfo caching
 	// in order to reduce the number of EC2 DescribeInstance calls.
 	CacheNodeidentityInfo = new("CacheNodeidentityInfo", Bool(false))
-	// DNSPreCreate controls whether we pre-create DNS records.
-	DNSPreCreate = new("DNSPreCreate", Bool(true))
 	// EnableSeparateConfigBase allows a config-base that is different from the state store
 	EnableSeparateConfigBase = new("EnableSeparateConfigBase", Bool(false))
 	// ExperimentalClusterDNS allows for setting the kubelet dns flag to experimental values.
 	ExperimentalClusterDNS = new("ExperimentalClusterDNS", Bool(false))
 	// GoogleCloudBucketACL means the ACL will be set on a bucket when using GCS
 	GoogleCloudBucketACL = new("GoogleCloudBucketAcl", Bool(false))
-	// KeepLaunchConfigurations can be set to prevent garbage collection of old launch configurations
-	KeepLaunchConfigurations = new("KeepLaunchConfigurations", Bool(false))
-	// SpecOverrideFlag allows setting spec values on create
-	SpecOverrideFlag = new("SpecOverrideFlag", Bool(false))
 	// Spotinst toggles the use of Spotinst integration.
 	Spotinst = new("Spotinst", Bool(false))
 	// SpotinstOcean toggles the use of Spotinst Ocean instance group implementation.
 	SpotinstOcean = new("SpotinstOcean", Bool(false))
+	// SpotinstOceanTemplate toggles the use of Spotinst Ocean object as a template for Virtual Node Groups.
+	SpotinstOceanTemplate = new("SpotinstOceanTemplate", Bool(false))
 	// SpotinstHybrid toggles between hybrid and full instance group implementations.
 	SpotinstHybrid = new("SpotinstHybrid", Bool(false))
 	// SpotinstController toggles the installation of the Spotinst controller addon.
 	SpotinstController = new("SpotinstController", Bool(true))
-	// VFSVaultSupport enables setting Vault as secret/keystore
-	VFSVaultSupport = new("VFSVaultSupport", Bool(false))
 	// VPCSkipEnableDNSSupport if set will make that a VPC does not need DNSSupport enabled.
 	VPCSkipEnableDNSSupport = new("VPCSkipEnableDNSSupport", Bool(false))
-	// SkipEtcdVersionCheck will bypass the check that etcd-manager is using a supported etcd version
-	SkipEtcdVersionCheck = new("SkipEtcdVersionCheck", Bool(false))
-	// TerraformJSON outputs terraform in JSON instead of hcl output. JSON output can be also parsed by terraform 0.12
-	TerraformJSON = new("TerraformJSON", Bool(false))
+	// EtcdEventsHTTP enables HTTP (non-TLS) for the events etcd cluster.
+	// This matches the pattern used by GCE scale tests and can help with
+	// TLS handshake overhead for the ephemeral events data.
+	// The main etcd cluster always uses HTTPS for security.
+	EtcdEventsHTTP = new("EtcdEventsHTTP", Bool(false))
 	// ClusterAddons activates experimental cluster-addons support
 	ClusterAddons = new("ClusterAddons", Bool(false))
 	// Azure toggles the Azure support.
 	Azure = new("Azure", Bool(false))
-	// KopsControllerStateStore enables fetching the kops state from kops-controller, instead of requiring access to S3/GCS/etc.
-	KopsControllerStateStore = new("KopsControllerStateStore", Bool(false))
+	// AzureTerraform toggles the Azure terraform support.
+	AzureTerraform = new("AzureTerraform", Bool(false))
 	// APIServerNodes enables ability to provision nodes that only run the kube-apiserver.
 	APIServerNodes = new("APIServerNodes", Bool(false))
+	// ExperimentalRoles enables the InstanceGroup Role field to have a comma delineated roles list.
+	// It also enables the etcd, scheduler, kube-controller-manager and cloud-controller-manager roles.
+	ExperimentalRoles = new("ExperimentalRoles", Bool(false))
 	// UseAddonOperators activates experimental addon operator support
 	UseAddonOperators = new("UseAddonOperators", Bool(false))
-	// AWSIPv6 activates experimental AWS IPv6 support.
-	AWSIPv6 = new("AWSIPv6", Bool(false))
 	// TerraformManagedFiles enables rendering managed files into the Terraform configuration.
 	TerraformManagedFiles = new("TerraformManagedFiles", Bool(true))
-	// AlphaAllowGCE is a feature flag that gates GCE support while it is alpha.
-	AlphaAllowGCE = new("AlphaAllowGCE", Bool(false))
-	// AlphaAllowALI is a feature flag that gates aliyun support while it is alpha.
-	AlphaAllowALI = new("AlphaAllowALI", Bool(false))
+	// ImageDigest remaps all manifests with image digests
+	ImageDigest = new("ImageDigest", Bool(true))
+	// Scaleway toggles the Scaleway Cloud support.
+	Scaleway = new("Scaleway", Bool(false))
+	// SELinuxMount is an escape-hatch flag for CSI driver SELinux mount support
+	// (CSIDriver.spec.seLinuxMount and the host mounts it requires) in the AWS EBS
+	// and GCP PD CSI drivers. The feature is enabled per-cluster via
+	// spec.containerd.selinuxEnabled; this flag is a plain kill switch on top of
+	// that (set -SELinuxMount to disable the feature unconditionally, e.g. if it
+	// causes trouble in the field). See
+	// upup/pkg/fi/cloudup.TemplateFunctions.UseSELinuxMount.
+	SELinuxMount = new("SELinuxMount", Bool(true))
+	// DO Terraform toggles the DO terraform support.
+	DOTerraform = new("DOTerraform", Bool(false))
+	// Metal enables the experimental bare-metal support.
+	Metal = new("Metal", Bool(false))
+	// AWSSingleNodesInstanceGroup enables the creation of a single node instance group instead of one per availability zone.
+	AWSSingleNodesInstanceGroup = new("AWSSingleNodesInstanceGroup", Bool(false))
+	// ClusterAPI enables support for Cluster API (CAPI) resources.
+	ClusterAPI = new("ClusterAPI", Bool(false))
+	// DiscoveryService enables support for OIDC discovery via a hosted service.
+	DiscoveryService = new("DiscoveryService", Bool(false))
+	// Linode feature flag toggles Akamai (Linode) Cloud support.
+	Linode = new("Linode", Bool(false))
 )
 
 // FeatureFlag defines a feature flag
@@ -147,6 +164,7 @@ func ParseFlags(f string) {
 	defer flagsMutex.Unlock()
 
 	f = strings.TrimSpace(f)
+	var parsed, unknown int
 	for _, s := range strings.Split(f, ",") {
 		s = strings.TrimSpace(s)
 		if s == "" {
@@ -165,8 +183,25 @@ func ParseFlags(f string) {
 		if ff != nil {
 			klog.Infof("FeatureFlag %q=%v", ff.Key, enabled)
 			ff.enabled = &enabled
+			parsed++
 		} else {
 			klog.Infof("Unknown FeatureFlag %q", s)
+			unknown++
 		}
 	}
+	if f != "" {
+		klog.Infof("ParseFlags: parsed %d flags from %q (unknown=%d, registered=%d)", parsed, f, unknown, len(flags))
+	}
+}
+
+// Get returns given FeatureFlag.
+func Get(flagName string) (*FeatureFlag, error) {
+	flagsMutex.Lock()
+	defer flagsMutex.Unlock()
+
+	flag, found := flags[flagName]
+	if !found {
+		return nil, fmt.Errorf("flag %s not found", flagName)
+	}
+	return flag, nil
 }

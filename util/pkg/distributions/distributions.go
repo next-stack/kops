@@ -18,6 +18,9 @@ package distributions
 
 import (
 	"fmt"
+	"os"
+
+	"k8s.io/klog/v2"
 )
 
 // Distribution represents a particular version of an operating system.
@@ -37,22 +40,35 @@ type Distribution struct {
 }
 
 var (
-	DistributionDebian9      = Distribution{packageFormat: "deb", project: "debian", id: "stretch", version: 9}
-	DistributionDebian10     = Distribution{packageFormat: "deb", project: "debian", id: "buster", version: 10}
-	DistributionDebian11     = Distribution{packageFormat: "deb", project: "debian", id: "bullseye", version: 11}
-	DistributionUbuntu1604   = Distribution{packageFormat: "deb", project: "ubuntu", id: "xenial", version: 16.04}
-	DistributionUbuntu1804   = Distribution{packageFormat: "deb", project: "ubuntu", id: "bionic", version: 18.04}
-	DistributionUbuntu2004   = Distribution{packageFormat: "deb", project: "ubuntu", id: "focal", version: 20.04}
-	DistributionUbuntu2010   = Distribution{packageFormat: "deb", project: "ubuntu", id: "groovy", version: 20.10}
-	DistributionUbuntu2104   = Distribution{packageFormat: "deb", project: "ubuntu", id: "hirsute", version: 21.04}
-	DistributionUbuntu2110   = Distribution{packageFormat: "deb", project: "ubuntu", id: "impish", version: 21.10}
-	DistributionAmazonLinux2 = Distribution{packageFormat: "rpm", project: "amazonlinux2", id: "amazonlinux2", version: 0}
-	DistributionRhel7        = Distribution{packageFormat: "rpm", project: "rhel", id: "rhel7", version: 7}
-	DistributionCentos7      = Distribution{packageFormat: "rpm", project: "centos", id: "centos7", version: 7}
-	DistributionRhel8        = Distribution{packageFormat: "rpm", project: "rhel", id: "rhel8", version: 8}
-	DistributionCentos8      = Distribution{packageFormat: "rpm", project: "centos", id: "centos8", version: 8}
-	DistributionFlatcar      = Distribution{packageFormat: "", project: "flatcar", id: "flatcar", version: 0}
-	DistributionContainerOS  = Distribution{packageFormat: "", project: "containeros", id: "containeros", version: 0}
+	// Debian-family distros
+	DistributionDebian11   = Distribution{packageFormat: "deb", project: "debian", id: "bullseye", version: 11}
+	DistributionDebian12   = Distribution{packageFormat: "deb", project: "debian", id: "bookworm", version: 12}
+	DistributionDebian13   = Distribution{packageFormat: "deb", project: "debian", id: "trixie", version: 13}
+	DistributionUbuntu2204 = Distribution{packageFormat: "deb", project: "ubuntu", id: "jammy", version: 22.04}
+	DistributionUbuntu2404 = Distribution{packageFormat: "deb", project: "ubuntu", id: "noble", version: 24.04}
+	DistributionUbuntu2510 = Distribution{packageFormat: "deb", project: "ubuntu", id: "questing", version: 25.10}
+	DistributionUbuntu2604 = Distribution{packageFormat: "deb", project: "ubuntu", id: "resolute", version: 26.04}
+	DistributionUbuntu2610 = Distribution{packageFormat: "deb", project: "ubuntu", id: "stonking", version: 26.10}
+
+	// Redhat-family distros
+	DistributionRhel8           = Distribution{packageFormat: "rpm", project: "rhel", id: "rhel8", version: 8}
+	DistributionRhel9           = Distribution{packageFormat: "rpm", project: "rhel", id: "rhel9", version: 9}
+	DistributionRhel10          = Distribution{packageFormat: "rpm", project: "rhel", id: "rhel10", version: 10}
+	DistributionCentOS9         = Distribution{packageFormat: "rpm", project: "centos", id: "centos", version: 9}
+	DistributionCentOS10        = Distribution{packageFormat: "rpm", project: "centos", id: "centos", version: 10}
+	DistributionRocky8          = Distribution{packageFormat: "rpm", project: "rocky", id: "rocky8", version: 8}
+	DistributionRocky9          = Distribution{packageFormat: "rpm", project: "rocky", id: "rocky9", version: 9}
+	DistributionRocky10         = Distribution{packageFormat: "rpm", project: "rocky", id: "rocky10", version: 10}
+	DistributionFedora41        = Distribution{packageFormat: "rpm", project: "fedora", id: "fedora41", version: 41}
+	DistributionFedora42        = Distribution{packageFormat: "rpm", project: "fedora", id: "fedora42", version: 42}
+	DistributionFedora43        = Distribution{packageFormat: "rpm", project: "fedora", id: "fedora43", version: 43}
+	DistributionFedora44        = Distribution{packageFormat: "rpm", project: "fedora", id: "fedora44", version: 44}
+	DistributionAmazonLinux2023 = Distribution{packageFormat: "rpm", project: "amazonlinux", id: "amzn", version: 2023}
+	DistributionAmazonLinux2027 = Distribution{packageFormat: "rpm", project: "amazonlinux", id: "amzn", version: 2027}
+
+	// Immutable distros
+	DistributionFlatcar     = Distribution{packageFormat: "", project: "flatcar", id: "flatcar", version: 0}
+	DistributionContainerOS = Distribution{packageFormat: "", project: "containeros", id: "containeros", version: 0}
 )
 
 // IsDebianFamily returns true if this distribution uses deb packages and generally follows debian package names
@@ -60,14 +76,47 @@ func (d *Distribution) IsDebianFamily() bool {
 	return d.packageFormat == "deb"
 }
 
+// IsDebian returns true if this distribution is Debian
+func (d *Distribution) IsDebian() bool {
+	return d.project == "debian"
+}
+
 // IsUbuntu returns true if this distribution is Ubuntu (but not debian)
 func (d *Distribution) IsUbuntu() bool {
 	return d.project == "ubuntu"
 }
 
+// IsAmazonLinux returns true if this distribution is Amazon Linux
+func (d *Distribution) IsAmazonLinux() bool {
+	return d.project == "amazonlinux"
+}
+
 // IsRHELFamily returns true if this distribution uses rpm packages and generally follows rhel package names
 func (d *Distribution) IsRHELFamily() bool {
 	return d.packageFormat == "rpm"
+}
+
+// HasDNF returns true if this distribution uses dnf
+func (d *Distribution) HasDNF() bool {
+	if !d.IsRHELFamily() {
+		return false
+	}
+	// All our RHEL distros support DNF at this point, it seems
+	switch d.project {
+	case "rhel":
+		return d.version >= 8
+	case "rocky":
+		return d.version >= 8
+	case "centos":
+		return d.version >= 8
+	case "fedora":
+		return d.version >= 22
+	case "amazonlinux":
+		return true
+	default:
+		klog.Warningf("unknown project for HasDNF (%q), assuming does support dnf", d.project)
+		return true
+	}
 }
 
 // IsSystemd returns true if this distribution uses systemd
@@ -81,11 +130,13 @@ func (d *Distribution) DefaultUsers() ([]string, error) {
 	case "debian":
 		return []string{"admin", "root"}, nil
 	case "ubuntu":
-		return []string{"ubuntu"}, nil
+		return []string{"ubuntu", "root"}, nil
 	case "centos":
 		return []string{"centos"}, nil
-	case "rhel", "amazonlinux2":
+	case "rhel", "amazonlinux":
 		return []string{"ec2-user"}, nil
+	case "rocky":
+		return []string{"rocky"}, nil
 	case "flatcar":
 		return []string{"core"}, nil
 	default:
@@ -96,14 +147,45 @@ func (d *Distribution) DefaultUsers() ([]string, error) {
 // HasLoopbackEtcResolvConf is true if systemd-resolved has put the loopback address 127.0.0.53 as a nameserver in /etc/resolv.conf
 // See https://github.com/coredns/coredns/blob/master/plugin/loop/README.md#troubleshooting-loops-in-kubernetes-clusters
 func (d *Distribution) HasLoopbackEtcResolvConf() bool {
-	if d.IsUbuntu() {
-		// Ubuntu > 16.04 has it
-		return d.version > 16.04
+	switch d.project {
+	case "ubuntu", "flatcar":
+		return true
+	default:
+		if _, err := os.Stat("/run/systemd/resolve/resolv.conf"); err == nil {
+			return true
+		}
+		return false
 	}
-	return false
 }
 
 // Version returns the (project scoped) numeric version
 func (d *Distribution) Version() float32 {
 	return d.version
+}
+
+// ForceNftables returns true if this distribution requires nftables proxy mode
+// for kube-proxy. On these distributions, iptables mode is not functional because the
+// necessary kernel modules (nf_conntrack) are not available.
+// Keep this logic aligned with PackagesBuilder in nodeup/pkg/model/packages.go.
+func (d *Distribution) ForceNftables() bool {
+	if !d.IsRHELFamily() {
+		return false
+	}
+
+	// These distros have working iptables or iptables-nft
+	switch *d {
+	case DistributionAmazonLinux2023, DistributionAmazonLinux2027:
+		return false
+	case DistributionRhel8, DistributionRhel9:
+		return false
+	case DistributionRocky8, DistributionRocky9:
+		return false
+	case DistributionCentOS9:
+		return false
+	}
+
+	// All other RHEL family distros (RHEL10+, Rocky10+, CentOS10+, Fedora, etc.)
+	// require nftables because iptables is deprecated and the necessary
+	// kernel modules (nf_conntrack) may not be available.
+	return true
 }

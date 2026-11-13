@@ -34,9 +34,15 @@ const (
 // DefaultInstanceGroupVolumeSize returns the default volume size for nodes in an InstanceGroup with the specified role
 func DefaultInstanceGroupVolumeSize(role kops.InstanceGroupRole) (int32, error) {
 	switch role {
-	case kops.InstanceGroupRoleMaster:
+	case kops.InstanceGroupRoleControlPlane:
 		return DefaultVolumeSizeMaster, nil
 	case kops.InstanceGroupRoleAPIServer:
+		return DefaultVolumeSizeNode, nil
+	case kops.InstanceGroupRoleEtcd:
+		return DefaultVolumeSizeMaster, nil
+	case kops.InstanceGroupRoleScheduler:
+		return DefaultVolumeSizeNode, nil
+	case kops.InstanceGroupRoleKubeControllerManager:
 		return DefaultVolumeSizeNode, nil
 	case kops.InstanceGroupRoleNode:
 		return DefaultVolumeSizeNode, nil

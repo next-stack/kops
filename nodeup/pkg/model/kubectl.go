@@ -31,10 +31,10 @@ type KubectlBuilder struct {
 	*NodeupModelContext
 }
 
-var _ fi.ModelBuilder = &KubectlBuilder{}
+var _ fi.NodeupModelBuilder = &KubectlBuilder{}
 
 // Build is responsible for managing the kubectl on the nodes
-func (b *KubectlBuilder) Build(c *fi.ModelBuilderContext) error {
+func (b *KubectlBuilder) Build(c *fi.NodeupModelBuilderContext) error {
 	if !b.HasAPIServer {
 		return nil
 	}
@@ -103,10 +103,16 @@ func (b *KubectlBuilder) Build(c *fi.ModelBuilderContext) error {
 
 // findKubeconfigUser finds the default user for whom we should create a kubeconfig
 func (b *KubectlBuilder) findKubeconfigUser() (*fi.User, *fi.Group, error) {
-	users, err := b.Distribution.DefaultUsers()
-	if err != nil {
-		klog.Warningf("won't write kubeconfig to homedir for distribution %s: %v", b.Distribution, err)
-		return nil, nil, nil
+	var users []string
+	if b.RunningOnAzure() {
+		users = append(users, b.NodeupConfig.AzureAdminUser)
+	} else {
+		defaultUsers, err := b.Distribution.DefaultUsers()
+		if err != nil {
+			klog.Warningf("won't write kubeconfig to homedir for distribution %v: %v", b.Distribution, err)
+			return nil, nil, nil
+		}
+		users = append(users, defaultUsers...)
 	}
 
 	for _, s := range users {

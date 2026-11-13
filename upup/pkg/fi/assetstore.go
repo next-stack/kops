@@ -17,6 +17,7 @@ limitations under the License.
 package fi
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -77,8 +78,10 @@ type assetResource struct {
 	Asset *asset
 }
 
-var _ Resource = &assetResource{}
-var _ HasSource = &assetResource{}
+var (
+	_ Resource  = &assetResource{}
+	_ HasSource = &assetResource{}
+)
 
 func (r *assetResource) Open() (io.Reader, error) {
 	return r.Asset.resource.Open()
@@ -197,13 +200,22 @@ func hashFromHTTPHeader(url string) (*hashing.Hash, error) {
 }
 
 // Add an asset into the store, in one of the recognized formats (see Assets in types package)
-func (a *AssetStore) Add(id string) error {
-	if strings.HasPrefix(id, "http://") || strings.HasPrefix(id, "https://") {
-		return a.addURLs(strings.Split(id, ","), nil)
+func (a *AssetStore) Add(ctx context.Context, id string) error {
+	if strings.HasPrefix(id, "http://") || strings.HasPrefix(id, "https://") || strings.HasPrefix(id, "gs://") || strings.HasPrefix(id, "s3://") || strings.HasPrefix(id, "azureblob://") {
+		return a.addURLs(ctx, strings.Split(id, ","), nil)
 	}
 	i := strings.Index(id, "@http://")
 	if i == -1 {
 		i = strings.Index(id, "@https://")
+	}
+	if i == -1 {
+		i = strings.Index(id, "@gs://")
+	}
+	if i == -1 {
+		i = strings.Index(id, "@s3://")
+	}
+	if i == -1 {
+		i = strings.Index(id, "@azureblob://")
 	}
 	if i != -1 {
 		urls := strings.Split(id[i+1:], ",")
@@ -211,13 +223,13 @@ func (a *AssetStore) Add(id string) error {
 		if err != nil {
 			return err
 		}
-		return a.addURLs(urls, hash)
+		return a.addURLs(ctx, urls, hash)
 	}
 	// TODO: local files!
 	return fmt.Errorf("unknown asset format: %q", id)
 }
 
-func (a *AssetStore) addURLs(urls []string, hash *hashing.Hash) error {
+func (a *AssetStore) addURLs(ctx context.Context, urls []string, hash *hashing.Hash) error {
 	if len(urls) == 0 {
 		return fmt.Errorf("no urls were specified")
 	}
@@ -238,12 +250,13 @@ func (a *AssetStore) addURLs(urls []string, hash *hashing.Hash) error {
 		}
 	}
 
-	// We assume the first url is the "main" url, and download to that _name_, wherever we get it from
+	// We assume the first url is the "main" url, and download to the base of that _name_, wherever we get it from
 	primaryURL := urls[0]
-	localFile := path.Join(a.cacheDir, hash.String()+"_"+utils.SanitizeString(primaryURL))
+	key := path.Base(primaryURL)
+	localFile := path.Join(a.cacheDir, hash.String()+"_"+utils.SanitizeString(key))
 
 	for _, url := range urls {
-		_, err = DownloadURL(url, localFile, hash)
+		_, err = DownloadURL(ctx, url, localFile, hash)
 		if err != nil {
 			klog.Warningf("error downloading url %q: %v", url, err)
 			continue
@@ -255,7 +268,6 @@ func (a *AssetStore) addURLs(urls []string, hash *hashing.Hash) error {
 		return err
 	}
 
-	key := path.Base(primaryURL)
 	assetPath := primaryURL
 	r := NewFileResource(localFile)
 
@@ -283,48 +295,6 @@ func (a *AssetStore) addURLs(urls []string, hash *hashing.Hash) error {
 	return nil
 }
 
-//func (a *AssetStore) addFile(assetPath string, p string) error {
-//	r := NewFileResource(p)
-//	return a.addResource(assetPath, r)
-//}
-
-//func (a *AssetStore) addResource(assetPath string, r Resource) error {
-//	hash, err := HashForResource(r, HashAlgorithmSHA256)
-//	if err != nil {
-//		return err
-//	}
-//
-//	localFile := path.Join(a.assetDir, hash + "_" + utils.SanitizeString(assetPath))
-//	hasHash, err := fileHasHash(localFile, hash)
-//	if err != nil {
-//		return err
-//	}
-//
-//	if !hasHash {
-//		err = WriteFile(localFile, r, 0644, 0755)
-//		if err != nil {
-//			return err
-//		}
-//	}
-//
-//	asset := &asset{
-//		Key:       localFile,
-//		AssetPath: assetPath,
-//		resource:  r,
-//	}
-//	klog.V(2).Infof("added asset %q for %q", asset.Key, asset.resource)
-//	a.assets = append(a.assets, asset)
-//
-//	if strings.HasSuffix(assetPath, ".tar.gz") {
-//		err = a.addArchive(localFile)
-//		if err != nil {
-//			return err
-//		}
-//	}
-//
-//	return nil
-//}
-
 func (a *AssetStore) addArchive(archiveSource *Source, archiveFile string) error {
 	extracted := path.Join(a.cacheDir, "extracted/"+path.Base(archiveFile))
 
@@ -332,7 +302,7 @@ func (a *AssetStore) addArchive(archiveSource *Source, archiveFile string) error
 		// We extract to a temporary dir which we then rename so this is atomic
 		// (untarring can be slow, and we might crash / be interrupted half-way through)
 		extractedTemp := extracted + ".tmp-" + strconv.FormatInt(time.Now().UnixNano(), 10)
-		err := os.MkdirAll(extractedTemp, 0755)
+		err := os.MkdirAll(extractedTemp, 0o755)
 		if err != nil {
 			return fmt.Errorf("error creating directories %q: %v", path.Dir(extractedTemp), err)
 		}
@@ -388,5 +358,4 @@ func (a *AssetStore) addArchive(archiveSource *Source, archiveFile string) error
 		return fmt.Errorf("error adding expanded asset files in %q: %v", extracted, err)
 	}
 	return nil
-
 }

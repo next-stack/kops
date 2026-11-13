@@ -22,15 +22,19 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
-	"github.com/octago/sflags/gen/gpflag"
+	"github.com/urfave/sflags/gen/gpflag"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
-	"sigs.k8s.io/kubetest2/pkg/testers/ginkgo"
-
+	unversioned "k8s.io/kops/pkg/apis/kops"
 	api "k8s.io/kops/pkg/apis/kops/v1alpha2"
+	csimanifests "k8s.io/kops/tests/e2e/csi-manifests"
 	"k8s.io/kops/tests/e2e/pkg/kops"
+	"k8s.io/kops/upup/pkg/fi/cloudup/gce"
+	"sigs.k8s.io/kubetest2/pkg/artifacts"
+	"sigs.k8s.io/kubetest2/pkg/testers/ginkgo"
 )
 
 // Tester wraps kubetest2's ginkgo tester with additional functionality
@@ -39,18 +43,6 @@ type Tester struct {
 
 	kopsCluster        *api.Cluster
 	kopsInstanceGroups []*api.InstanceGroup
-}
-
-func (t *Tester) pretestSetup() error {
-	kubectlPath, err := t.AcquireKubectl()
-	if err != nil {
-		return fmt.Errorf("failed to get kubectl package from published releases: %s", err)
-	}
-
-	existingPath := os.Getenv("PATH")
-	newPath := fmt.Sprintf("%v:%v", filepath.Dir(kubectlPath), existingPath)
-	klog.Info("Setting PATH=", newPath)
-	return os.Setenv("PATH", newPath)
 }
 
 // parseKubeconfig will get the current kubeconfig, and extract the specified field by jsonpath.
@@ -70,7 +62,7 @@ func parseKubeconfig(jsonPath string) (string, error) {
 
 	s := strings.TrimSpace(stdout.String())
 	if s == "" {
-		return "", fmt.Errorf("kubeconfig did not contain " + jsonPath)
+		return "", fmt.Errorf("kubeconfig did not contain %q", jsonPath)
 	}
 	return s, nil
 }
@@ -102,6 +94,10 @@ func hasFlag(args string, flag string) bool {
 	return false
 }
 
+func (t *Tester) getKopsVersion() (string, error) {
+	return kops.GetVersion("kops")
+}
+
 func (t *Tester) getKopsCluster() (*api.Cluster, error) {
 	if t.kopsCluster != nil {
 		return t.kopsCluster, nil
@@ -114,14 +110,13 @@ func (t *Tester) getKopsCluster() (*api.Cluster, error) {
 
 	kopsClusterName := currentContext
 
-	cluster, err := kops.GetCluster(kopsClusterName)
+	cluster, err := kops.GetCluster("kops", kopsClusterName, nil, true)
 	if err != nil {
 		return nil, err
 	}
 	t.kopsCluster = cluster
 
 	return cluster, nil
-
 }
 
 func (t *Tester) getKopsInstanceGroups() ([]*api.InstanceGroup, error) {
@@ -134,15 +129,15 @@ func (t *Tester) getKopsInstanceGroups() ([]*api.InstanceGroup, error) {
 		return nil, err
 	}
 
-	igs, err := kops.GetInstanceGroups(cluster.Name)
+	igs, err := kops.GetInstanceGroups("kops", cluster.Name, nil)
 	if err != nil {
 		return nil, err
 	}
 	t.kopsInstanceGroups = igs
 
 	return igs, nil
-
 }
+
 func (t *Tester) addProviderFlag() error {
 	if hasFlag(t.TestArgs, "provider") {
 		return nil
@@ -154,12 +149,12 @@ func (t *Tester) addProviderFlag() error {
 	}
 
 	provider := ""
-	switch cluster.Spec.CloudProvider {
-	case "aws", "gce":
-		provider = cluster.Spec.CloudProvider
+	switch cluster.Spec.LegacyCloudProvider {
+	case "aws", "azure", "gce":
+		provider = cluster.Spec.LegacyCloudProvider
 	case "digitalocean":
 	default:
-		klog.Warningf("unhandled cluster.spec.cloudProvider %q for determining ginkgo Provider", cluster.Spec.CloudProvider)
+		klog.Warningf("unhandled cluster.spec.cloudProvider %q for determining ginkgo Provider", cluster.Spec.LegacyCloudProvider)
 	}
 
 	klog.Infof("Setting --provider=%s", provider)
@@ -173,7 +168,8 @@ func (t *Tester) addZoneFlag() error {
 		return nil
 	}
 
-	zoneNames, err := t.getZones()
+	// The zone flag is used to provision volumes, and we try to attach that volume to a (normal) pod
+	zoneNames, err := t.getSchedulableZones()
 	if err != nil {
 		return err
 	}
@@ -183,7 +179,43 @@ func (t *Tester) addZoneFlag() error {
 	klog.Infof("Setting --gce-zone=%s", zone)
 	t.TestArgs += " --gce-zone=" + zone
 
-	// TODO: Pass the new gce-zones flag for 1.21 with all zones?
+	return nil
+}
+
+func (t *Tester) addNodeIG() error {
+	cluster, err := t.getKopsCluster()
+	if err != nil {
+		return err
+	}
+
+	igs, err := kops.GetInstanceGroups("kops", cluster.Name, nil)
+	if err != nil {
+		return err
+	}
+
+	var ig *api.InstanceGroup
+	for _, v := range igs {
+		if unversioned.InstanceGroupRole(v.Spec.Role).HasNode() {
+			ig = v
+		}
+	}
+	if ig.Spec.MaxSize != nil {
+		numNodes := int(*ig.Spec.MaxSize) // we assume that MinSize = Maxsize, this is true for e2e testing
+		klog.Infof("Setting -num-nodes=%v", numNodes)
+		t.TestArgs += " -num-nodes=" + strconv.Itoa(numNodes)
+	}
+
+	// Skip the rest of this function for non gce clusters
+	if cluster.Spec.LegacyCloudProvider != "gce" {
+		return nil
+	}
+
+	nodeTag := gce.TagForRole(cluster.ObjectMeta.Name, unversioned.InstanceGroupRoleNode)
+	klog.Infof("Setting --node-tag=%s", nodeTag)
+	t.TestArgs += " --node-tag=" + nodeTag
+	igName := gce.NameForInstanceGroupManager(cluster.ObjectMeta.Name, ig.ObjectMeta.Name, ig.Spec.Zones[0])
+	klog.Infof("Setting --node-instance-group=%s", igName)
+	t.TestArgs += " --node-instance-group=" + igName
 
 	return nil
 }
@@ -193,7 +225,7 @@ func (t *Tester) addMultiZoneFlag() error {
 		return nil
 	}
 
-	zoneNames, err := t.getZones()
+	zoneNames, err := t.getAllZones()
 	if err != nil {
 		return err
 	}
@@ -217,14 +249,16 @@ func (t *Tester) addRegionFlag() error {
 
 	// We don't explicitly set the provider's region in the spec so we need to extract it from vairous fields
 	var region string
-	switch cluster.Spec.CloudProvider {
+	switch cluster.Spec.LegacyCloudProvider {
 	case "aws":
 		zone := cluster.Spec.Subnets[0].Zone
 		region = zone[:len(zone)-1]
+	case "azure":
+		region = cluster.Spec.Subnets[0].Region
 	case "gce":
 		region = cluster.Spec.Subnets[0].Region
 	default:
-		klog.Warningf("unhandled region detection for cloud provider: %v", cluster.Spec.CloudProvider)
+		klog.Warningf("unhandled region detection for cloud provider: %v", cluster.Spec.LegacyCloudProvider)
 	}
 
 	klog.Infof("Setting --gce-region=%s", region)
@@ -269,35 +303,86 @@ func (t *Tester) addProjectFlag() error {
 	return nil
 }
 
-func (t *Tester) getZones() ([]string, error) {
+func (t *Tester) getZonesForInstanceGroups(igs []*api.InstanceGroup) ([]string, error) {
 	cluster, err := t.getKopsCluster()
 	if err != nil {
 		return nil, err
 	}
 
+	clusterSubnets := make(map[string]*api.ClusterSubnetSpec)
+	for i := range cluster.Spec.Subnets {
+		subnet := &cluster.Spec.Subnets[i]
+		clusterSubnets[subnet.Name] = subnet
+	}
+
+	zones := sets.NewString()
+	for _, ig := range igs {
+		// Gather zones on GCE
+		for _, zone := range ig.Spec.Zones {
+			zones.Insert(zone)
+		}
+
+		// Gather zones on AWS
+		for _, subnetName := range ig.Spec.Subnets {
+			subnet := clusterSubnets[subnetName]
+			if subnet == nil {
+				return nil, fmt.Errorf("instanceGroup %q specified subnet %q, but was not found in cluster", ig.Name, subnetName)
+			}
+			if subnet.Zone != "" {
+				zones.Insert(subnet.Zone)
+			}
+		}
+	}
+
+	zoneNames := zones.List()
+	if len(zoneNames) == 0 {
+		return nil, nil
+	}
+	return zoneNames, nil
+}
+
+func (t *Tester) getAllZones() ([]string, error) {
 	igs, err := t.getKopsInstanceGroups()
 	if err != nil {
 		return nil, err
 	}
 
-	zones := sets.NewString()
-	// Gather zones on AWS
-	for _, subnet := range cluster.Spec.Subnets {
-		if subnet.Zone != "" {
-			zones.Insert(subnet.Zone)
-		}
+	zoneNames, err := t.getZonesForInstanceGroups(igs)
+	if err != nil {
+		return nil, err
 	}
-	// Gather zones on GCE
-	for _, ig := range igs {
-		for _, zone := range ig.Spec.Zones {
-			zones.Insert(zone)
-		}
-	}
-	zoneNames := zones.List()
 
 	if len(zoneNames) == 0 {
 		klog.Warningf("no zones found in instance groups")
-		return nil, nil
+	}
+	return zoneNames, nil
+}
+
+func (t *Tester) getSchedulableZones() ([]string, error) {
+	igs, err := t.getKopsInstanceGroups()
+	if err != nil {
+		return nil, err
+	}
+
+	var schedulable []*api.InstanceGroup
+	for _, ig := range igs {
+		if unversioned.InstanceGroupRole(ig.Spec.Role).HasControlPlane() {
+			continue
+		}
+		if unversioned.InstanceGroupRole(ig.Spec.Role).HasAPIServer() {
+			continue
+		}
+
+		schedulable = append(schedulable, ig)
+	}
+
+	zoneNames, err := t.getZonesForInstanceGroups(schedulable)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(zoneNames) == 0 {
+		klog.Warningf("no zones found in schedulable instance groups")
 	}
 	return zoneNames, nil
 }
@@ -308,7 +393,7 @@ func (t *Tester) addNodeOSArchFlag() error {
 		return err
 	}
 	for _, ig := range igs {
-		if strings.Contains(ig.Spec.Image, "arm64") {
+		if strings.Contains(ig.Spec.Image, "arm64") || strings.Contains(ig.Spec.Image, "aarch64") {
 			klog.Info("Setting --node-os-arch=arm64")
 			t.TestArgs += " --node-os-arch=arm64"
 			break
@@ -321,9 +406,82 @@ func (t *Tester) addNonBlockingTaintsFlag() {
 	if hasFlag(t.TestArgs, "non-blocking-taints") {
 		return
 	}
-	nbt := "node-role.kubernetes.io/master,node-role.kubernetes.io/api-server"
+	nbt := "node-role.kubernetes.io/master,"
+	nbt += "node-role.kubernetes.io/api-server,"
+	nbt += "node-role.kubernetes.io/control-plane"
 	klog.Infof("Setting --non-blocking-taints=%s", nbt)
 	t.TestArgs += fmt.Sprintf(" --non-blocking-taints=%v", nbt)
+}
+
+func (t *Tester) addCSIDriverFlags() error {
+	cluster, err := t.getKopsCluster()
+	if err != nil {
+		return err
+	}
+
+	var provider string
+	switch cluster.Spec.LegacyCloudProvider {
+	case "aws":
+		if cluster.Spec.CloudConfig != nil &&
+			cluster.Spec.CloudConfig.AWSEBSCSIDriver != nil &&
+			cluster.Spec.CloudConfig.AWSEBSCSIDriver.Enabled != nil &&
+			!*cluster.Spec.CloudConfig.AWSEBSCSIDriver.Enabled {
+			break
+		}
+		provider = "aws-ebs"
+	case "gce":
+		if cluster.Spec.CloudConfig != nil &&
+			cluster.Spec.CloudConfig.GCPPDCSIDriver != nil &&
+			cluster.Spec.CloudConfig.GCPPDCSIDriver.Enabled != nil &&
+			!*cluster.Spec.CloudConfig.GCPPDCSIDriver.Enabled {
+			break
+		}
+		provider = "gcp-pd"
+	case "azure":
+		provider = "azure-disk"
+	case "digitalocean":
+		provider = "dobs"
+	}
+
+	if provider == "" {
+		klog.Info("CSI driver not enabled. Skipping tests")
+		return nil
+	}
+
+	tmpDir, err := os.MkdirTemp("", "csi-manifests-*")
+	if err != nil {
+		return fmt.Errorf("creating temp dir for CSI manifests: %w", err)
+	}
+
+	scData, err := csimanifests.FS.ReadFile(provider + "/sc.yaml")
+	if err != nil {
+		return fmt.Errorf("reading embedded %s/sc.yaml: %w", provider, err)
+	}
+	scPath := filepath.Join(tmpDir, "sc.yaml")
+	if err := os.WriteFile(scPath, scData, 0o600); err != nil {
+		return fmt.Errorf("writing sc.yaml: %w", err)
+	}
+
+	driverData, err := csimanifests.FS.ReadFile(provider + "/driver.yaml")
+	if err != nil {
+		return fmt.Errorf("reading embedded %s/driver.yaml: %w", provider, err)
+	}
+	// Rewrite the FromFile path to point to the temp dir copy of sc.yaml
+	driverContent := strings.Replace(
+		string(driverData),
+		"tests/e2e/csi-manifests/"+provider+"/sc.yaml",
+		scPath,
+		1,
+	)
+	driverPath := filepath.Join(tmpDir, "driver.yaml")
+	if err := os.WriteFile(driverPath, []byte(driverContent), 0o600); err != nil {
+		return fmt.Errorf("writing driver.yaml: %w", err)
+	}
+
+	driverFlags := fmt.Sprintf(" --storage.testdriver=%s", driverPath)
+	klog.Infof("Setting %v", driverFlags)
+	t.TestArgs += driverFlags
+	return nil
 }
 
 func (t *Tester) execute() error {
@@ -332,6 +490,7 @@ func (t *Tester) execute() error {
 		return fmt.Errorf("failed to initialize tester: %v", err)
 	}
 
+	t.SetRunDir(artifacts.RunDir())
 	help := fs.BoolP("help", "h", false, "")
 	if err := fs.Parse(os.Args); err != nil {
 		return fmt.Errorf("failed to parse flags: %v", err)
@@ -343,10 +502,6 @@ func (t *Tester) execute() error {
 		return nil
 	}
 
-	if err := t.pretestSetup(); err != nil {
-		return err
-	}
-
 	if err := t.addHostFlag(); err != nil {
 		return err
 	}
@@ -356,6 +511,10 @@ func (t *Tester) execute() error {
 	}
 
 	if err := t.addZoneFlag(); err != nil {
+		return err
+	}
+
+	if err := t.addNodeIG(); err != nil {
 		return err
 	}
 
@@ -382,7 +541,17 @@ func (t *Tester) execute() error {
 	if err := t.addNodeOSArchFlag(); err != nil {
 		return err
 	}
+
 	t.addNonBlockingTaintsFlag()
+
+	if err := t.addCSIDriverFlags(); err != nil {
+		return err
+	}
+
+	t.TestArgs += " --disable-log-dump"
+
+	// Disable colours in Ginkgo
+	t.GinkgoArgs += " --no-color"
 
 	return t.Test()
 }
@@ -394,6 +563,9 @@ func NewDefaultTester() *Tester {
 }
 
 func Main() {
+	// Prow's Azure WI preset exports AZURE_STORAGE_ACCOUNT; kOps now rejects it.
+	os.Unsetenv("AZURE_STORAGE_ACCOUNT")
+
 	t := NewDefaultTester()
 	if err := t.execute(); err != nil {
 		klog.Fatalf("failed to run ginkgo tester: %v", err)

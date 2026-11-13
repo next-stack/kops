@@ -2,7 +2,7 @@
 
 The `InstanceGroup` resource represents a group of similar machines typically provisioned in the same availability zone. On AWS, instance groups map directly to an autoscaling group.
 
-The complete list of keys can be found at the [InstanceGroup](https://pkg.go.dev/k8s.io/kops/pkg/apis/kops#InstanceGroupSpec) reference page. 
+The complete list of keys can be found at the [InstanceGroup](https://pkg.go.dev/k8s.io/kops/pkg/apis/kops#InstanceGroupSpec) reference page.
 
 You can also find concrete use cases for the configurations on the [Instance Group operations page](instance_groups.md)
 
@@ -47,15 +47,23 @@ spec:
 
 ## instanceMetadata
 
-By default IMDSv2 are enabled as of kOps 1.22 on new clusters using Kubernetes 1.22. The default hop limit is 3 on control plane nodes, and 1 on other roles.
+By default, IMDSv2 is enabled for newly created clusters. As of Kubernetes 1.27, this default is applied to existing clusters as well.
+The default hop limit is 1 for all node roles. 
 
-On other versions, you can enable IMDSv2 like this:
+To enable IMDSv2, add the following configuration to the instance group:
 
 ```YAML
 spec:
   instanceMetadata:
-    httpPutResponseHopLimit: 1
     httpTokens: required
+```
+
+To disable IMDSv2 add the following configuration to the instance group:
+
+```YAML
+spec:
+  instanceMetadata:
+    httpTokens: optional
 ```
 
 ## externalLoadBalancers
@@ -101,11 +109,13 @@ spec:
 
 ## additionalUserData
 
-kOps utilizes cloud-init to initialize and setup a host at boot time. However in certain cases you may already be leveraging certain features of cloud-init in your infrastructure and would like to continue doing so. More information on cloud-init can be found [here](http://cloudinit.readthedocs.io/en/latest/). 
+kOps utilizes cloud-init to initialize and setup a host at boot time. However in certain cases you may already be leveraging certain features of cloud-init in your infrastructure and would like to continue doing so. More information on cloud-init can be found [here](http://cloudinit.readthedocs.io/en/latest/).
 
 Additional user-data can be passed to the host provisioning by setting the `additionalUserData` field. A list of valid user-data content-types can be found [here](http://cloudinit.readthedocs.io/en/latest/topics/format.html#mime-multi-part-archive).
 
 Scripts will be run in alphabetical order as documented [here](https://cloudinit.readthedocs.io/en/latest/topics/modules.html#scripts-per-instance).
+
+Note: Passing additionalUserData in Flatcar-OS is not supported, it results in node not coming up.
 
 Example:
 
@@ -133,12 +143,31 @@ spec:
 ## compressUserData
 {{ kops_feature_table(kops_added_default='1.19') }}
 
-Compresses parts of the user-data to save space and help with the size limit 
+Compresses parts of the user-data to save space and help with the size limit
 in certain clouds. Currently only the Specs in nodeup.sh will be compressed.
 
 ```YAML
 spec:
   compressUserData: true
+```
+
+## packages
+{{ kops_feature_table(kops_added_default='1.24') }}
+
+To install additional packages to hosts in the instance group, specify the `packages` field as an array of strings.
+
+Package names are distro specific and are not validated in any way. Specifying incorrect package names may prevent nodes from starting.
+
+For example:
+
+```YAML
+apiVersion: kops.k8s.io/v1alpha2
+kind: InstanceGroup
+metadata:
+  name: nodes
+spec:
+  packages:
+  - nfs-common
 ```
 
 ## sysctlParameters
@@ -162,21 +191,21 @@ metadata:
   name: nodes
 spec:
   sysctlParameters:
-    - fs.pipe-user-pages-soft=524288
-    - net.ipv4.tcp_keepalive_time=200
+  - fs.pipe-user-pages-soft=524288
+  - net.ipv4.tcp_keepalive_time=200
 ```
 
 which would end up in a drop-in file on nodes of the instance group in question.
 
 ## mixedInstancesPolicy (AWS Only)
 
-A Mixed Instances Policy utilizing EC2 Spot and the `capacity-optimized` allocation strategy allows an EC2 Autoscaling Group to select the instance types with the highest capacity. This reduces the chance of a spot interruption on your instance group. 
+A Mixed Instances Policy utilizing EC2 Spot and the `capacity-optimized` allocation strategy allows an EC2 Autoscaling Group to select the instance types with the highest capacity. This reduces the chance of a spot interruption on your instance group.
 
-Instance groups with a mixedInstancesPolicy can be generated with the `kops toolbox instance-selector` command. 
-The instance-selector accepts user supplied resource parameters like vcpus, memory, and much more to dynamically select instance types that match your criteria. 
+Instance groups with a mixedInstancesPolicy can be generated with the `kops toolbox instance-selector` command.
+The instance-selector accepts user supplied resource parameters like vcpus, memory, and much more to dynamically select instance types that match your criteria.
 
 ```bash
-kops toolbox instance-selector --vcpus 4 --flexible --usage-class spot --instance-group-name spotgroup
+kops toolbox instance-selector spotgroup --vcpus 4 --flexible --usage-class spot
 ```
 
 ```yaml
@@ -187,7 +216,7 @@ metadata:
     kops.k8s.io/cluster: spot.k8s.local
   name: spotgroup
 spec:
-  image: 099720109477/ubuntu/images/hvm-ssd/ubuntu-focal-20.04-amd64-server-20200528
+  image: 099720109477/ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-20260714
   machineType: c3.xlarge
   maxSize: 15
   minSize: 2
@@ -239,6 +268,50 @@ https://docs.aws.amazon.com/autoscaling/ec2/APIReference/API_InstancesDistributi
 Used only when the Spot allocation strategy is lowest-price.
 The number of Spot Instance pools across which to allocate your Spot Instances. The Spot pools are determined from the different instance types in the Overrides array of LaunchTemplate. Default if not set is 2.
 
+### CapacityRebalance
+
+{{ kops_feature_table(kops_added_default='1.26') }}
+
+If using spot instances, it's recommended to enable CapacityRebalance in your InstanceGroup. This configures ASGs to proactively replace spot instances when ASG receives a rebalance recommendation.
+https://docs.aws.amazon.com/autoscaling/ec2/userguide/ec2-auto-scaling-capacity-rebalancing.html
+
+### instanceRequirements
+
+{{ kops_feature_table(kops_added_default='1.24') }}
+
+Instead of configuring specific machine types, the InstanceGroup can be configured to use all machine types that satisfy a given set of requirements.
+
+```
+spec:
+  mixedInstancesPolicy:
+    instanceRequirements:
+      cpu:
+        min: "2"
+        max: "16"
+      memory:
+        min: "2G"
+```
+
+Note that burstable instances are always included in the set of eligible instances.
+
+You can exclude instance types from the set of eligible instances using `excludedInstanceTypes`.
+You can use strings with one or more wild cards, represented by an asterisk (*), to exclude an instance type, size, or generation.
+For example, `m7i.8xlarge`, `c7*.*`, `m7a.*`, `r*`, `*3*`.
+
+```
+spec:
+  mixedInstancesPolicy:
+    instanceRequirements:
+      cpu:
+        min: "2"
+        max: "16"
+      memory:
+        min: "2G"
+      excludedInstanceTypes:
+      - t2.*
+      - t3.*
+```
+
 ## warmPool (AWS Only)
 
 {{ kops_feature_table(kops_added_default='1.21') }}
@@ -264,19 +337,68 @@ spec:
 You can also specify defaults for all instance groups of type Node or APIServer by setting the `warmPool` field in the cluster spec.
 If warm pools are enabled at the cluster spec level, you can disable them at the instance group level by setting `maxSize: 0`.
 
+### Additional container images
+In some cases it can be convenient to download large container images during the warming phase to reduce the startup time of workloads after a node has been requested and joined the cluster. Additional images can be specified via the `additionalImages` field.
+
+```yaml
+spec:
+  warmPool:
+    additionalImages:
+      - nvcr.io/nvidia/tritonserver:24.10-py3
+      - nvcr.io/nvidia/tritonserver:25.11-vllm-python-py3
+```
+
 ### Lifecycle hook
 
 By default AWS does not guarantee that the kOps configuration will run to completion. Nor that the instance will timely shut down after completion if the instance is allowed to run that long. In order to guarantee this, a lifecycle hook is needed.
 
 **You have to ensure your metadata API is protected if you enable this. If not, any Pod in the cluster will be able to complete the lifecycle hook with the `ABANDONED` result, preventing any instance from ever joining the cluster.**
 
-The following config will enable the lifecycle hook as well as protect the metadata API from abuse:
+By default the lifecycle hook will timeout after 600s. A custom timeout can be set via the `lifecycleHookTimeout` field in the `warmPool` spec. This might be needed if larger additional container images are pulled during the warmup phase so these tasks can finish.
+
+The following config will enable the lifecycle hook, set the timeout to 900s as well as protect the metadata API from abuse:
 
 ```yaml
 spec:
   warmPool:
     enableLifecycleHook: true
+    lifecycleHookTimeout: 900    
   instanceMetadata:
     httpPutResponseHopLimit: 1
     httpTokens: required
 ```
+
+## maxInstanceLifetime (AWS Only)
+
+{{ kops_feature_table(kops_added_default='1.24') }}
+
+The maximum instance lifetime specifies the maximum amount of time (in go duration [format](https://pkg.go.dev/time#ParseDuration)) that an instance can be in service before it is terminated and replaced.
+A common use case might be a requirement to replace your instances on a schedule because of internal security policies or external compliance controls.
+In other words, this feature helps you to put a bit of ephemerality in your cluster.
+You must specify a value of at least 24h (86,400 seconds). To clear a previously set value, specify a new value of 0.
+
+The following configuration enables a maximum instance lifetime to two days.
+
+```yaml
+spec:
+  maxInstanceLifetime: "48h"
+```
+
+# API Changes
+
+kOps is working on updating the `v1alpha2` API to a newer version. That new API
+is still under development, but the internal form of the API and validation error
+messages use the new field names. The following table tracks the changes, excepting
+the removal of fields no longer in use.
+
+| v1alpha2 Field                           | New Field                                |
+|------------------------------------------|------------------------------------------|
+| associatePublicIp                        | associatePublicIP                        |
+| externalLoadBalancers[\*].targetGroupArn | externalLoadBalancers[\*].targetGroupARN |
+| rootVolumeEncryption                     | rootVolume.encryption                    |
+| rootVolumeEncryptionKey                  | rootVolume.encryptionKey                 |
+| rootVolumeIops                           | rootVolume.iops                          |
+| rootVolumeOptimization                   | rootVolume.optimization                  |
+| rootVolumeSize                           | rootVolume.size                          |
+| rootVolumeThroughput                     | rootVolume.throughput                    |
+| rootVolumeType                           | rootVolume.type                          |

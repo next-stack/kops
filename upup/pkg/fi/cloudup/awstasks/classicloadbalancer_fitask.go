@@ -27,7 +27,7 @@ import (
 
 // ClassicLoadBalancer
 
-var _ fi.HasLifecycle = &ClassicLoadBalancer{}
+var _ fi.HasLifecycle = (*ClassicLoadBalancer)(nil)
 
 // GetLifecycle returns the Lifecycle of the object, implementing fi.HasLifecycle
 func (o *ClassicLoadBalancer) GetLifecycle() fi.Lifecycle {
@@ -39,7 +39,7 @@ func (o *ClassicLoadBalancer) SetLifecycle(lifecycle fi.Lifecycle) {
 	o.Lifecycle = lifecycle
 }
 
-var _ fi.HasName = &ClassicLoadBalancer{}
+var _ fi.HasName = (*ClassicLoadBalancer)(nil)
 
 // GetName returns the Name of the object, implementing fi.HasName
 func (o *ClassicLoadBalancer) GetName() *string {
@@ -48,5 +48,5 @@ func (o *ClassicLoadBalancer) GetName() *string {
 
 // String is the stringer function for the task, producing readable output using fi.TaskAsString
 func (o *ClassicLoadBalancer) String() string {
-	return fi.TaskAsString(o)
+	return fi.CloudupTaskAsString(o)
 }

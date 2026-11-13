@@ -26,11 +26,11 @@ type WarmPoolBuilder struct {
 	*NodeupModelContext
 }
 
-var _ fi.ModelBuilder = &WarmPoolBuilder{}
+var _ fi.NodeupModelBuilder = &WarmPoolBuilder{}
 
-func (b *WarmPoolBuilder) Build(c *fi.ModelBuilderContext) error {
+func (b *WarmPoolBuilder) Build(c *fi.NodeupModelBuilderContext) error {
 	// Check if the cloud provider is AWS
-	if b.Cluster == nil || b.Cluster.Spec.CloudProvider != string(kops.CloudProviderAWS) {
+	if b.CloudProvider() != kops.CloudProviderAWS {
 		return nil
 	}
 
@@ -38,8 +38,7 @@ func (b *WarmPoolBuilder) Build(c *fi.ModelBuilderContext) error {
 	if b.NodeupConfig != nil && b.ConfigurationMode == "Warming" {
 		for _, image := range b.NodeupConfig.WarmPoolImages {
 			c.AddTask(&nodetasks.PullImageTask{
-				Name:    image,
-				Runtime: b.Cluster.Spec.ContainerRuntime,
+				Name: image,
 			})
 		}
 	}

@@ -22,7 +22,9 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/kops/pkg/apis/kops"
-	"k8s.io/kops/util/pkg/proxy"
+	"k8s.io/kops/upup/pkg/fi"
+	"k8s.io/kops/upup/pkg/fi/cloudup/scaleway/scalewaymetadata"
+	"k8s.io/kops/util/pkg/vfs/openstackconfig"
 )
 
 type EnvVars map[string]string
@@ -37,8 +39,17 @@ func (m EnvVars) addEnvVariableIfExist(name string) {
 func BuildSystemComponentEnvVars(spec *kops.ClusterSpec) EnvVars {
 	vars := make(EnvVars)
 
-	for _, v := range proxy.GetProxyEnvVars(spec.EgressProxy) {
+	for _, v := range GetProxyEnvVars(spec.Networking.EgressProxy) {
 		vars[v.Name] = v.Value
+	}
+
+	// VFS uses AWS_REGION to skip the IMDS region probe, which fails as non-root because
+	// /sys/.../product_uuid is mode 0400.
+	if region := awsRegionFromSpec(spec); region != "" {
+		vars["AWS_REGION"] = region
+	} else {
+		// Stub specs without subnets fall back to the parent process env.
+		vars.addEnvVariableIfExist("AWS_REGION")
 	}
 
 	// Custom S3 endpoint
@@ -63,13 +74,44 @@ func BuildSystemComponentEnvVars(spec *kops.ClusterSpec) EnvVars {
 	vars.addEnvVariableIfExist("OS_APPLICATION_CREDENTIAL_ID")
 	vars.addEnvVariableIfExist("OS_APPLICATION_CREDENTIAL_SECRET")
 
+	// Map our Insecure Skip Verify setting
+	if spec.CloudProvider.Openstack != nil && fi.ValueOf(spec.CloudProvider.Openstack.InsecureSkipVerify) {
+		vars[openstackconfig.EnvKeyOpenstackTLSInsecureSkipVerify] = "true"
+	}
+
 	// Digital Ocean related values.
 	vars.addEnvVariableIfExist("DIGITALOCEAN_ACCESS_TOKEN")
 
-	// Azure related values.
-	vars.addEnvVariableIfExist("AZURE_STORAGE_ACCOUNT")
+	// Hetzner Cloud related values.
+	vars.addEnvVariableIfExist("HCLOUD_TOKEN")
+
+	// Akamai (Linode) related values.
+	vars.addEnvVariableIfExist("LINODE_TOKEN")
+
+	// Scaleway related values.
+	profile, err := scalewaymetadata.CreateValidScalewayProfile()
+	if err == nil {
+		vars["SCW_ACCESS_KEY"] = fi.ValueOf(profile.AccessKey)
+		vars["SCW_SECRET_KEY"] = fi.ValueOf(profile.SecretKey)
+		vars["SCW_DEFAULT_PROJECT_ID"] = fi.ValueOf(profile.DefaultProjectID)
+	}
 
 	return vars
+}
+
+// awsRegionFromSpec returns the region derived from a subnet zone, or "" for non-AWS specs and
+// AWS specs without zoned subnets.
+func awsRegionFromSpec(spec *kops.ClusterSpec) string {
+	if spec.CloudProvider.AWS == nil {
+		return ""
+	}
+	for _, subnet := range spec.Networking.Subnets {
+		// "us-east-1a" -> "us-east-1".
+		if len(subnet.Zone) > 1 {
+			return subnet.Zone[:len(subnet.Zone)-1]
+		}
+	}
+	return ""
 }
 
 func (m EnvVars) ToEnvVars() []corev1.EnvVar {

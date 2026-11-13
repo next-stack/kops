@@ -17,7 +17,6 @@ limitations under the License.
 package golden
 
 import (
-	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
@@ -26,6 +25,11 @@ import (
 
 	"k8s.io/kops/pkg/diff"
 )
+
+// UpdateExpectedOutput returns true if we should be writing/updating the expected output.
+func UpdateExpectedOutput() bool {
+	return os.Getenv("HACK_UPDATE_EXPECTED_IN_PLACE") != ""
+}
 
 // AssertMatchesFile matches the actual value to a with expected file.
 // If HACK_UPDATE_EXPECTED_IN_PLACE is set, it will write the actual value to the expected file,
@@ -40,31 +44,31 @@ func AssertMatchesFile(t *testing.T, actual string, p string) {
 		p = abs
 	}
 
-	expectedBytes, err := ioutil.ReadFile(p)
+	expectedBytes, err := os.ReadFile(p)
 	if err != nil {
-		if !os.IsNotExist(err) || os.Getenv("HACK_UPDATE_EXPECTED_IN_PLACE") == "" {
+		if !os.IsNotExist(err) && !UpdateExpectedOutput() {
 			t.Fatalf("error reading file %q: %v", p, err)
 		}
 	}
 	expected := strings.TrimSpace(string(expectedBytes))
 
-	//on windows, with git set to autocrlf, the reference files on disk have windows line endings
-	expected = strings.Replace(expected, "\r\n", "\n", -1)
-	actual = strings.Replace(actual, "\r\n", "\n", -1)
+	// on windows, with git set to autocrlf, the reference files on disk have windows line endings
+	expected = strings.ReplaceAll(expected, "\r\n", "\n")
+	actual = strings.ReplaceAll(actual, "\r\n", "\n")
 
 	if actual == expected && err == nil {
 		return
 	}
 
-	if os.Getenv("HACK_UPDATE_EXPECTED_IN_PLACE") != "" {
+	if UpdateExpectedOutput() {
 		t.Logf("HACK_UPDATE_EXPECTED_IN_PLACE: writing expected output %s", p)
 
 		// Keep git happy with a trailing newline
 		actual += "\n"
-		if err := os.MkdirAll(path.Dir(p), 0755); err != nil {
+		if err := os.MkdirAll(path.Dir(p), 0o755); err != nil {
 			t.Errorf("error creating directory %s: %v", path.Dir(p), err)
 		}
-		if err := ioutil.WriteFile(p, []byte(actual), 0644); err != nil {
+		if err := os.WriteFile(p, []byte(actual), 0o644); err != nil { //nolint:gosec // Updated golden files should be readable in the worktree.
 			t.Errorf("error writing expected output %s: %v", p, err)
 		}
 

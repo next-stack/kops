@@ -19,6 +19,7 @@ package validation
 import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/kops/pkg/apis/kops"
+	"k8s.io/kops/upup/pkg/fi/cloudup/gce"
 )
 
 func gceValidateCluster(c *kops.Cluster) field.ErrorList {
@@ -26,22 +27,26 @@ func gceValidateCluster(c *kops.Cluster) field.ErrorList {
 
 	fieldSpec := field.NewPath("spec")
 
-	region := ""
-	for i, subnet := range c.Spec.Subnets {
-		f := fieldSpec.Child("subnets").Index(i)
+	for i, subnet := range c.Spec.Networking.Subnets {
+		f := fieldSpec.Child("networking", "subnets").Index(i)
 		if subnet.Zone != "" {
 			allErrs = append(allErrs, field.Invalid(f.Child("zone"), subnet.Zone, "zones should not be specified for GCE subnets, as GCE subnets are regional"))
 		}
-		if subnet.Region == "" {
-			allErrs = append(allErrs, field.Required(f.Child("region"), "region must be specified for GCE subnets"))
-		} else {
-			if region == "" {
-				region = subnet.Region
-			} else if region != subnet.Region {
-				allErrs = append(allErrs, field.Forbidden(f.Child("region"), "clusters cannot span GCE regions"))
-			}
-		}
 	}
 
+	return allErrs
+}
+
+func gceValidateInstanceGroup(ig *kops.InstanceGroup, cloud gce.GCECloud) field.ErrorList {
+	allErrs := field.ErrorList{}
+
+	if ig.Spec.GCPProvisioningModel != nil {
+		fieldSpec := field.NewPath("spec")
+		allErrs = append(allErrs, IsValidValue(fieldSpec.Child("gcpProvisioningModel"), ig.Spec.GCPProvisioningModel, []string{"STANDARD", "SPOT"})...)
+	}
+
+	if len(ig.Spec.Zones) == 0 {
+		allErrs = append(allErrs, field.Required(field.NewPath("spec", "zones"), "zones should be specified"))
+	}
 	return allErrs
 }

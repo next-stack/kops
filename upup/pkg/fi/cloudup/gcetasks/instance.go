@@ -41,11 +41,12 @@ type Instance struct {
 	Preemptible    *bool
 	Image          *string
 	Disks          map[string]*Disk
-	ServiceAccount *string
+	ServiceAccount *ServiceAccount
 
 	CanIPForward *bool
 	IPAddress    *Address
 	Subnet       *Subnet
+	StackType    *string
 
 	Scopes []string
 
@@ -56,14 +57,14 @@ type Instance struct {
 	metadataFingerprint string
 }
 
-var _ fi.CompareWithID = &Instance{}
+var _ fi.CompareWithID = (*Instance)(nil)
 
 func (e *Instance) CompareWithID() *string {
 	return e.Name
 }
 
-func (e *Instance) Find(c *fi.Context) (*Instance, error) {
-	cloud := c.Cloud.(gce.GCECloud)
+func (e *Instance) Find(c *fi.CloudupContext) (*Instance, error) {
+	cloud := c.T.Cloud.(gce.GCECloud)
 
 	r, err := cloud.Compute().Instances().Get(cloud.Project(), *e.Zone, *e.Name)
 	if err != nil {
@@ -76,16 +77,16 @@ func (e *Instance) Find(c *fi.Context) (*Instance, error) {
 	actual := &Instance{}
 	actual.Name = &r.Name
 	actual.Tags = append(actual.Tags, r.Tags.Items...)
-	actual.Zone = fi.String(lastComponent(r.Zone))
-	actual.MachineType = fi.String(lastComponent(r.MachineType))
+	actual.Zone = new(lastComponent(r.Zone))
+	actual.MachineType = new(lastComponent(r.MachineType))
 	actual.CanIPForward = &r.CanIpForward
-
 	if r.Scheduling != nil {
 		actual.Preemptible = &r.Scheduling.Preemptible
 	}
 	if len(r.NetworkInterfaces) != 0 {
 		ni := r.NetworkInterfaces[0]
-		actual.Network = &Network{Name: fi.String(lastComponent(ni.Network))}
+		actual.Network = &Network{Name: new(lastComponent(ni.Network))}
+		actual.StackType = &ni.StackType
 		if len(ni.AccessConfigs) != 0 {
 			ac := ni.AccessConfigs[0]
 			if ac.NatIP != "" {
@@ -126,7 +127,7 @@ func (e *Instance) Find(c *fi.Context) (*Instance, error) {
 			if err != nil {
 				return nil, fmt.Errorf("error parsing source image URL: %v", err)
 			}
-			actual.Image = fi.String(image)
+			actual.Image = new(image)
 		} else {
 			url, err := gce.ParseGoogleCloudURL(disk.Source)
 			if err != nil {
@@ -140,7 +141,7 @@ func (e *Instance) Find(c *fi.Context) (*Instance, error) {
 	if r.Metadata != nil {
 		actual.Metadata = make(map[string]fi.Resource)
 		for _, i := range r.Metadata.Items {
-			actual.Metadata[i.Key] = fi.NewStringResource(fi.StringValue(i.Value))
+			actual.Metadata[i.Key] = fi.NewStringResource(fi.ValueOf(i.Value))
 		}
 		actual.metadataFingerprint = r.Metadata.Fingerprint
 	}
@@ -148,8 +149,8 @@ func (e *Instance) Find(c *fi.Context) (*Instance, error) {
 	return actual, nil
 }
 
-func (e *Instance) Run(c *fi.Context) error {
-	return fi.DefaultDeltaRunMethod(e, c)
+func (e *Instance) Run(c *fi.CloudupContext) error {
+	return fi.CloudupDefaultDeltaRunMethod(e, c)
 }
 
 func (_ *Instance) CheckChanges(a, e, changes *Instance) error {
@@ -165,6 +166,7 @@ func init() {
 		"monitoring":       "https://www.googleapis.com/auth/monitoring",
 		"monitoring-write": "https://www.googleapis.com/auth/monitoring.write",
 		"logging-write":    "https://www.googleapis.com/auth/logging.write",
+		"cloud-platform":   "https://www.googleapis.com/auth/cloud-platform",
 	}
 }
 
@@ -188,20 +190,12 @@ func scopeToShortForm(s string) string {
 func (e *Instance) mapToGCE(project string, ipAddressResolver func(*Address) (*string, error)) (*compute.Instance, error) {
 	zone := *e.Zone
 
-	var scheduling *compute.Scheduling
-	if fi.BoolValue(e.Preemptible) {
-		scheduling = &compute.Scheduling{
-			OnHostMaintenance: "TERMINATE",
-			Preemptible:       true,
-		}
-	} else {
-		scheduling = &compute.Scheduling{
-			AutomaticRestart: fi.Bool(true),
-			// TODO: Migrate or terminate?
-			OnHostMaintenance: "MIGRATE",
-			Preemptible:       false,
-		}
+	machineTypeInfo, err := guessMachineTypeInfo(fi.ValueOf(e.MachineType))
+	if err != nil {
+		return nil, fmt.Errorf("getting machine type info: %w", err)
 	}
+
+	scheduling := buildScheduling(machineTypeInfo, e.Preemptible, nil /* e.GCPProvisioningModel */, nil /* e.GuestAccelerators*/)
 
 	var disks []*compute.AttachedDisk
 	disks = append(disks, &compute.AttachedDisk{
@@ -233,23 +227,29 @@ func (e *Instance) mapToGCE(project string, ipAddressResolver func(*Address) (*s
 	}
 
 	var networkInterfaces []*compute.NetworkInterface
-	if e.IPAddress != nil {
-		addr, err := ipAddressResolver(e.IPAddress)
-		if err != nil {
-			return nil, fmt.Errorf("unable to resolve IP for instance: %v", err)
-		}
-		if addr == nil {
-			return nil, fmt.Errorf("instance IP address has not yet been created")
-		}
+	{
 		networkInterface := &compute.NetworkInterface{
 			AccessConfigs: []*compute.AccessConfig{{
-				NatIP: *addr,
-				Type:  "ONE_TO_ONE_NAT",
+				Type: "ONE_TO_ONE_NAT",
 			}},
 			Network: e.Network.URL(project),
 		}
+
+		if e.IPAddress != nil {
+			addr, err := ipAddressResolver(e.IPAddress)
+			if err != nil {
+				return nil, fmt.Errorf("unable to resolve IP for instance: %v", err)
+			}
+			if addr == nil {
+				return nil, fmt.Errorf("instance IP address has not yet been created")
+			}
+			networkInterface.AccessConfigs[0].NatIP = *addr
+		}
 		if e.Subnet != nil {
 			networkInterface.Subnetwork = *e.Subnet.Name
+		}
+		if e.StackType != nil {
+			networkInterface.StackType = *e.StackType
 		}
 		networkInterfaces = append(networkInterfaces, networkInterface)
 	}
@@ -263,7 +263,7 @@ func (e *Instance) mapToGCE(project string, ipAddressResolver func(*Address) (*s
 				scopes = append(scopes, s)
 			}
 			serviceAccounts = append(serviceAccounts, &compute.ServiceAccount{
-				Email:  fi.StringValue(e.ServiceAccount),
+				Email:  fi.ValueOf(e.ServiceAccount.Email),
 				Scopes: scopes,
 			})
 		}
@@ -277,7 +277,7 @@ func (e *Instance) mapToGCE(project string, ipAddressResolver func(*Address) (*s
 		}
 		metadataItems = append(metadataItems, &compute.MetadataItems{
 			Key:   key,
-			Value: fi.String(v),
+			Value: new(v),
 		})
 	}
 
@@ -394,29 +394,29 @@ func ShortenImageURL(defaultProject string, imageURL string) (string, error) {
 }
 
 type terraformInstance struct {
-	Name                  string                              `json:"name" cty:"name"`
-	CanIPForward          bool                                `json:"can_ip_forward" cty:"can_ip_forward"`
-	MachineType           string                              `json:"machine_type,omitempty" cty:"machine_type"`
-	ServiceAccount        *terraformServiceAccount            `json:"service_account,omitempty" cty:"service_account"`
-	Scheduling            *terraformScheduling                `json:"scheduling,omitempty" cty:"scheduling"`
-	Disks                 []*terraformInstanceAttachedDisk    `json:"disk,omitempty" cty:"disk"`
-	NetworkInterfaces     []*terraformNetworkInterface        `json:"network_interface,omitempty" cty:"network_interface"`
-	Metadata              map[string]*terraformWriter.Literal `json:"metadata,omitempty" cty:"metadata"`
-	MetadataStartupScript *terraformWriter.Literal            `json:"metadata_startup_script,omitempty" cty:"metadata_startup_script"`
-	Tags                  []string                            `json:"tags,omitempty" cty:"tags"`
-	Zone                  string                              `json:"zone,omitempty" cty:"zone"`
+	Name                  string                              `cty:"name"`
+	CanIPForward          bool                                `cty:"can_ip_forward"`
+	MachineType           string                              `cty:"machine_type"`
+	ServiceAccounts       []*terraformTemplateServiceAccount  `cty:"service_account"`
+	Scheduling            *terraformScheduling                `cty:"scheduling"`
+	Disks                 []*terraformInstanceAttachedDisk    `cty:"disk"`
+	NetworkInterfaces     []*terraformNetworkInterface        `cty:"network_interface"`
+	Metadata              map[string]*terraformWriter.Literal `cty:"metadata"`
+	MetadataStartupScript *terraformWriter.Literal            `cty:"metadata_startup_script"`
+	Tags                  []string                            `cty:"tags"`
+	Zone                  string                              `cty:"zone"`
 }
 
 type terraformInstanceAttachedDisk struct {
-	AutoDelete bool   `json:"auto_delete,omitempty" cty:"auto_delete"`
-	DeviceName string `json:"device_name,omitempty" cty:"device_name"`
+	AutoDelete bool   `cty:"auto_delete"`
+	DeviceName string `cty:"device_name"`
 
 	// 'pd-standard', 'pd-ssd', 'local-ssd' etc
-	Type    string `json:"type,omitempty" cty:"type"`
-	Disk    string `json:"disk,omitempty" cty:"disk"`
-	Image   string `json:"image,omitempty" cty:"image"`
-	Scratch bool   `json:"scratch,omitempty" cty:"scratch"`
-	Size    int64  `json:"size,omitempty" cty:"size"`
+	Type    string `cty:"type"`
+	Disk    string `cty:"disk"`
+	Image   string `cty:"image"`
+	Scratch bool   `cty:"scratch"`
+	Size    int64  `cty:"size"`
 }
 
 func (_ *Instance) RenderTerraform(t *terraform.TerraformTarget, a, e, changes *Instance) error {
@@ -446,7 +446,7 @@ func (_ *Instance) RenderTerraform(t *terraform.TerraformTarget, a, e, changes *
 		tf.Zone = *e.Zone
 	}
 
-	tf.ServiceAccount = addServiceAccounts(i.ServiceAccounts)
+	tf.ServiceAccounts = mapServiceAccountsToTerraform([]*ServiceAccount{e.ServiceAccount}, e.Scopes)
 
 	for _, d := range i.Disks {
 		tfd := &terraformInstanceAttachedDisk{
@@ -466,7 +466,7 @@ func (_ *Instance) RenderTerraform(t *terraform.TerraformTarget, a, e, changes *
 		tf.Disks = append(tf.Disks, tfd)
 	}
 
-	tf.NetworkInterfaces = addNetworks(e.Network, e.Subnet, i.NetworkInterfaces)
+	tf.NetworkInterfaces = addNetworks(e.StackType, e.Network, e.Subnet, i.NetworkInterfaces)
 
 	metadata, err := addMetadata(t, i.Name, i.Metadata)
 	if err != nil {
@@ -474,7 +474,7 @@ func (_ *Instance) RenderTerraform(t *terraform.TerraformTarget, a, e, changes *
 	}
 	tf.Metadata = metadata
 
-	// Using metadata_startup_script is now mandatory (?)
+	// Using metadata_startup_script (is explicitly enabled)
 	{
 		startupScript, found := tf.Metadata["startup-script"]
 		if found {
@@ -485,7 +485,7 @@ func (_ *Instance) RenderTerraform(t *terraform.TerraformTarget, a, e, changes *
 
 	if i.Scheduling != nil {
 		tf.Scheduling = &terraformScheduling{
-			AutomaticRestart:  fi.BoolValue(i.Scheduling.AutomaticRestart),
+			AutomaticRestart:  fi.ValueOf(i.Scheduling.AutomaticRestart),
 			OnHostMaintenance: i.Scheduling.OnHostMaintenance,
 			Preemptible:       i.Scheduling.Preemptible,
 		}

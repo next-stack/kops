@@ -29,12 +29,12 @@ type NetworkModelBuilder struct {
 	Lifecycle fi.Lifecycle
 }
 
-var _ fi.ModelBuilder = &NetworkModelBuilder{}
+var _ fi.CloudupModelBuilder = &NetworkModelBuilder{}
 
-func (b *NetworkModelBuilder) Build(c *fi.ModelBuilderContext) error {
+func (b *NetworkModelBuilder) Build(c *fi.CloudupModelBuilderContext) error {
 	clusterName := b.ClusterName()
 
-	osSpec := b.Cluster.Spec.CloudConfig.Openstack
+	osSpec := b.Cluster.Spec.CloudProvider.Openstack
 
 	netName, err := b.GetNetworkName()
 	if err != nil {
@@ -43,7 +43,7 @@ func (b *NetworkModelBuilder) Build(c *fi.ModelBuilderContext) error {
 	{
 		t := &openstacktasks.Network{
 			Name:      s(netName),
-			ID:        s(b.Cluster.Spec.NetworkID),
+			ID:        s(b.Cluster.Spec.Networking.NetworkID),
 			Tag:       s(clusterName),
 			Lifecycle: b.Lifecycle,
 		}
@@ -53,18 +53,15 @@ func (b *NetworkModelBuilder) Build(c *fi.ModelBuilderContext) error {
 		c.AddTask(t)
 	}
 
-	needRouter := true
-	//Do not need router if there is no external network
-	if osSpec.Router == nil || osSpec.Router.ExternalNetwork == nil {
-		needRouter = false
-	}
-	routerName := strings.Replace(clusterName, ".", "-", -1)
-	for _, sp := range b.Cluster.Spec.Subnets {
+	// Do not need router if there is no external network
+	needRouter := osSpec.Router != nil && osSpec.Router.ExternalNetwork != nil
+	routerName := strings.ReplaceAll(clusterName, ".", "-")
+	for _, sp := range b.Cluster.Spec.Networking.Subnets {
 		// assumes that we do not need to create routers if we use existing subnets
-		if sp.ProviderID != "" {
+		if sp.ID != "" {
 			needRouter = false
 		}
-		subnetName, err := b.findSubnetNameByID(sp.ProviderID, sp.Name)
+		subnetName, err := b.findSubnetNameByID(sp.ID, sp.Name)
 		if err != nil {
 			return err
 		}
@@ -77,10 +74,10 @@ func (b *NetworkModelBuilder) Build(c *fi.ModelBuilderContext) error {
 			Tag:        s(clusterName),
 		}
 		if osSpec.Router != nil && osSpec.Router.DNSServers != nil {
-			dnsSplitted := strings.Split(fi.StringValue(osSpec.Router.DNSServers), ",")
+			dnsSplitted := strings.Split(fi.ValueOf(osSpec.Router.DNSServers), ",")
 			dnsNameSrv := make([]*string, len(dnsSplitted))
 			for i, ns := range dnsSplitted {
-				dnsNameSrv[i] = fi.String(ns)
+				dnsNameSrv[i] = new(ns)
 			}
 			t.DNSServers = dnsNameSrv
 		}

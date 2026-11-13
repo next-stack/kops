@@ -17,16 +17,17 @@ limitations under the License.
 package awstasks
 
 import (
+	"context"
 	"fmt"
 	"os"
 
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
-	"k8s.io/kops/upup/pkg/fi/cloudup/cloudformation"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraform"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraformWriter"
 
-	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"k8s.io/klog/v2"
 )
 
@@ -39,53 +40,30 @@ type EBSVolume struct {
 	Encrypted        *bool
 	ID               *string
 	KmsKeyId         *string
-	SizeGB           *int64
+	SizeGB           *int32
 	Tags             map[string]string
-	VolumeIops       *int64
-	VolumeThroughput *int64
-	VolumeType       *string
+	VolumeIops       *int32
+	VolumeThroughput *int32
+	VolumeType       ec2types.VolumeType
 }
 
-var _ fi.CompareWithID = &EBSVolume{}
+var _ fi.CompareWithID = (*EBSVolume)(nil)
+var _ fi.CloudupTaskNormalize = (*EBSVolume)(nil)
 
 func (e *EBSVolume) CompareWithID() *string {
 	return e.ID
 }
 
-type TaggableResource interface {
-	FindResourceID(c fi.Cloud) (*string, error)
-}
+func (e *EBSVolume) Find(c *fi.CloudupContext) (*EBSVolume, error) {
+	ctx := c.Context()
+	cloud := awsup.GetCloud(c)
 
-var _ TaggableResource = &EBSVolume{}
-
-func (e *EBSVolume) FindResourceID(c fi.Cloud) (*string, error) {
-	actual, err := e.find(c.(awsup.AWSCloud))
-	if err != nil {
-		return nil, fmt.Errorf("error querying for EBSVolume: %v", err)
-	}
-	if actual == nil {
-		return nil, nil
-	}
-
-	return actual.ID, nil
-}
-
-func (e *EBSVolume) Find(context *fi.Context) (*EBSVolume, error) {
-	actual, err := e.find(context.Cloud.(awsup.AWSCloud))
-	if actual != nil && err == nil {
-		e.ID = actual.ID
-	}
-
-	return actual, err
-}
-
-func (e *EBSVolume) find(cloud awsup.AWSCloud) (*EBSVolume, error) {
 	filters := cloud.BuildFilters(e.Name)
 	request := &ec2.DescribeVolumesInput{
 		Filters: filters,
 	}
 
-	response, err := cloud.EC2().DescribeVolumes(request)
+	response, err := cloud.EC2().DescribeVolumes(ctx, request)
 	if err != nil {
 		return nil, fmt.Errorf("error listing volumes: %v", err)
 	}
@@ -115,13 +93,21 @@ func (e *EBSVolume) find(cloud awsup.AWSCloud) (*EBSVolume, error) {
 
 	// Avoid spurious changes
 	actual.Lifecycle = e.Lifecycle
+	e.ID = actual.ID
+	if fi.ValueOf(e.Encrypted) && e.KmsKeyId == nil {
+		e.KmsKeyId = actual.KmsKeyId
+	}
 
 	return actual, nil
 }
 
-func (e *EBSVolume) Run(c *fi.Context) error {
-	c.Cloud.(awsup.AWSCloud).AddTags(e.Name, e.Tags)
-	return fi.DefaultDeltaRunMethod(e, c)
+func (e *EBSVolume) Normalize(c *fi.CloudupContext) error {
+	awsup.GetCloud(c).AddTags(e.Name, e.Tags)
+	return nil
+}
+
+func (e *EBSVolume) Run(c *fi.CloudupContext) error {
+	return fi.CloudupDefaultDeltaRunMethod(e, c)
 }
 
 func (_ *EBSVolume) CheckChanges(a, e, changes *EBSVolume) error {
@@ -141,13 +127,14 @@ func (_ *EBSVolume) CheckChanges(a, e, changes *EBSVolume) error {
 			return fi.CannotChangeField("Encrypted")
 		}
 		if changes.KmsKeyId != nil {
-			return fi.CannotChangeField("KmsKeyId")
+			return fi.CannotChangeField("KmsKeyID")
 		}
 	}
 	return nil
 }
 
 func (_ *EBSVolume) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *EBSVolume) error {
+	ctx := context.TODO()
 	if a == nil {
 		klog.V(2).Infof("Creating PersistentVolume with Name:%q", *e.Name)
 
@@ -159,10 +146,10 @@ func (_ *EBSVolume) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *EBSVolume) e
 			Encrypted:         e.Encrypted,
 			Iops:              e.VolumeIops,
 			Throughput:        e.VolumeThroughput,
-			TagSpecifications: awsup.EC2TagSpecification(ec2.ResourceTypeVolume, e.Tags),
+			TagSpecifications: awsup.EC2TagSpecification(ec2types.ResourceTypeVolume, e.Tags),
 		}
 
-		response, err := t.Cloud.EC2().CreateVolume(request)
+		response, err := t.Cloud.EC2().CreateVolume(ctx, request)
 		if err != nil {
 			return fmt.Errorf("error creating PersistentVolume: %v", err)
 		}
@@ -182,7 +169,7 @@ func (_ *EBSVolume) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *EBSVolume) e
 			}
 		}
 
-		if changes.VolumeType != nil ||
+		if len(changes.VolumeType) > 0 ||
 			changes.VolumeIops != nil ||
 			changes.VolumeThroughput != nil ||
 			changes.SizeGB != nil {
@@ -195,7 +182,7 @@ func (_ *EBSVolume) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *EBSVolume) e
 				Size:       e.SizeGB,
 			}
 
-			_, err := t.Cloud.EC2().ModifyVolume(request)
+			_, err := t.Cloud.EC2().ModifyVolume(ctx, request)
 			if err != nil {
 				return fmt.Errorf("error modifying volume: %v", err)
 			}
@@ -218,14 +205,14 @@ func (e *EBSVolume) getEBSVolumeTagsToDelete(currentTags map[string]string) map[
 }
 
 type terraformVolume struct {
-	AvailabilityZone *string           `json:"availability_zone,omitempty" cty:"availability_zone"`
-	Size             *int64            `json:"size,omitempty" cty:"size"`
-	Type             *string           `json:"type,omitempty" cty:"type"`
-	Iops             *int64            `json:"iops,omitempty" cty:"iops"`
-	Throughput       *int64            `json:"throughput,omitempty" cty:"throughput"`
-	KmsKeyId         *string           `json:"kms_key_id,omitempty" cty:"kms_key_id"`
-	Encrypted        *bool             `json:"encrypted,omitempty" cty:"encrypted"`
-	Tags             map[string]string `json:"tags,omitempty" cty:"tags"`
+	AvailabilityZone *string             `cty:"availability_zone"`
+	Size             *int32              `cty:"size"`
+	Type             ec2types.VolumeType `cty:"type"`
+	Iops             *int32              `cty:"iops"`
+	Throughput       *int32              `cty:"throughput"`
+	KmsKeyId         *string             `cty:"kms_key_id"`
+	Encrypted        *bool               `cty:"encrypted"`
+	Tags             map[string]string   `cty:"tags"`
 }
 
 func (_ *EBSVolume) RenderTerraform(t *terraform.TerraformTarget, a, e, changes *EBSVolume) error {
@@ -252,7 +239,7 @@ func (e *EBSVolume) TerraformLink() *terraformWriter.Literal {
 // TerraformName returns the terraform-safe name, along with a boolean indicating of whether name-prefixing was needed.
 func (e *EBSVolume) TerraformName() (string, bool) {
 	usedPrefix := false
-	name := fi.StringValue(e.Name)
+	name := fi.ValueOf(e.Name)
 	if name[0] >= '0' && name[0] <= '9' {
 		usedPrefix = true
 		return fmt.Sprintf("ebs-%v", name), usedPrefix
@@ -261,7 +248,7 @@ func (e *EBSVolume) TerraformName() (string, bool) {
 }
 
 // PreRun is run before general task execution, and checks for terraform breaking changes.
-func (e *EBSVolume) PreRun(c *fi.Context) error {
+func (e *EBSVolume) PreRun(c *fi.CloudupContext) error {
 	if _, ok := c.Target.(*terraform.TerraformTarget); ok {
 		_, usedPrefix := e.TerraformName()
 		if usedPrefix {
@@ -277,34 +264,4 @@ func (e *EBSVolume) PreRun(c *fi.Context) error {
 	}
 
 	return nil
-}
-
-type cloudformationVolume struct {
-	AvailabilityZone *string             `json:"AvailabilityZone,omitempty"`
-	Size             *int64              `json:"Size,omitempty"`
-	Type             *string             `json:"VolumeType,omitempty"`
-	Iops             *int64              `json:"Iops,omitempty"`
-	Throughput       *int64              `json:"Throughput,omitempty"`
-	KmsKeyId         *string             `json:"KmsKeyId,omitempty"`
-	Encrypted        *bool               `json:"Encrypted,omitempty"`
-	Tags             []cloudformationTag `json:"Tags,omitempty"`
-}
-
-func (_ *EBSVolume) RenderCloudformation(t *cloudformation.CloudformationTarget, a, e, changes *EBSVolume) error {
-	cf := &cloudformationVolume{
-		AvailabilityZone: e.AvailabilityZone,
-		Size:             e.SizeGB,
-		Type:             e.VolumeType,
-		Iops:             e.VolumeIops,
-		Throughput:       e.VolumeThroughput,
-		KmsKeyId:         e.KmsKeyId,
-		Encrypted:        e.Encrypted,
-		Tags:             buildCloudformationTags(e.Tags),
-	}
-
-	return t.RenderResource("AWS::EC2::Volume", *e.Name, cf)
-}
-
-func (e *EBSVolume) CloudformationLink() *cloudformation.Literal {
-	return cloudformation.Ref("AWS::EC2::Volume", *e.Name)
 }

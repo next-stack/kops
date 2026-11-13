@@ -17,13 +17,14 @@ limitations under the License.
 package awstasks
 
 import (
+	"context"
 	"fmt"
 
-	"github.com/aws/aws-sdk-go/service/autoscaling"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
-	"k8s.io/kops/upup/pkg/fi/cloudup/cloudformation"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraform"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraformWriter"
 )
@@ -41,29 +42,36 @@ type AutoscalingLifecycleHook struct {
 
 	AutoscalingGroup    *AutoscalingGroup
 	DefaultResult       *string
-	HeartbeatTimeout    *int64
+	HeartbeatTimeout    *int32
 	LifecycleTransition *string
+
+	Enabled *bool
 }
 
-var _ fi.CompareWithID = &AutoscalingLifecycleHook{}
+var _ fi.CompareWithID = (*AutoscalingLifecycleHook)(nil)
 
 func (h *AutoscalingLifecycleHook) CompareWithID() *string {
 	return h.Name
 }
 
-func (h *AutoscalingLifecycleHook) Find(c *fi.Context) (*AutoscalingLifecycleHook, error) {
-	cloud := c.Cloud.(awsup.AWSCloud)
+func (h *AutoscalingLifecycleHook) Find(c *fi.CloudupContext) (*AutoscalingLifecycleHook, error) {
+	ctx := c.Context()
+	cloud := awsup.GetCloud(c)
 
 	request := &autoscaling.DescribeLifecycleHooksInput{
 		AutoScalingGroupName: h.AutoscalingGroup.Name,
-		LifecycleHookNames:   []*string{h.GetHookName()},
+		LifecycleHookNames:   []string{aws.ToString(h.GetHookName())},
 	}
 
-	response, err := cloud.Autoscaling().DescribeLifecycleHooks(request)
+	response, err := cloud.Autoscaling().DescribeLifecycleHooks(ctx, request)
 	if err != nil {
 		return nil, fmt.Errorf("error listing ASG Lifecycle Hooks: %v", err)
 	}
 	if response == nil || len(response.LifecycleHooks) == 0 {
+		if !fi.ValueOf(h.Enabled) {
+			return h, nil
+		}
+
 		return nil, nil
 	}
 	if len(response.LifecycleHooks) > 1 {
@@ -80,13 +88,14 @@ func (h *AutoscalingLifecycleHook) Find(c *fi.Context) (*AutoscalingLifecycleHoo
 		DefaultResult:       hook.DefaultResult,
 		HeartbeatTimeout:    hook.HeartbeatTimeout,
 		LifecycleTransition: hook.LifecycleTransition,
+		Enabled:             new(true),
 	}
 
 	return actual, nil
 }
 
-func (h *AutoscalingLifecycleHook) Run(c *fi.Context) error {
-	return fi.DefaultDeltaRunMethod(h, c)
+func (h *AutoscalingLifecycleHook) Run(c *fi.CloudupContext) error {
+	return fi.CloudupDefaultDeltaRunMethod(h, c)
 }
 
 func (_ *AutoscalingLifecycleHook) CheckChanges(a, e, changes *AutoscalingLifecycleHook) error {
@@ -103,17 +112,30 @@ func (_ *AutoscalingLifecycleHook) CheckChanges(a, e, changes *AutoscalingLifecy
 }
 
 func (*AutoscalingLifecycleHook) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *AutoscalingLifecycleHook) error {
+	ctx := context.TODO()
+
 	if changes != nil {
-		request := &autoscaling.PutLifecycleHookInput{
-			AutoScalingGroupName: e.AutoscalingGroup.Name,
-			DefaultResult:        e.DefaultResult,
-			HeartbeatTimeout:     e.HeartbeatTimeout,
-			LifecycleHookName:    e.GetHookName(),
-			LifecycleTransition:  e.LifecycleTransition,
-		}
-		_, err := t.Cloud.Autoscaling().PutLifecycleHook(request)
-		if err != nil {
-			return err
+		if fi.ValueOf(e.Enabled) {
+			request := &autoscaling.PutLifecycleHookInput{
+				AutoScalingGroupName: e.AutoscalingGroup.Name,
+				DefaultResult:        e.DefaultResult,
+				HeartbeatTimeout:     e.HeartbeatTimeout,
+				LifecycleHookName:    e.GetHookName(),
+				LifecycleTransition:  e.LifecycleTransition,
+			}
+			_, err := t.Cloud.Autoscaling().PutLifecycleHook(ctx, request)
+			if err != nil {
+				return err
+			}
+		} else {
+			request := &autoscaling.DeleteLifecycleHookInput{
+				AutoScalingGroupName: e.AutoscalingGroup.Name,
+				LifecycleHookName:    e.GetHookName(),
+			}
+			_, err := t.Cloud.Autoscaling().DeleteLifecycleHook(ctx, request)
+			if err != nil {
+				return err
+			}
 		}
 	}
 
@@ -121,14 +143,17 @@ func (*AutoscalingLifecycleHook) RenderAWS(t *awsup.AWSAPITarget, a, e, changes 
 }
 
 type terraformASGLifecycleHook struct {
-	Name                 *string                  `json:"name" cty:"name"`
-	AutoScalingGroupName *terraformWriter.Literal `json:"autoscaling_group_name" cty:"autoscaling_group_name"`
-	DefaultResult        *string                  `json:"default_result" cty:"default_result"`
-	HeartbeatTimeout     *int64                   `json:"heartbeat_timeout" cty:"heartbeat_timeout"`
-	LifecycleTransition  *string                  `json:"lifecycle_transition" cty:"lifecycle_transition"`
+	Name                 *string                  `cty:"name"`
+	AutoScalingGroupName *terraformWriter.Literal `cty:"autoscaling_group_name"`
+	DefaultResult        *string                  `cty:"default_result"`
+	HeartbeatTimeout     *int32                   `cty:"heartbeat_timeout"`
+	LifecycleTransition  *string                  `cty:"lifecycle_transition"`
 }
 
 func (_ *AutoscalingLifecycleHook) RenderTerraform(t *terraform.TerraformTarget, a, e, changes *AutoscalingLifecycleHook) error {
+	if !fi.ValueOf(e.Enabled) {
+		return nil
+	}
 	tf := &terraformASGLifecycleHook{
 		Name:                 e.GetHookName(),
 		AutoScalingGroupName: e.AutoscalingGroup.TerraformLink(),
@@ -138,26 +163,6 @@ func (_ *AutoscalingLifecycleHook) RenderTerraform(t *terraform.TerraformTarget,
 	}
 
 	return t.RenderResource("aws_autoscaling_lifecycle_hook", *e.Name, tf)
-}
-
-type cloudformationASGLifecycleHook struct {
-	LifecycleHookName    *string
-	AutoScalingGroupName *cloudformation.Literal
-	DefaultResult        *string
-	HeartbeatTimeout     *int64
-	LifecycleTransition  *string
-}
-
-func (_ *AutoscalingLifecycleHook) RenderCloudformation(t *cloudformation.CloudformationTarget, a, e, changes *AutoscalingLifecycleHook) error {
-	tf := &cloudformationASGLifecycleHook{
-		LifecycleHookName:    e.GetHookName(),
-		AutoScalingGroupName: e.AutoscalingGroup.CloudformationLink(),
-		DefaultResult:        e.DefaultResult,
-		HeartbeatTimeout:     e.HeartbeatTimeout,
-		LifecycleTransition:  e.LifecycleTransition,
-	}
-
-	return t.RenderResource("AWS::AutoScaling::LifecycleHook", *e.Name, tf)
 }
 
 func (h *AutoscalingLifecycleHook) GetHookName() *string {

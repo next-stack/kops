@@ -22,7 +22,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/url"
 	"os"
@@ -141,13 +140,18 @@ func run() error {
 	flag.StringVar(&caCert, "ca-cert", caCert, "path to ca certificate")
 
 	klog.InitFlags(nil)
+	// Opt into the new klog behavior so that -stderrthreshold is honored even
+	// when -logtostderr=true (the default).
+	// Ref: kubernetes/klog#212, kubernetes/klog#432
+	flag.Set("legacy_stderr_threshold_behavior", "false") //nolint:errcheck
+	flag.Set("stderrthreshold", "INFO")                   //nolint:errcheck
 
 	flag.Parse()
 
 	tlsConfig := &tls.Config{}
 
 	if caCert != "" {
-		b, err := ioutil.ReadFile(caCert)
+		b, err := os.ReadFile(caCert)
 		if err != nil {
 			return fmt.Errorf("error reading certificate %q: %v", caCert, err)
 		}

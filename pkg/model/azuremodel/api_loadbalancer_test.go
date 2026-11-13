@@ -22,15 +22,16 @@ import (
 
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/upup/pkg/fi"
+	"k8s.io/kops/upup/pkg/fi/cloudup/azuretasks"
 )
 
 func TestAPILoadBalancerModelBuilder_Build(t *testing.T) {
 	b := APILoadBalancerModelBuilder{
 		AzureModelContext: newTestAzureModelContext(),
 	}
-	b.InstanceGroups[0].Spec.Role = kops.InstanceGroupRoleMaster
-	c := &fi.ModelBuilderContext{
-		Tasks: make(map[string]fi.Task),
+	b.InstanceGroups[0].Spec.Role = kops.InstanceGroupRoleControlPlane
+	c := &fi.CloudupModelBuilderContext{
+		Tasks: make(map[string]fi.CloudupTask),
 	}
 	err := b.Build(c)
 	if err != nil {
@@ -42,7 +43,7 @@ func TestSubnetForLoadbalancer(t *testing.T) {
 	b := APILoadBalancerModelBuilder{
 		AzureModelContext: newTestAzureModelContext(),
 	}
-	b.Cluster.Spec.Subnets = []kops.ClusterSubnetSpec{
+	b.Cluster.Spec.Networking.Subnets = []kops.ClusterSubnetSpec{
 		{
 			Name: "master",
 			Type: kops.SubnetTypePrivate,
@@ -56,7 +57,7 @@ func TestSubnetForLoadbalancer(t *testing.T) {
 			Type: kops.SubnetTypeUtility,
 		},
 	}
-	b.InstanceGroups[0].Spec.Role = kops.InstanceGroupRoleMaster
+	b.InstanceGroups[0].Spec.Role = kops.InstanceGroupRoleControlPlane
 	b.InstanceGroups[0].Spec.Subnets = []string{
 		"master",
 	}
@@ -72,5 +73,28 @@ func TestSubnetForLoadbalancer(t *testing.T) {
 	if !reflect.DeepEqual(actual, expected) {
 		t.Errorf("expected subnet %+v, but got %+v", expected, actual)
 	}
+}
 
+func TestAPILoadBalancerModelBuilder_BuildWhenUpdatingOnlyNodes(t *testing.T) {
+	b := APILoadBalancerModelBuilder{
+		AzureModelContext: newTestAzureModelContext(),
+	}
+	controlPlane := newTestInstanceGroup()
+	controlPlane.Name = "control-plane"
+	controlPlane.Spec.Role = kops.InstanceGroupRoleControlPlane
+	b.AllInstanceGroups = append(b.AllInstanceGroups, controlPlane)
+	c := &fi.CloudupModelBuilderContext{
+		Tasks: make(map[string]fi.CloudupTask),
+	}
+	if err := b.Build(c); err != nil {
+		t.Fatalf("unexpected error %s", err)
+	}
+
+	lb, ok := c.Tasks["LoadBalancer/"+b.NameForLoadBalancer()].(*azuretasks.LoadBalancer)
+	if !ok {
+		t.Fatalf("load balancer task not found")
+	}
+	if name := fi.ValueOf(lb.Subnet.Name); name != "test-subnet" {
+		t.Errorf("expected the load balancer in the control plane subnet %q, but got %q", "test-subnet", name)
+	}
 }

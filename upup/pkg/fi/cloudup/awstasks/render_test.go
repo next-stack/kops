@@ -17,7 +17,6 @@ limitations under the License.
 package awstasks
 
 import (
-	"io/ioutil"
 	"os"
 	"path"
 	"reflect"
@@ -26,7 +25,6 @@ import (
 	"k8s.io/kops/pkg/diff"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
-	"k8s.io/kops/upup/pkg/fi/cloudup/cloudformation"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraform"
 )
 
@@ -36,17 +34,7 @@ type renderTest struct {
 }
 
 func doRenderTests(t *testing.T, method string, cases []*renderTest) {
-	outdir, err := ioutil.TempDir("", "kops-render-")
-	if err != nil {
-		t.Errorf("failed to create local render directory: %s", err)
-		t.FailNow()
-	}
-	defer func() {
-		err := os.RemoveAll(outdir)
-		if err != nil {
-			t.Errorf("failed to remove temp dir %q: %v", outdir, err)
-		}
-	}()
+	outdir := t.TempDir()
 
 	for i, c := range cases {
 		var filename string
@@ -56,11 +44,8 @@ func doRenderTests(t *testing.T, method string, cases []*renderTest) {
 
 		switch method {
 		case "RenderTerraform":
-			target = terraform.NewTerraformTarget(cloud, "test", nil, outdir, nil)
+			target = terraform.NewTerraformTarget(cloud, "test", outdir, nil)
 			filename = "kubernetes.tf"
-		case "RenderCloudformation":
-			target = cloudformation.NewCloudformationTarget(cloud, "test", outdir)
-			filename = "kubernetes.json"
 		default:
 			t.Errorf("unknown render method: %s", method)
 			t.FailNow()
@@ -80,7 +65,7 @@ func doRenderTests(t *testing.T, method string, cases []*renderTest) {
 			}
 
 			// @step: invoke the target finish up
-			in := []reflect.Value{reflect.ValueOf(make(map[string]fi.Task))}
+			in := []reflect.Value{reflect.ValueOf(make(map[string]fi.CloudupTask))}
 			resp = reflect.ValueOf(target).MethodByName("Finish").Call(in)
 			if err := resp[0].Interface(); err != nil {
 				return err.(error)
@@ -88,7 +73,7 @@ func doRenderTests(t *testing.T, method string, cases []*renderTest) {
 
 			// @step: check the render is as expected
 			if c.Expected != "" {
-				content, err := ioutil.ReadFile(path.Join(outdir, filename))
+				content, err := os.ReadFile(path.Join(outdir, filename))
 				if err != nil {
 					return err
 				}
@@ -96,7 +81,7 @@ func doRenderTests(t *testing.T, method string, cases []*renderTest) {
 					diffString := diff.FormatDiff(c.Expected, string(content))
 					t.Logf("diff:\n%s\n", diffString)
 					t.Errorf("case %d, expected: %s\n,got: %s\n", i, c.Expected, string(content))
-					//assert.Equal(t, "", string(content))
+					// assert.Equal(t, "", string(content))
 				}
 			}
 

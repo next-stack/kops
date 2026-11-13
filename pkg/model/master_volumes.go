@@ -21,12 +21,12 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/aws/aws-sdk-go/service/ec2"
+	armcompute "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v7"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/scaleway/scaleway-sdk-go/api/instance/v1"
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/apis/kops/model"
 	"k8s.io/kops/upup/pkg/fi"
-	"k8s.io/kops/upup/pkg/fi/cloudup/alitasks"
-	"k8s.io/kops/upup/pkg/fi/cloudup/aliup"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awstasks"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
 	"k8s.io/kops/upup/pkg/fi/cloudup/azure"
@@ -35,18 +35,24 @@ import (
 	"k8s.io/kops/upup/pkg/fi/cloudup/dotasks"
 	"k8s.io/kops/upup/pkg/fi/cloudup/gce"
 	"k8s.io/kops/upup/pkg/fi/cloudup/gcetasks"
+	"k8s.io/kops/upup/pkg/fi/cloudup/hetzner"
+	"k8s.io/kops/upup/pkg/fi/cloudup/hetznertasks"
+	"k8s.io/kops/upup/pkg/fi/cloudup/linode"
+	"k8s.io/kops/upup/pkg/fi/cloudup/linodetasks"
 	"k8s.io/kops/upup/pkg/fi/cloudup/openstack"
 	"k8s.io/kops/upup/pkg/fi/cloudup/openstacktasks"
+	"k8s.io/kops/upup/pkg/fi/cloudup/scaleway"
+	"k8s.io/kops/upup/pkg/fi/cloudup/scalewaytasks"
 )
 
 const (
 	DefaultEtcdVolumeSize             = 20
-	DefaultAWSEtcdVolumeType          = ec2.VolumeTypeGp3
+	DefaultAWSEtcdVolumeType          = "gp3"
 	DefaultAWSEtcdVolumeIonIops       = 100
 	DefaultAWSEtcdVolumeGp3Iops       = 3000
 	DefaultAWSEtcdVolumeGp3Throughput = 125
+	DefaultAZUREEtcdVolumeType        = "StandardSSD_LRS"
 	DefaultGCEEtcdVolumeType          = "pd-ssd"
-	DefaultALIEtcdVolumeType          = "cloud_ssd"
 )
 
 // MasterVolumeBuilder builds master EBS volumes
@@ -55,15 +61,16 @@ type MasterVolumeBuilder struct {
 	Lifecycle fi.Lifecycle
 }
 
-var _ fi.ModelBuilder = &MasterVolumeBuilder{}
+var _ fi.CloudupModelBuilder = &MasterVolumeBuilder{}
 
-func (b *MasterVolumeBuilder) Build(c *fi.ModelBuilderContext) error {
+func (b *MasterVolumeBuilder) Build(c *fi.CloudupModelBuilderContext) error {
 	for _, etcd := range b.Cluster.Spec.EtcdClusters {
 		for _, m := range etcd.Members {
-			// EBS volume for each member of the each etcd cluster
-			name := m.Name + ".etcd-" + etcd.Name + "." + b.ClusterName()
+			// EBS volume for each member of each etcd cluster
+			prefix := m.Name + ".etcd-" + etcd.Name
+			name := prefix + "." + b.ClusterName()
 
-			igName := fi.StringValue(m.InstanceGroup)
+			igName := fi.ValueOf(m.InstanceGroup)
 			if igName == "" {
 				return fmt.Errorf("InstanceGroup not set on etcd %s/%s", m.Name, etcd.Name)
 			}
@@ -84,7 +91,7 @@ func (b *MasterVolumeBuilder) Build(c *fi.ModelBuilderContext) error {
 			}
 			zone := zones[0]
 
-			volumeSize := fi.Int32Value(m.VolumeSize)
+			volumeSize := fi.ValueOf(m.VolumeSize)
 			if volumeSize == 0 {
 				volumeSize = DefaultEtcdVolumeSize
 			}
@@ -95,7 +102,7 @@ func (b *MasterVolumeBuilder) Build(c *fi.ModelBuilderContext) error {
 			}
 			sort.Strings(allMembers)
 
-			switch kops.CloudProviderID(b.Cluster.Spec.CloudProvider) {
+			switch b.Cluster.GetCloudProvider() {
 			case kops.CloudProviderAWS:
 				err = b.addAWSVolume(c, name, volumeSize, zone, etcd, m, allMembers)
 				if err != nil {
@@ -104,38 +111,50 @@ func (b *MasterVolumeBuilder) Build(c *fi.ModelBuilderContext) error {
 			case kops.CloudProviderDO:
 				b.addDOVolume(c, name, volumeSize, zone, etcd, m, allMembers)
 			case kops.CloudProviderGCE:
-				b.addGCEVolume(c, name, volumeSize, zone, etcd, m, allMembers)
+				b.addGCEVolume(c, prefix, volumeSize, zone, etcd, m, allMembers)
+			case kops.CloudProviderHetzner:
+				b.addHetznerVolume(c, name, volumeSize, zone, etcd, m, allMembers)
 			case kops.CloudProviderOpenstack:
 				err = b.addOpenstackVolume(c, name, volumeSize, zone, etcd, m, allMembers)
 				if err != nil {
 					return err
 				}
-			case kops.CloudProviderALI:
-				b.addALIVolume(c, name, volumeSize, zone, etcd, m, allMembers)
 			case kops.CloudProviderAzure:
-				b.addAzureVolume(c, name, volumeSize, zone, etcd, m, allMembers)
+				err = b.addAzureVolume(c, name, volumeSize, zone, etcd, m, allMembers)
+				if err != nil {
+					return err
+				}
+			case kops.CloudProviderScaleway:
+				b.addScalewayVolume(c, name, volumeSize, zone, etcd, m, allMembers)
+
+			case kops.CloudProviderLinode:
+				b.addLinodeVolume(c, name, volumeSize, zone, etcd, m, allMembers)
+
+			case kops.CloudProviderMetal:
+				// Nothing special to do for Metal (yet)
+
 			default:
-				return fmt.Errorf("unknown cloudprovider %q", b.Cluster.Spec.CloudProvider)
+				return fmt.Errorf("unknown cloudprovider %q", b.Cluster.GetCloudProvider())
 			}
 		}
 	}
 	return nil
 }
 
-func (b *MasterVolumeBuilder) addAWSVolume(c *fi.ModelBuilderContext, name string, volumeSize int32, zone string, etcd kops.EtcdClusterSpec, m kops.EtcdMemberSpec, allMembers []string) error {
+func (b *MasterVolumeBuilder) addAWSVolume(c *fi.CloudupModelBuilderContext, name string, volumeSize int32, zone string, etcd kops.EtcdClusterSpec, m kops.EtcdMemberSpec, allMembers []string) error {
 	// https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/EBSVolumeTypes.html
-	volumeType := fi.StringValue(m.VolumeType)
+	volumeType := fi.ValueOf(m.VolumeType)
 	if volumeType == "" {
 		volumeType = DefaultAWSEtcdVolumeType
 	}
-	volumeIops := fi.Int32Value(m.VolumeIops)
-	volumeThroughput := fi.Int32Value(m.VolumeThroughput)
-	switch volumeType {
-	case ec2.VolumeTypeIo1, ec2.VolumeTypeIo2:
+	volumeIops := fi.ValueOf(m.VolumeIOPS)
+	volumeThroughput := fi.ValueOf(m.VolumeThroughput)
+	switch ec2types.VolumeType(volumeType) {
+	case ec2types.VolumeTypeIo1, ec2types.VolumeTypeIo2:
 		if volumeIops < 100 {
 			volumeIops = DefaultAWSEtcdVolumeIonIops
 		}
-	case ec2.VolumeTypeGp3:
+	case ec2types.VolumeTypeGp3:
 		if volumeIops < 3000 {
 			volumeIops = DefaultAWSEtcdVolumeGp3Iops
 		}
@@ -143,27 +162,12 @@ func (b *MasterVolumeBuilder) addAWSVolume(c *fi.ModelBuilderContext, name strin
 			volumeThroughput = DefaultAWSEtcdVolumeGp3Throughput
 		}
 	}
-	volumeIopsSizeRatio := float64(volumeIops) / float64(volumeSize)
-	volumeThroughputIopsRatio := float64(volumeThroughput) / float64(volumeIops)
-	switch volumeType {
-	case ec2.VolumeTypeIo1:
-		if volumeIopsSizeRatio >= 50.0 {
-			return fmt.Errorf("volumeIops to volumeSize ratio must be lower than 50. For %s ratio is %.02f", name, volumeIopsSizeRatio)
-		}
-	case ec2.VolumeTypeIo2:
-		if volumeIopsSizeRatio >= 500.0 {
-			return fmt.Errorf("volumeIops to volumeSize ratio must be lower than 500. For %s ratio is %.02f", name, volumeIopsSizeRatio)
-		}
-	case ec2.VolumeTypeGp3:
-		if volumeIops > 3000 && volumeIopsSizeRatio >= 500.0 {
-			return fmt.Errorf("volumeIops to volumeSize ratio must be lower than 500. For %s ratio is %.02f", name, volumeIopsSizeRatio)
-		}
-		if volumeThroughputIopsRatio >= 0.25 {
-			return fmt.Errorf("volumeThroughput to volumeIops ratio must be lower than 0.25. For %s ratio is %.02f", name, volumeThroughputIopsRatio)
-		}
+
+	if err := validateAWSVolume(name, volumeType, volumeSize, volumeIops, volumeThroughput); err != nil {
+		return err
 	}
 
-	// The tags are how protokube knows to mount the volume and use it for etcd
+	// The tags are how etcd-manager knows to mount the volume and use it for etcd
 	tags := make(map[string]string)
 
 	// Apply all user defined labels on the volumes
@@ -171,34 +175,35 @@ func (b *MasterVolumeBuilder) addAWSVolume(c *fi.ModelBuilderContext, name strin
 		tags[k] = v
 	}
 
-	//tags[awsup.TagClusterName] = b.C.cluster.Name
+	// tags[awsup.TagClusterName] = b.C.cluster.Name
 	// This is the configuration of the etcd cluster
 	tags[awsup.TagNameEtcdClusterPrefix+etcd.Name] = m.Name + "/" + strings.Join(allMembers, ",")
-	// This says "only mount on a master"
+	// This says "only mount on a control plane node"
+	tags[awsup.TagNameRolePrefix+"control-plane"] = "1"
 	tags[awsup.TagNameRolePrefix+"master"] = "1"
 
 	// We always add an owned tags (these can't be shared)
 	tags["kubernetes.io/cluster/"+b.Cluster.ObjectMeta.Name] = "owned"
 
-	encrypted := fi.BoolValue(m.EncryptedVolume)
+	encrypted := fi.ValueOf(m.EncryptedVolume)
 
 	t := &awstasks.EBSVolume{
-		Name:      fi.String(name),
+		Name:      new(name),
 		Lifecycle: b.Lifecycle,
 
-		AvailabilityZone: fi.String(zone),
-		SizeGB:           fi.Int64(int64(volumeSize)),
-		VolumeType:       fi.String(volumeType),
-		KmsKeyId:         m.KmsKeyId,
-		Encrypted:        fi.Bool(encrypted),
+		AvailabilityZone: new(zone),
+		SizeGB:           new(int32(volumeSize)),
+		VolumeType:       ec2types.VolumeType(volumeType),
+		KmsKeyId:         m.KmsKeyID,
+		Encrypted:        new(encrypted),
 		Tags:             tags,
 	}
-	switch volumeType {
-	case ec2.VolumeTypeGp3:
-		t.VolumeThroughput = fi.Int64(int64(volumeThroughput))
+	switch ec2types.VolumeType(volumeType) {
+	case ec2types.VolumeTypeGp3:
+		t.VolumeThroughput = new(int32(volumeThroughput))
 		fallthrough
-	case ec2.VolumeTypeIo1, ec2.VolumeTypeIo2:
-		t.VolumeIops = fi.Int64(int64(volumeIops))
+	case ec2types.VolumeTypeIo1, ec2types.VolumeTypeIo2:
+		t.VolumeIops = new(int32(volumeIops))
 	}
 
 	c.AddTask(t)
@@ -206,7 +211,30 @@ func (b *MasterVolumeBuilder) addAWSVolume(c *fi.ModelBuilderContext, name strin
 	return nil
 }
 
-func (b *MasterVolumeBuilder) addDOVolume(c *fi.ModelBuilderContext, name string, volumeSize int32, zone string, etcd kops.EtcdClusterSpec, m kops.EtcdMemberSpec, allMembers []string) {
+func validateAWSVolume(name, volumeType string, volumeSize, volumeIops, volumeThroughput int32) error {
+	volumeIopsSizeRatio := float64(volumeIops) / float64(volumeSize)
+	volumeThroughputIopsRatio := float64(volumeThroughput) / float64(volumeIops)
+	switch ec2types.VolumeType(volumeType) {
+	case ec2types.VolumeTypeIo1:
+		if volumeIopsSizeRatio > 50.0 {
+			return fmt.Errorf("volumeIops to volumeSize ratio must be lower than 50. For %s ratio is %.02f", name, volumeIopsSizeRatio)
+		}
+	case ec2types.VolumeTypeIo2:
+		if volumeIopsSizeRatio > 500.0 {
+			return fmt.Errorf("volumeIops to volumeSize ratio must be lower than 500. For %s ratio is %.02f", name, volumeIopsSizeRatio)
+		}
+	case ec2types.VolumeTypeGp3:
+		if volumeIops > 3000 && volumeIopsSizeRatio > 500.0 {
+			return fmt.Errorf("volumeIops to volumeSize ratio must be lower than 500. For %s ratio is %.02f", name, volumeIopsSizeRatio)
+		}
+		if volumeThroughputIopsRatio > 0.25 {
+			return fmt.Errorf("volumeThroughput to volumeIops ratio must be lower than 0.25. For %s ratio is %.02f", name, volumeThroughputIopsRatio)
+		}
+	}
+	return nil
+}
+
+func (b *MasterVolumeBuilder) addDOVolume(c *fi.CloudupModelBuilderContext, name string, volumeSize int32, zone string, etcd kops.EtcdClusterSpec, m kops.EtcdMemberSpec, allMembers []string) {
 	// required that names start with a lower case and only contains letters, numbers and hyphens
 	name = "kops-" + do.SafeClusterName(name)
 
@@ -223,67 +251,88 @@ func (b *MasterVolumeBuilder) addDOVolume(c *fi.ModelBuilderContext, name string
 	tags[do.TagKubernetesClusterNamePrefix] = do.SafeClusterName(b.Cluster.ObjectMeta.Name)
 
 	t := &dotasks.Volume{
-		Name:      fi.String(name),
+		Name:      new(name),
 		Lifecycle: b.Lifecycle,
-		SizeGB:    fi.Int64(int64(volumeSize)),
-		Region:    fi.String(zone),
+		SizeGB:    new(int64(volumeSize)),
+		Region:    new(zone),
 		Tags:      tags,
 	}
 
 	c.AddTask(t)
 }
 
-func (b *MasterVolumeBuilder) addGCEVolume(c *fi.ModelBuilderContext, name string, volumeSize int32, zone string, etcd kops.EtcdClusterSpec, m kops.EtcdMemberSpec, allMembers []string) {
-	volumeType := fi.StringValue(m.VolumeType)
+func (b *MasterVolumeBuilder) addGCEVolume(c *fi.CloudupModelBuilderContext, prefix string, volumeSize int32, zone string, etcd kops.EtcdClusterSpec, m kops.EtcdMemberSpec, allMembers []string) {
+	volumeType := fi.ValueOf(m.VolumeType)
 	if volumeType == "" {
 		volumeType = DefaultGCEEtcdVolumeType
 	}
 
-	// TODO: Should no longer be needed because we trim prefixes
-	//// On GCE we are close to the length limits.  So,we remove the dashes from the keys
-	//// The name is normally something like "us-east1-a", and the dashes are particularly expensive
-	//// because of the escaping needed (3 characters for each dash)
-	//switch tf.cluster.Spec.CloudProvider {
-	//case string(kops.CloudProviderGCE):
-	//	// TODO: If we're still struggling for size, we don't need to put ourselves in the allmembers list
-	//	for i := range allMembers {
-	//		allMembers[i] = strings.Replace(allMembers[i], "-", "", -1)
-	//	}
-	//	meName = strings.Replace(meName, "-", "", -1)
-	//}
+	// GCE labels are capped at 63 chars and EncodeGCELabel inflates non-alnum
+	// characters 3x, so a full member list overflows for clusters with many
+	// control planes (#17630). The historical "<name>/<allnames>" shape was
+	// only consumed by legacy protokube etcd bootstrap (removed in 2021); both
+	// kops's status reader and etcd-manager only read tokens[0]. Keep the "/"
+	// separator with a self-only allnames so older parsers still validate.
+	clusterSpec := m.Name + "/" + m.Name
 
-	// This is the configuration of the etcd cluster
-	clusterSpec := m.Name + "/" + strings.Join(allMembers, ",")
+	clusterLabel := gce.LabelForCluster(b.ClusterName())
 
-	// The tags are how protokube knows to mount the volume and use it for etcd
+	// The tags are how etcd-manager knows to mount the volume and use it for etcd
 	tags := make(map[string]string)
-	tags[gce.GceLabelNameKubernetesCluster] = gce.SafeClusterName(b.ClusterName())
+	tags[clusterLabel.Key] = clusterLabel.Value
 	tags[gce.GceLabelNameRolePrefix+"master"] = "master" // Can't start with a number
 	tags[gce.GceLabelNameEtcdClusterPrefix+etcd.Name] = gce.EncodeGCELabel(clusterSpec)
 
 	// GCE disk names must match the following regular expression: '[a-z](?:[-a-z0-9]{0,61}[a-z0-9])?'
-	name = strings.Replace(name, ".", "-", -1)
-	if strings.IndexByte("0123456789-", name[0]) != -1 {
-		name = "d" + name
+	prefix = strings.ReplaceAll(prefix, ".", "-")
+	if strings.IndexByte("0123456789-", prefix[0]) != -1 {
+		prefix = "d" + prefix
 	}
+	name := gce.ClusterSuffixedName(prefix, b.Cluster.ObjectMeta.Name, 63)
+
+	volumeIops := fi.ValueOf(m.VolumeIOPS)
+	volumeThroughput := fi.ValueOf(m.VolumeThroughput)
 
 	t := &gcetasks.Disk{
-		Name:      fi.String(name),
+		Name:      new(name),
 		Lifecycle: b.Lifecycle,
 
-		Zone:       fi.String(zone),
-		SizeGB:     fi.Int64(int64(volumeSize)),
-		VolumeType: fi.String(volumeType),
+		Zone:       new(zone),
+		SizeGB:     new(int64(volumeSize)),
+		VolumeType: new(volumeType),
 		Labels:     tags,
+	}
+
+	if volumeIops > 0 {
+		t.VolumeIops = new(int64(volumeIops))
+	}
+	if volumeThroughput > 0 {
+		t.VolumeThroughput = new(int64(volumeThroughput))
 	}
 
 	c.AddTask(t)
 }
 
-func (b *MasterVolumeBuilder) addOpenstackVolume(c *fi.ModelBuilderContext, name string, volumeSize int32, zone string, etcd kops.EtcdClusterSpec, m kops.EtcdMemberSpec, allMembers []string) error {
-	volumeType := fi.StringValue(m.VolumeType)
+func (b *MasterVolumeBuilder) addHetznerVolume(c *fi.CloudupModelBuilderContext, name string, volumeSize int32, zone string, etcd kops.EtcdClusterSpec, m kops.EtcdMemberSpec, allMembers []string) {
+	tags := make(map[string]string)
+	tags[hetzner.TagKubernetesClusterName] = b.Cluster.ObjectMeta.Name
+	tags[hetzner.TagKubernetesInstanceGroup] = fi.ValueOf(m.InstanceGroup)
+	tags[hetzner.TagKubernetesVolumeRole] = etcd.Name
 
-	// The tags are how protokube knows to mount the volume and use it for etcd
+	t := &hetznertasks.Volume{
+		Name:      new(name),
+		Lifecycle: b.Lifecycle,
+		Size:      int(volumeSize),
+		Location:  zone,
+		Labels:    tags,
+	}
+	c.AddTask(t)
+}
+
+func (b *MasterVolumeBuilder) addOpenstackVolume(c *fi.CloudupModelBuilderContext, name string, volumeSize int32, zone string, etcd kops.EtcdClusterSpec, m kops.EtcdMemberSpec, allMembers []string) error {
+	volumeType := fi.ValueOf(m.VolumeType)
+
+	// The tags are how etcd-manager knows to mount the volume and use it for etcd
 	tags := make(map[string]string)
 	// Apply all user defined labels on the volumes
 	for k, v := range b.Cluster.Spec.CloudLabels {
@@ -291,18 +340,19 @@ func (b *MasterVolumeBuilder) addOpenstackVolume(c *fi.ModelBuilderContext, name
 	}
 	// This is the configuration of the etcd cluster
 	tags[openstack.TagNameEtcdClusterPrefix+etcd.Name] = m.Name + "/" + strings.Join(allMembers, ",")
-	// This says "only mount on a master"
+	// This says "only mount on a control plane node"
+	tags[openstack.TagNameRolePrefix+openstack.TagRoleControlPlane] = "1"
 	tags[openstack.TagNameRolePrefix+"master"] = "1"
 
 	// override zone
-	if b.Cluster.Spec.CloudConfig.Openstack.BlockStorage != nil && b.Cluster.Spec.CloudConfig.Openstack.BlockStorage.OverrideAZ != nil {
-		zone = fi.StringValue(b.Cluster.Spec.CloudConfig.Openstack.BlockStorage.OverrideAZ)
+	if b.Cluster.Spec.CloudProvider.Openstack.BlockStorage != nil && b.Cluster.Spec.CloudProvider.Openstack.BlockStorage.OverrideAZ != nil {
+		zone = fi.ValueOf(b.Cluster.Spec.CloudProvider.Openstack.BlockStorage.OverrideAZ)
 	}
 	t := &openstacktasks.Volume{
-		Name:             fi.String(name),
-		AvailabilityZone: fi.String(zone),
-		VolumeType:       fi.String(volumeType),
-		SizeGB:           fi.Int64(int64(volumeSize)),
+		Name:             new(name),
+		AvailabilityZone: new(zone),
+		VolumeType:       new(volumeType),
+		SizeGB:           new(int64(volumeSize)),
 		Tags:             tags,
 		Lifecycle:        b.Lifecycle,
 	}
@@ -311,80 +361,95 @@ func (b *MasterVolumeBuilder) addOpenstackVolume(c *fi.ModelBuilderContext, name
 	return nil
 }
 
-func (b *MasterVolumeBuilder) addALIVolume(c *fi.ModelBuilderContext, name string, volumeSize int32, zone string, etcd kops.EtcdClusterSpec, m kops.EtcdMemberSpec, allMembers []string) {
-	//Alicloud does not support volumeName starts with number
-	name = "v" + name
-	volumeType := fi.StringValue(m.VolumeType)
-	if volumeType == "" {
-		volumeType = DefaultALIEtcdVolumeType
-	}
-
-	// The tags are how protokube knows to mount the volume and use it for etcd
-	tags := make(map[string]string)
-
-	// Apply all user defined labels on the volumes
-	for k, v := range b.Cluster.Spec.CloudLabels {
-		tags[k] = v
-	}
-
-	// This is the configuration of the etcd cluster
-	tags[aliup.TagNameEtcdClusterPrefix+etcd.Name] = m.Name + "/" + strings.Join(allMembers, ",")
-	// This says "only mount on a master"
-	tags[aliup.TagNameRolePrefix+"master"] = "1"
-	// We always add an owned tags (these can't be shared)
-	tags["kubernetes.io/cluster/"+b.Cluster.ObjectMeta.Name] = "owned"
-
-	encrypted := fi.BoolValue(m.EncryptedVolume)
-
-	t := &alitasks.Disk{
-		Lifecycle:    b.Lifecycle,
-		Name:         fi.String(name),
-		ZoneId:       fi.String(zone),
-		SizeGB:       fi.Int(int(volumeSize)),
-		DiskCategory: fi.String(volumeType),
-		Encrypted:    fi.Bool(encrypted),
-		Tags:         tags,
-	}
-
-	c.AddTask(t)
-}
-
 func (b *MasterVolumeBuilder) addAzureVolume(
-	c *fi.ModelBuilderContext,
+	c *fi.CloudupModelBuilderContext,
 	name string,
 	volumeSize int32,
 	zone string,
 	etcd kops.EtcdClusterSpec,
 	m kops.EtcdMemberSpec,
 	allMembers []string,
-) {
-	// The tags are use by Protokube to mount the volume and use it for etcd.
+) error {
+	volumeType := fi.ValueOf(m.VolumeType)
+	if volumeType == "" {
+		volumeType = DefaultAZUREEtcdVolumeType
+	}
+	// The tags are how etcd-manager knows to mount the volume and use it for etcd.
 	tags := map[string]*string{
 		// This is the configuration of the etcd cluster.
-		azure.TagNameEtcdClusterPrefix + etcd.Name: fi.String(m.Name + "/" + strings.Join(allMembers, ",")),
-		// This says "only mount on a master".
-		azure.TagNameRolePrefix + azure.TagRoleMaster: fi.String("1"),
+		azure.TagNameEtcdClusterPrefix + etcd.Name: new(m.Name + "/" + strings.Join(allMembers, ",")),
+		// This says "only mount on a control plane node".
+		azure.TagNameRolePrefix + azure.TagRoleControlPlane: new("1"),
+		azure.TagNameRolePrefix + azure.TagRoleMaster:       new("1"),
 		// We always add an owned tags (these can't be shared).
 		// Use dash (_) as a splitter. Other CSPs use slash (/), but slash is not
 		// allowed as a tag key in Azure.
-		"kubernetes.io_cluster_" + b.Cluster.ObjectMeta.Name: fi.String("owned"),
+		"kubernetes.io_cluster_" + b.Cluster.ObjectMeta.Name: new("owned"),
 	}
 
 	// Apply all user defined labels on the volumes.
 	for k, v := range b.Cluster.Spec.CloudLabels {
-		tags[k] = fi.String(v)
+		tags[k] = new(v)
 	}
 
-	// TODO(kenji): Respect zone and m.EncryptedVolume.
+	zoneNumber, err := azure.ZoneToAvailabilityZoneNumber(zone)
+	if err != nil {
+		return err
+	}
+
+	// TODO(kenji): Respect m.EncryptedVolume.
 	t := &azuretasks.Disk{
-		Name:      fi.String(name),
+		Name:      new(name),
 		Lifecycle: b.Lifecycle,
 		// We cannot use AzureModelContext.LinkToResourceGroup() here because of cyclic dependency.
 		ResourceGroup: &azuretasks.ResourceGroup{
-			Name: fi.String(b.Cluster.AzureResourceGroupName()),
+			Name: new(b.Cluster.AzureResourceGroupName()),
 		},
-		SizeGB: fi.Int32(volumeSize),
-		Tags:   tags,
+		SizeGB:     new(volumeSize),
+		Tags:       tags,
+		VolumeType: new(armcompute.DiskStorageAccountTypes(volumeType)),
+		Zones:      []*string{&zoneNumber},
+	}
+	c.AddTask(t)
+
+	return nil
+}
+
+func (b *MasterVolumeBuilder) addScalewayVolume(c *fi.CloudupModelBuilderContext, name string, volumeSize int32, zone string, etcd kops.EtcdClusterSpec, m kops.EtcdMemberSpec, allMembers []string) {
+	volumeTags := []string{
+		fmt.Sprintf("%s=%s", scaleway.TagClusterName, b.Cluster.ObjectMeta.Name),
+		fmt.Sprintf("%s=%s", scaleway.TagNameEtcdClusterPrefix, etcd.Name),
+		fmt.Sprintf("%s=%s", scaleway.TagNameRolePrefix, scaleway.TagRoleControlPlane),
+		fmt.Sprintf("%s=%s", scaleway.TagInstanceGroup, fi.ValueOf(m.InstanceGroup)),
+	}
+	for k, v := range b.CloudTags(b.ClusterName(), false) {
+		volumeTags = append(volumeTags, fmt.Sprintf("%s=%s", k, v))
+	}
+
+	t := &scalewaytasks.Volume{
+		Name:      new(name),
+		Lifecycle: b.Lifecycle,
+		Size:      new(int64(volumeSize) * 1e9),
+		Zone:      &zone,
+		Tags:      volumeTags,
+		Type:      new(string(instance.VolumeVolumeTypeBSSD)),
+	}
+	c.AddTask(t)
+}
+
+func (b *MasterVolumeBuilder) addLinodeVolume(c *fi.CloudupModelBuilderContext, name string, volumeSize int32, zone string, etcd kops.EtcdClusterSpec, m kops.EtcdMemberSpec, allMembers []string) {
+	tags := []string{
+		fmt.Sprintf("%s:%s", linode.TagKubernetesClusterName, linode.NormalizeLinodeLabel(b.Cluster.ObjectMeta.Name)),
+		fmt.Sprintf("%s:%s", linode.TagKubernetesInstanceGroup, linode.NormalizeLinodeLabel(fi.ValueOf(m.InstanceGroup))),
+		fmt.Sprintf("%s:%s", linode.TagKubernetesVolumeRole, linode.NormalizeLinodeLabel(etcd.Name)),
+	}
+
+	t := &linodetasks.Volume{
+		Name:      new(name),
+		Lifecycle: b.Lifecycle,
+		SizeGB:    new(int(volumeSize)),
+		Region:    new(zone),
+		Tags:      tags,
 	}
 	c.AddTask(t)
 }

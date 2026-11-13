@@ -24,7 +24,6 @@
 
 # Vscode files
 .vscode
-.devcontainer
 
 # Emacs save files
 *~
@@ -62,18 +61,10 @@ network_closure.sh
 
 # build stuff
 .build
-.bazelbuild
 
 # Ignore all Exhuberant Ctags files
 # Removed for now - we have a package named tags
 # tags
-
-# Bazel output directories
-bazel-bin
-bazel-genfiles
-bazel-kops
-bazel-out
-bazel-testlogs
 
 # Ignore default apiserver config
 apiserver.local.config
@@ -100,3 +91,13 @@ _output
 
 # Used by E2E testing
 _artifacts
+_rundir
+
+# kustomize helm chart cache
+charts/
+
+# Ignore asdf .tool-versions file
+.tool-versions
+
+# Ignore direnv configuration file
+.envrc

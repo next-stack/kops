@@ -17,6 +17,7 @@ limitations under the License.
 package cloudup
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 
@@ -27,21 +28,23 @@ import (
 )
 
 type Loader struct {
-	Builders []fi.ModelBuilder
+	Builders []fi.CloudupModelBuilder
 
-	tasks map[string]fi.Task
+	tasks map[string]fi.CloudupTask
 }
 
 func (l *Loader) Init() {
-	l.tasks = make(map[string]fi.Task)
+	l.tasks = make(map[string]fi.CloudupTask)
 }
 
-func (l *Loader) BuildTasks(lifecycleOverrides map[string]fi.Lifecycle) (map[string]fi.Task, error) {
+func (l *Loader) BuildTasks(ctx context.Context, lifecycleOverrides map[string]fi.Lifecycle) (map[string]fi.CloudupTask, error) {
 	for _, builder := range l.Builders {
-		context := &fi.ModelBuilderContext{
+		context := &fi.CloudupModelBuilderContext{
 			Tasks:              l.tasks,
 			LifecycleOverrides: lifecycleOverrides,
+			Stacktraces:        make(map[string]string),
 		}
+		context = context.WithContext(ctx)
 		err := builder.Build(context)
 		if err != nil {
 			return nil, err
@@ -113,12 +116,13 @@ func (l *Loader) processDeferrals() error {
 	return nil
 }
 
-func (l *Loader) FindDeletions(cloud fi.Cloud, lifecycleOverrides map[string]fi.Lifecycle) (map[string]fi.Task, error) {
+func (l *Loader) FindDeletions(cloud fi.Cloud, lifecycleOverrides map[string]fi.Lifecycle) (map[string]fi.CloudupTask, error) {
 	for _, builder := range l.Builders {
 		if hasDeletions, ok := builder.(fi.HasDeletions); ok {
-			context := &fi.ModelBuilderContext{
+			context := &fi.CloudupModelBuilderContext{
 				Tasks:              l.tasks,
 				LifecycleOverrides: lifecycleOverrides,
+				Stacktraces:        make(map[string]string),
 			}
 			if err := hasDeletions.FindDeletions(context, cloud); err != nil {
 				return nil, err

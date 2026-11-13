@@ -19,6 +19,7 @@ package gce
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	compute "google.golang.org/api/compute/v1"
 )
@@ -27,28 +28,28 @@ type ComputeClient interface {
 	Projects() ProjectClient
 	Regions() RegionClient
 	Zones() ZoneClient
-
 	Networks() NetworkClient
 	Subnetworks() SubnetworkClient
 	Routes() RouteClient
 	ForwardingRules() ForwardingRuleClient
+	HTTPHealthChecks() HttpHealthChecksClient
+	RegionHealthChecks() RegionHealthChecksClient
 	Addresses() AddressClient
 	Firewalls() FirewallClient
 	Routers() RouterClient
-
 	Instances() InstanceClient
 	InstanceTemplates() InstanceTemplateClient
 	InstanceGroupManagers() InstanceGroupManagerClient
 	TargetPools() TargetPoolClient
-
 	Disks() DiskClient
+	RegionBackendServices() RegionBackendServiceClient
 }
 
 type computeClientImpl struct {
 	srv *compute.Service
 }
 
-var _ ComputeClient = &computeClientImpl{}
+var _ ComputeClient = (*computeClientImpl)(nil)
 
 func newComputeClientImpl(ctx context.Context) (*computeClientImpl, error) {
 	srv, err := compute.NewService(ctx)
@@ -99,6 +100,24 @@ func (c *computeClientImpl) Routes() RouteClient {
 func (c *computeClientImpl) ForwardingRules() ForwardingRuleClient {
 	return &forwardingRuleClientImpl{
 		srv: c.srv.ForwardingRules,
+	}
+}
+
+func (c *computeClientImpl) RegionBackendServices() RegionBackendServiceClient {
+	return &regionBackendServiceClientImpl{
+		srv: c.srv.RegionBackendServices,
+	}
+}
+
+func (c *computeClientImpl) HTTPHealthChecks() HttpHealthChecksClient {
+	return &httpHealthCheckClientImpl{
+		srv: c.srv.HttpHealthChecks,
+	}
+}
+
+func (c *computeClientImpl) RegionHealthChecks() RegionHealthChecksClient {
+	return &healthCheckClientImpl{
+		srv: c.srv.RegionHealthChecks,
 	}
 }
 
@@ -158,7 +177,7 @@ type projectClientImpl struct {
 	srv *compute.ProjectsService
 }
 
-var _ ProjectClient = &projectClientImpl{}
+var _ ProjectClient = (*projectClientImpl)(nil)
 
 func (c *projectClientImpl) Get(project string) (*compute.Project, error) {
 	return c.srv.Get(project).Do()
@@ -172,7 +191,7 @@ type regionClientImpl struct {
 	srv *compute.RegionsService
 }
 
-var _ RegionClient = &regionClientImpl{}
+var _ RegionClient = (*regionClientImpl)(nil)
 
 func (c *regionClientImpl) List(ctx context.Context, project string) ([]*compute.Region, error) {
 	var regions []*compute.Region
@@ -194,7 +213,7 @@ type zoneClientImpl struct {
 	srv *compute.ZonesService
 }
 
-var _ ZoneClient = &zoneClientImpl{}
+var _ ZoneClient = (*zoneClientImpl)(nil)
 
 func (c *zoneClientImpl) List(ctx context.Context, project string) ([]*compute.Zone, error) {
 	var zones []*compute.Zone
@@ -211,20 +230,30 @@ func (c *zoneClientImpl) List(ctx context.Context, project string) ([]*compute.Z
 type NetworkClient interface {
 	Insert(project string, nw *compute.Network) (*compute.Operation, error)
 	Get(project, name string) (*compute.Network, error)
+	Delete(project, name string) (*compute.Operation, error)
+	List(project string) (*compute.NetworkList, error)
 }
 
 type networkClientImpl struct {
 	srv *compute.NetworksService
 }
 
-var _ NetworkClient = &networkClientImpl{}
+var _ NetworkClient = (*networkClientImpl)(nil)
 
 func (c *networkClientImpl) Insert(project string, nw *compute.Network) (*compute.Operation, error) {
 	return c.srv.Insert(project, nw).Do()
 }
 
+func (c *networkClientImpl) Delete(project string, name string) (*compute.Operation, error) {
+	return c.srv.Delete(project, name).Do()
+}
+
 func (c *networkClientImpl) Get(project, name string) (*compute.Network, error) {
 	return c.srv.Get(project, name).Do()
+}
+
+func (c *networkClientImpl) List(project string) (*compute.NetworkList, error) {
+	return c.srv.List(project).Do()
 }
 
 type SubnetworkClient interface {
@@ -239,7 +268,7 @@ type subnetworkClientImpl struct {
 	srv *compute.SubnetworksService
 }
 
-var _ SubnetworkClient = &subnetworkClientImpl{}
+var _ SubnetworkClient = (*subnetworkClientImpl)(nil)
 
 func (c *subnetworkClientImpl) Insert(project, region string, subnet *compute.Subnetwork) (*compute.Operation, error) {
 	return c.srv.Insert(project, region, subnet).Do()
@@ -268,6 +297,45 @@ func (c *subnetworkClientImpl) List(ctx context.Context, project, region string)
 	return subnetworks, nil
 }
 
+// ===
+type RegionBackendServiceClient interface {
+	Insert(project, region string, fr *compute.BackendService) (*compute.Operation, error)
+	Delete(project, region, name string) (*compute.Operation, error)
+	Get(project, region, name string) (*compute.BackendService, error)
+	List(ctx context.Context, project, region string) ([]*compute.BackendService, error)
+}
+
+type regionBackendServiceClientImpl struct {
+	srv *compute.RegionBackendServicesService
+}
+
+var _ RegionBackendServiceClient = (*regionBackendServiceClientImpl)(nil)
+
+func (c *regionBackendServiceClientImpl) Insert(project, region string, fr *compute.BackendService) (*compute.Operation, error) {
+	return c.srv.Insert(project, region, fr).Do()
+}
+
+func (c *regionBackendServiceClientImpl) Delete(project, region, name string) (*compute.Operation, error) {
+	return c.srv.Delete(project, region, name).Do()
+}
+
+func (c *regionBackendServiceClientImpl) Get(project, region, name string) (*compute.BackendService, error) {
+	return c.srv.Get(project, region, name).Do()
+}
+
+func (c *regionBackendServiceClientImpl) List(ctx context.Context, project, region string) ([]*compute.BackendService, error) {
+	var hcs []*compute.BackendService
+	if err := c.srv.List(project, region).Pages(ctx, func(p *compute.BackendServiceList) error {
+		hcs = append(hcs, p.Items...)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return hcs, nil
+}
+
+// ===
+
 type RouteClient interface {
 	Delete(project, name string) (*compute.Operation, error)
 	List(ctx context.Context, project string) ([]*compute.Route, error)
@@ -277,7 +345,7 @@ type routeClientImpl struct {
 	srv *compute.RoutesService
 }
 
-var _ RouteClient = &routeClientImpl{}
+var _ RouteClient = (*routeClientImpl)(nil)
 
 func (c *routeClientImpl) Delete(project, name string) (*compute.Operation, error) {
 	return c.srv.Delete(project, name).Do()
@@ -295,28 +363,33 @@ func (c *routeClientImpl) List(ctx context.Context, project string) ([]*compute.
 }
 
 type ForwardingRuleClient interface {
-	Insert(project, region string, fr *compute.ForwardingRule) (*compute.Operation, error)
-	Delete(project, region, name string) (*compute.Operation, error)
-	Get(project, region, name string) (*compute.ForwardingRule, error)
+	Insert(ctx context.Context, project, region string, fr *compute.ForwardingRule) (*compute.Operation, error)
+	Delete(ctx context.Context, project, region, name string) (*compute.Operation, error)
+	Get(ctx context.Context, project, region, name string) (*compute.ForwardingRule, error)
 	List(ctx context.Context, project, region string) ([]*compute.ForwardingRule, error)
+	SetLabels(ctx context.Context, project, region, resource string, request *compute.RegionSetLabelsRequest) (*compute.Operation, error)
 }
 
 type forwardingRuleClientImpl struct {
 	srv *compute.ForwardingRulesService
 }
 
-var _ ForwardingRuleClient = &forwardingRuleClientImpl{}
+var _ ForwardingRuleClient = (*forwardingRuleClientImpl)(nil)
 
-func (c *forwardingRuleClientImpl) Insert(project, region string, fr *compute.ForwardingRule) (*compute.Operation, error) {
-	return c.srv.Insert(project, region, fr).Do()
+func (c *forwardingRuleClientImpl) Insert(ctx context.Context, project, region string, fr *compute.ForwardingRule) (*compute.Operation, error) {
+	return c.srv.Insert(project, region, fr).Context(ctx).Do()
 }
 
-func (c *forwardingRuleClientImpl) Delete(project, region, name string) (*compute.Operation, error) {
-	return c.srv.Delete(project, region, name).Do()
+func (c *forwardingRuleClientImpl) Delete(ctx context.Context, project, region, name string) (*compute.Operation, error) {
+	return c.srv.Delete(project, region, name).Context(ctx).Do()
 }
 
-func (c *forwardingRuleClientImpl) Get(project, region, name string) (*compute.ForwardingRule, error) {
-	return c.srv.Get(project, region, name).Do()
+func (c *forwardingRuleClientImpl) Get(ctx context.Context, project, region, name string) (*compute.ForwardingRule, error) {
+	return c.srv.Get(project, region, name).Context(ctx).Do()
+}
+
+func (c *forwardingRuleClientImpl) SetLabels(ctx context.Context, project string, region string, resource string, request *compute.RegionSetLabelsRequest) (*compute.Operation, error) {
+	return c.srv.SetLabels(project, region, resource, request).Context(ctx).Do()
 }
 
 func (c *forwardingRuleClientImpl) List(ctx context.Context, project, region string) ([]*compute.ForwardingRule, error) {
@@ -328,6 +401,83 @@ func (c *forwardingRuleClientImpl) List(ctx context.Context, project, region str
 		return nil, err
 	}
 	return frs, nil
+}
+
+type RegionHealthChecksClient interface {
+	Insert(project, region string, fr *compute.HealthCheck) (*compute.Operation, error)
+	Delete(project, region, name string) (*compute.Operation, error)
+	Get(project, region, name string) (*compute.HealthCheck, error)
+	List(ctx context.Context, project, region string) ([]*compute.HealthCheck, error)
+}
+
+type healthCheckClientImpl struct {
+	srv *compute.RegionHealthChecksService
+}
+
+var _ RegionHealthChecksClient = (*healthCheckClientImpl)(nil)
+
+func (c *healthCheckClientImpl) Insert(project, region string, fr *compute.HealthCheck) (*compute.Operation, error) {
+	return c.srv.Insert(project, region, fr).Do()
+}
+
+func (c *healthCheckClientImpl) Delete(project, region, name string) (*compute.Operation, error) {
+	return c.srv.Delete(project, region, name).Do()
+}
+
+func (c *healthCheckClientImpl) Get(project, region, name string) (*compute.HealthCheck, error) {
+	return c.srv.Get(project, region, name).Do()
+}
+
+func (c *healthCheckClientImpl) List(ctx context.Context, project, region string) ([]*compute.HealthCheck, error) {
+	var hcs []*compute.HealthCheck
+	if err := c.srv.List(project, region).Pages(ctx, func(p *compute.HealthCheckList) error {
+		hcs = append(hcs, p.Items...)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return hcs, nil
+}
+
+type HttpHealthChecksClient interface {
+	Insert(project string, fr *compute.HttpHealthCheck) (*compute.Operation, error)
+	Delete(project, name string) (*compute.Operation, error)
+	Update(project, name string, fr *compute.HttpHealthCheck) (*compute.Operation, error)
+	Get(project, name string) (*compute.HttpHealthCheck, error)
+	List(ctx context.Context, project string) ([]*compute.HttpHealthCheck, error)
+}
+
+type httpHealthCheckClientImpl struct {
+	srv *compute.HttpHealthChecksService
+}
+
+var _ HttpHealthChecksClient = (*httpHealthCheckClientImpl)(nil)
+
+func (c *httpHealthCheckClientImpl) Insert(project string, fr *compute.HttpHealthCheck) (*compute.Operation, error) {
+	return c.srv.Insert(project, fr).Do()
+}
+
+func (c *httpHealthCheckClientImpl) Delete(project, name string) (*compute.Operation, error) {
+	return c.srv.Delete(project, name).Do()
+}
+
+func (c *httpHealthCheckClientImpl) Update(project, name string, fr *compute.HttpHealthCheck) (*compute.Operation, error) {
+	return c.srv.Update(project, name, fr).Do()
+}
+
+func (c *httpHealthCheckClientImpl) Get(project, name string) (*compute.HttpHealthCheck, error) {
+	return c.srv.Get(project, name).Do()
+}
+
+func (c *httpHealthCheckClientImpl) List(ctx context.Context, project string) ([]*compute.HttpHealthCheck, error) {
+	var hcs []*compute.HttpHealthCheck
+	if err := c.srv.List(project).Pages(ctx, func(p *compute.HttpHealthCheckList) error {
+		hcs = append(hcs, p.Items...)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return hcs, nil
 }
 
 type AddressClient interface {
@@ -342,7 +492,7 @@ type addressClientImpl struct {
 	srv *compute.AddressesService
 }
 
-var _ AddressClient = &addressClientImpl{}
+var _ AddressClient = (*addressClientImpl)(nil)
 
 func (c *addressClientImpl) Insert(project, region string, addr *compute.Address) (*compute.Operation, error) {
 	return c.srv.Insert(project, region, addr).Do()
@@ -387,7 +537,7 @@ type firewallClientImpl struct {
 	srv *compute.FirewallsService
 }
 
-var _ FirewallClient = &firewallClientImpl{}
+var _ FirewallClient = (*firewallClientImpl)(nil)
 
 func (c *firewallClientImpl) Insert(project string, fw *compute.Firewall) (*compute.Operation, error) {
 	return c.srv.Insert(project, fw).Do()
@@ -396,6 +546,7 @@ func (c *firewallClientImpl) Insert(project string, fw *compute.Firewall) (*comp
 func (c *firewallClientImpl) Delete(project, name string) (*compute.Operation, error) {
 	return c.srv.Delete(project, name).Do()
 }
+
 func (c *firewallClientImpl) Update(project, name string, fw *compute.Firewall) (*compute.Operation, error) {
 	return c.srv.Update(project, name, fw).Do()
 }
@@ -426,7 +577,7 @@ type routerClientImpl struct {
 	srv *compute.RoutersService
 }
 
-var _ RouterClient = &routerClientImpl{}
+var _ RouterClient = (*routerClientImpl)(nil)
 
 func (c *routerClientImpl) Insert(project, region string, r *compute.Router) (*compute.Operation, error) {
 	return c.srv.Insert(project, region, r).Do()
@@ -454,9 +605,9 @@ func (c *routerClientImpl) List(ctx context.Context, project, region string) ([]
 type InstanceClient interface {
 	Insert(project, zone string, i *compute.Instance) (*compute.Operation, error)
 	Get(project, zone, name string) (*compute.Instance, error)
-	List(ctx context.Context, project, zone string) ([]*compute.Instance, error)
+	// List returns the instances in the zone that carry every given label.
+	List(ctx context.Context, project, zone string, labels ...Label) ([]*compute.Instance, error)
 	Delete(project, zone, name string) (*compute.Operation, error)
-
 	SetMetadata(project, zone, name string, metadata *compute.Metadata) (*compute.Operation, error)
 }
 
@@ -464,7 +615,7 @@ type instanceClientImpl struct {
 	srv *compute.InstancesService
 }
 
-var _ InstanceClient = &instanceClientImpl{}
+var _ InstanceClient = (*instanceClientImpl)(nil)
 
 func (c *instanceClientImpl) Insert(project, zone string, i *compute.Instance) (*compute.Operation, error) {
 	return c.srv.Insert(project, zone, i).Do()
@@ -474,9 +625,18 @@ func (c *instanceClientImpl) Get(project, zone, name string) (*compute.Instance,
 	return c.srv.Get(project, zone, name).Do()
 }
 
-func (c *instanceClientImpl) List(ctx context.Context, project, zone string) ([]*compute.Instance, error) {
+func (c *instanceClientImpl) List(ctx context.Context, project, zone string, labels ...Label) ([]*compute.Instance, error) {
+	call := c.srv.List(project, zone)
+	if len(labels) > 0 {
+		// Each label is its own parenthesised expression; the API ANDs them.
+		terms := make([]string, 0, len(labels))
+		for _, l := range labels {
+			terms = append(terms, fmt.Sprintf("(labels.%s = %q)", l.Key, l.Value))
+		}
+		call = call.Filter(strings.Join(terms, " "))
+	}
 	var insts []*compute.Instance
-	if err := c.srv.List(project, zone).Pages(ctx, func(p *compute.InstanceList) error {
+	if err := call.Pages(ctx, func(p *compute.InstanceList) error {
 		insts = append(insts, p.Items...)
 		return nil
 	}); err != nil {
@@ -503,7 +663,7 @@ type instanceTemplateClientImpl struct {
 	srv *compute.InstanceTemplatesService
 }
 
-var _ InstanceTemplateClient = &instanceTemplateClientImpl{}
+var _ InstanceTemplateClient = (*instanceTemplateClientImpl)(nil)
 
 func (c *instanceTemplateClientImpl) Insert(project string, template *compute.InstanceTemplate) (*compute.Operation, error) {
 	return c.srv.Insert(project, template).Do()
@@ -530,7 +690,7 @@ type InstanceGroupManagerClient interface {
 	Get(project, zone, name string) (*compute.InstanceGroupManager, error)
 	List(ctx context.Context, project, zone string) ([]*compute.InstanceGroupManager, error)
 	ListManagedInstances(ctx context.Context, project, zone, name string) ([]*compute.ManagedInstance, error)
-
+	ListErrors(ctx context.Context, project, zone, name string) ([]*compute.InstanceManagedByIgmError, error)
 	RecreateInstances(project, zone, name, id string) (*compute.Operation, error)
 	SetTargetPools(project, zone, name string, targetPools []string) (*compute.Operation, error)
 	SetInstanceTemplate(project, zone, name, instanceTemplateURL string) (*compute.Operation, error)
@@ -541,7 +701,7 @@ type instanceGroupManagerClientImpl struct {
 	srv *compute.InstanceGroupManagersService
 }
 
-var _ InstanceGroupManagerClient = &instanceGroupManagerClientImpl{}
+var _ InstanceGroupManagerClient = (*instanceGroupManagerClientImpl)(nil)
 
 func (c *instanceGroupManagerClientImpl) Insert(project, zone string, i *compute.InstanceGroupManager) (*compute.Operation, error) {
 	return c.srv.Insert(project, zone, i).Do()
@@ -577,6 +737,17 @@ func (c *instanceGroupManagerClientImpl) ListManagedInstances(ctx context.Contex
 	return instances, nil
 }
 
+func (c *instanceGroupManagerClientImpl) ListErrors(ctx context.Context, project, zone, name string) ([]*compute.InstanceManagedByIgmError, error) {
+	var items []*compute.InstanceManagedByIgmError
+	if err := c.srv.ListErrors(project, zone, name).Pages(ctx, func(page *compute.InstanceGroupManagersListErrorsResponse) error {
+		items = append(items, page.Items...)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 func (c *instanceGroupManagerClientImpl) RecreateInstances(project, zone, name, id string) (*compute.Operation, error) {
 	req := &compute.InstanceGroupManagersRecreateInstancesRequest{
 		Instances: []string{
@@ -609,13 +780,14 @@ type TargetPoolClient interface {
 	Delete(project, region, name string) (*compute.Operation, error)
 	Get(project, region, name string) (*compute.TargetPool, error)
 	List(ctx context.Context, project, region string) ([]*compute.TargetPool, error)
+	AddHealthCheck(project, region, name string, req *compute.TargetPoolsAddHealthCheckRequest) (*compute.Operation, error)
 }
 
 type targetPoolClientImpl struct {
 	srv *compute.TargetPoolsService
 }
 
-var _ TargetPoolClient = &targetPoolClientImpl{}
+var _ TargetPoolClient = (*targetPoolClientImpl)(nil)
 
 func (c *targetPoolClientImpl) Insert(project, region string, tp *compute.TargetPool) (*compute.Operation, error) {
 	return c.srv.Insert(project, region, tp).Do()
@@ -627,6 +799,10 @@ func (c *targetPoolClientImpl) Delete(project, region, name string) (*compute.Op
 
 func (c *targetPoolClientImpl) Get(project, region, name string) (*compute.TargetPool, error) {
 	return c.srv.Get(project, region, name).Do()
+}
+
+func (c *targetPoolClientImpl) AddHealthCheck(project, region, name string, req *compute.TargetPoolsAddHealthCheckRequest) (*compute.Operation, error) {
+	return c.srv.AddHealthCheck(project, region, name, req).Do()
 }
 
 func (c *targetPoolClientImpl) List(ctx context.Context, project, region string) ([]*compute.TargetPool, error) {
@@ -646,7 +822,6 @@ type DiskClient interface {
 	Get(project, zone, name string) (*compute.Disk, error)
 	List(ctx context.Context, project, zone string) ([]*compute.Disk, error)
 	AggregatedList(ctx context.Context, project string) ([]compute.DisksScopedList, error)
-
 	SetLabels(project, zone, name string, req *compute.ZoneSetLabelsRequest) error
 }
 
@@ -654,7 +829,7 @@ type diskClientImpl struct {
 	srv *compute.DisksService
 }
 
-var _ DiskClient = &diskClientImpl{}
+var _ DiskClient = (*diskClientImpl)(nil)
 
 func (c *diskClientImpl) Insert(project, zone string, disk *compute.Disk) (*compute.Operation, error) {
 	return c.srv.Insert(project, zone, disk).Do()

@@ -34,7 +34,6 @@ import (
 	"k8s.io/kops/cmd/kops/util"
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/commands"
-	"k8s.io/kops/pkg/featureflag"
 	"k8s.io/kops/pkg/testutils"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup"
@@ -57,7 +56,7 @@ func (o *LifecycleTestOptions) AddDefaults() {
 		o.Version = "v1alpha2"
 	}
 	if o.ClusterName == "" {
-		o.ClusterName = strings.Replace(o.SrcDir, "_", "", -1) + ".example.com"
+		o.ClusterName = strings.ReplaceAll(o.SrcDir, "_", "") + ".example.com"
 	}
 
 	o.SrcDir = "../../tests/integration/update_cluster/" + o.SrcDir
@@ -67,7 +66,7 @@ func (o *LifecycleTestOptions) AddDefaults() {
 func TestLifecycleMinimalAWS(t *testing.T) {
 	runLifecycleTestAWS(&LifecycleTestOptions{
 		t:      t,
-		SrcDir: "minimal",
+		SrcDir: "minimal-aws",
 	})
 }
 
@@ -103,11 +102,11 @@ func TestLifecyclePrivateCalico(t *testing.T) {
 	})
 }
 
-// TestLifecyclePrivateKopeio runs the test on a private topology, with kopeio networking
-func TestLifecyclePrivateKopeio(t *testing.T) {
+// TestLifecyclePrivateSharedNAT runs the test on a private topology, with shared NAT gateways
+func TestLifecyclePrivateSharedNAT(t *testing.T) {
 	runLifecycleTestAWS(&LifecycleTestOptions{
 		t:      t,
-		SrcDir: "privatekopeio",
+		SrcDir: "private-shared-nat",
 		Shared: []string{"nat-a2345678", "nat-b2345678"},
 	})
 }
@@ -136,7 +135,7 @@ func TestLifecycleComplex(t *testing.T) {
 	})
 }
 
-// TestLifecycleExternlLB runs the test on a cluster with external load balancers and target groups attached
+// TestLifecycleExternalLB runs the test on a cluster with external load balancers and target groups attached
 func TestLifecycleExternalLB(t *testing.T) {
 	runLifecycleTestAWS(&LifecycleTestOptions{
 		t:      t,
@@ -171,23 +170,16 @@ func TestLifecyclePrivateSharedIP(t *testing.T) {
 	})
 }
 
-// TestLifecycleNodeTerminationHandlerQueueProcessor runs the test on a cluster with requisite resources for NTH Queue Processor
-func TestLifecycleNodeTerminationHandlerQueueProcessor(t *testing.T) {
+// TestLifecycleManyAddons runs the test on a cluster with requisite resources for NTH Queue Processor and other addons.
+func TestLifecycleManyAddons(t *testing.T) {
 	runLifecycleTestAWS(&LifecycleTestOptions{
-		t:           t,
-		SrcDir:      "nth_sqs_resources",
-		ClusterName: "nthsqsresources.longclustername.example.com",
+		t:      t,
+		SrcDir: "many-addons",
 	})
 }
 
 func runLifecycleTest(h *testutils.IntegrationTestHarness, o *LifecycleTestOptions, cloud *awsup.MockAWSCloud) {
 	ctx := context.Background()
-
-	featureflag.ParseFlags("+SpecOverrideFlag")
-	unsetFeatureFlags := func() {
-		featureflag.ParseFlags("-SpecOverrideFlag")
-	}
-	defer unsetFeatureFlags()
 
 	t := o.t
 
@@ -200,7 +192,7 @@ func runLifecycleTest(h *testutils.IntegrationTestHarness, o *LifecycleTestOptio
 	beforeResources := AllAWSResources(cloud)
 
 	factory := newIntegrationTest(o.ClusterName, o.SrcDir).
-		setupCluster(t, inputYAML, ctx, stdout)
+		setupCluster(t, ctx, inputYAML, stdout)
 
 	updateEnsureNoChanges(ctx, t, factory, o.ClusterName, stdout)
 
@@ -210,7 +202,7 @@ func runLifecycleTest(h *testutils.IntegrationTestHarness, o *LifecycleTestOptio
 		if err != nil {
 			t.Fatalf("error getting cluster: %v", err)
 		}
-		clientset, err := factory.Clientset()
+		clientset, err := factory.KopsClient()
 		if err != nil {
 			t.Fatalf("error getting clientset: %v", err)
 		}
@@ -379,11 +371,12 @@ func runLifecycleTestAWS(o *LifecycleTestOptions) {
 	o.AddDefaults()
 
 	t := o.t
+	t.Setenv("KOPS_RUN_TOO_NEW_VERSION", "1")
 
 	h := testutils.NewIntegrationTestHarness(o.t)
 	defer h.Close()
 
-	h.MockKopsVersion("1.21.0-alpha.1")
+	h.MockKopsVersion(integrationTestKopsVersion)
 	cloud := h.SetupMockAWS()
 
 	var beforeIds []string
@@ -409,17 +402,13 @@ func runLifecycleTestOpenstack(o *LifecycleTestOptions) {
 	o.AddDefaults()
 
 	t := o.t
+	t.Setenv("KOPS_RUN_TOO_NEW_VERSION", "1")
+	t.Setenv("OS_REGION_NAME", "us-test1")
 
 	h := testutils.NewIntegrationTestHarness(o.t)
 	defer h.Close()
 
-	origRegion := os.Getenv("OS_REGION_NAME")
-	os.Setenv("OS_REGION_NAME", "us-test1")
-	defer func() {
-		os.Setenv("OS_REGION_NAME", origRegion)
-	}()
-
-	h.MockKopsVersion("1.21.0-alpha.1")
+	h.MockKopsVersion(integrationTestKopsVersion)
 	cloud := testutils.SetupMockOpenstack()
 
 	var beforeIds []string
@@ -437,7 +426,7 @@ func runLifecycleTestOpenstack(o *LifecycleTestOptions) {
 	inputYAML := "in-" + o.Version + ".yaml"
 
 	factory := newIntegrationTest(o.ClusterName, o.SrcDir).
-		setupCluster(t, inputYAML, ctx, stdout)
+		setupCluster(t, ctx, inputYAML, stdout)
 
 	updateEnsureNoChanges(ctx, t, factory, o.ClusterName, stdout)
 
@@ -467,13 +456,12 @@ func runLifecycleTestGCE(o *LifecycleTestOptions) {
 	o.AddDefaults()
 
 	t := o.t
+	t.Setenv("KOPS_RUN_TOO_NEW_VERSION", "1")
 
 	h := testutils.NewIntegrationTestHarness(o.t)
 	defer h.Close()
 
-	h.MockKopsVersion("1.21.0-alpha.1")
-
-	featureflag.ParseFlags("AlphaAllowGCE")
+	h.MockKopsVersion(integrationTestKopsVersion)
 
 	cloud := h.SetupMockGCE()
 
@@ -491,7 +479,7 @@ func runLifecycleTestGCE(o *LifecycleTestOptions) {
 	inputYAML := "in-" + o.Version + ".yaml"
 
 	factory := newIntegrationTest(o.ClusterName, o.SrcDir).
-		setupCluster(t, inputYAML, ctx, stdout)
+		setupCluster(t, ctx, inputYAML, stdout)
 
 	updateEnsureNoChanges(ctx, t, factory, o.ClusterName, stdout)
 
@@ -547,7 +535,7 @@ func updateEnsureNoChanges(ctx context.Context, t *testing.T, factory *util.Fact
 		t.Fatalf("error running update cluster %q: %v", clusterName, err)
 	}
 
-	target := results.Target.(*fi.DryRunTarget)
+	target := results.Target.(*fi.CloudupDryRunTarget)
 	if target.HasChanges() {
 		var b bytes.Buffer
 		if err := target.PrintReport(results.TaskMap, &b); err != nil {

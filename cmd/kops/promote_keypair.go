@@ -44,8 +44,8 @@ var (
     `))
 
 	promoteKeypairExample = templates.Examples(i18n.T(`
-	# Promote the newest ca keypair to be the primary.
-	kops promote keypair ca \
+	# Promote the newest kubernetes-ca keypair to be the primary.
+	kops promote keypair kubernetes-ca \
 		--name k8s-cluster.example.com --state s3://my-state-store
 
     # Promote a specific service-account keypair to be the primary.
@@ -102,10 +102,10 @@ func NewCmdPromoteKeypair(f *util.Factory, out io.Writer) *cobra.Command {
 			return nil
 		},
 		ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-			return completePromoteKeyset(f, options, args, toComplete)
+			return completePromoteKeyset(cmd.Context(), f, options, args, toComplete)
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return RunPromoteKeypair(context.TODO(), f, out, options)
+			return RunPromoteKeypair(cmd.Context(), f, out, options)
 		},
 	}
 
@@ -123,7 +123,7 @@ func RunPromoteKeypair(ctx context.Context, f *util.Factory, out io.Writer, opti
 		return fmt.Errorf("getting cluster: %q: %v", options.ClusterName, err)
 	}
 
-	clientSet, err := f.Clientset()
+	clientSet, err := f.KopsClient()
 	if err != nil {
 		return fmt.Errorf("getting clientset: %v", err)
 	}
@@ -134,7 +134,7 @@ func RunPromoteKeypair(ctx context.Context, f *util.Factory, out io.Writer, opti
 	}
 
 	if options.Keyset != "all" {
-		return promoteKeypair(out, options.Keyset, options.KeypairID, keyStore)
+		return promoteKeypair(ctx, out, options.Keyset, options.KeypairID, keyStore)
 	}
 
 	keysets, err := keyStore.ListKeysets()
@@ -144,7 +144,7 @@ func RunPromoteKeypair(ctx context.Context, f *util.Factory, out io.Writer, opti
 
 	for name := range keysets {
 		if rotatableKeysetFilter(name, nil) {
-			if err := promoteKeypair(out, name, "", keyStore); err != nil {
+			if err := promoteKeypair(ctx, out, name, "", keyStore); err != nil {
 				return fmt.Errorf("promoting keypair for %s: %v", name, err)
 			}
 		}
@@ -153,8 +153,8 @@ func RunPromoteKeypair(ctx context.Context, f *util.Factory, out io.Writer, opti
 	return nil
 }
 
-func promoteKeypair(out io.Writer, name string, keypairID string, keyStore fi.CAStore) error {
-	keyset, err := keyStore.FindKeyset(name)
+func promoteKeypair(ctx context.Context, out io.Writer, name string, keypairID string, keyStore fi.CAStore) error {
+	keyset, err := keyStore.FindKeyset(ctx, name)
 	if err != nil {
 		return fmt.Errorf("reading keyset: %v", err)
 	} else if keyset == nil {
@@ -162,17 +162,17 @@ func promoteKeypair(out io.Writer, name string, keypairID string, keyStore fi.CA
 	}
 
 	if keypairID == "" {
-		highestTrustedId := big.NewInt(0)
+		highestCandidateId := big.NewInt(0)
 		for id, item := range keyset.Items {
-			if item.PrivateKey != nil && item.DistrustTimestamp == nil {
+			if item.PrivateKey != nil && item.DistrustTimestamp == nil && item.Certificate != nil {
 				itemId, ok := big.NewInt(0).SetString(id, 10)
-				if ok && highestTrustedId.Cmp(itemId) < 0 {
-					highestTrustedId = itemId
+				if ok && highestCandidateId.Cmp(itemId) < 0 {
+					highestCandidateId = itemId
 				}
 			}
 		}
 
-		keypairID = highestTrustedId.String()
+		keypairID = highestCandidateId.String()
 		if keypairID == keyset.Primary.Id {
 			fmt.Fprintf(out, "No %s keypair newer than current primary %s\n", name, keypairID)
 			return nil
@@ -184,12 +184,15 @@ func promoteKeypair(out io.Writer, name string, keypairID string, keyStore fi.CA
 		if item.PrivateKey == nil {
 			return fmt.Errorf("keypair has no private key")
 		}
+		if item.Certificate == nil {
+			return fmt.Errorf("keypair has no certificate")
+		}
 	} else {
 		return fmt.Errorf("keypair not found")
 	}
 
 	keyset.Primary = keyset.Items[keypairID]
-	err = keyStore.StoreKeyset(name, keyset)
+	err = keyStore.StoreKeyset(ctx, name, keyset)
 	if err != nil {
 		return fmt.Errorf("writing keyset: %v", err)
 	}
@@ -198,16 +201,15 @@ func promoteKeypair(out io.Writer, name string, keypairID string, keyStore fi.CA
 	return nil
 }
 
-func completePromoteKeyset(f commandutils.Factory, options *PromoteKeypairOptions, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+func completePromoteKeyset(ctx context.Context, f commandutils.Factory, options *PromoteKeypairOptions, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 	commandutils.ConfigureKlogForCompletion()
-	ctx := context.TODO()
 
 	cluster, clientSet, completions, directive := GetClusterForCompletion(ctx, f, nil)
 	if cluster == nil {
 		return completions, directive
 	}
 
-	keyset, _, completions, directive := completeKeyset(cluster, clientSet, args, rotatableKeysetFilter)
+	keyset, _, completions, directive := completeKeyset(ctx, cluster, clientSet, args, rotatableKeysetFilter)
 	if keyset == nil {
 		return completions, directive
 	}

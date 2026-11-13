@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/spf13/cobra"
 	"k8s.io/client-go/tools/clientcmd"
@@ -44,6 +45,15 @@ type DeleteClusterOptions struct {
 	External    bool
 	Unregister  bool
 	ClusterName string
+	wait        time.Duration
+	count       int
+	interval    time.Duration
+}
+
+func (o *DeleteClusterOptions) InitDefaults() {
+	o.count = 0
+	o.interval = 10 * time.Second
+	o.wait = 10 * time.Minute
 }
 
 var (
@@ -64,6 +74,7 @@ var (
 
 func NewCmdDeleteCluster(f *util.Factory, out io.Writer) *cobra.Command {
 	options := &DeleteClusterOptions{}
+	options.InitDefaults()
 
 	cmd := &cobra.Command{
 		Use:               "cluster [CLUSTER]",
@@ -73,7 +84,7 @@ func NewCmdDeleteCluster(f *util.Factory, out io.Writer) *cobra.Command {
 		Args:              rootCommand.clusterNameArgsNoKubeconfig(&options.ClusterName),
 		ValidArgsFunction: commandutils.CompleteClusterName(f, true, false),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return RunDeleteCluster(context.TODO(), f, out, options)
+			return RunDeleteCluster(cmd.Context(), f, out, options)
 		},
 	}
 
@@ -83,6 +94,10 @@ func NewCmdDeleteCluster(f *util.Factory, out io.Writer) *cobra.Command {
 
 	cmd.Flags().StringVar(&options.Region, "region", options.Region, "External cluster's cloud region")
 	cmd.RegisterFlagCompletionFunc("region", completeRegion)
+
+	cmd.Flags().DurationVar(&options.wait, "wait", options.wait, "Amount of time to wait for the cluster resources to de deleted")
+	cmd.Flags().IntVar(&options.count, "count", options.count, "Number of consecutive failures to make progress deleting the cluster resources")
+	cmd.Flags().DurationVar(&options.interval, "interval", options.interval, "Time in duration to wait between deletion attempts")
 
 	return cmd
 }
@@ -125,9 +140,21 @@ func RunDeleteCluster(ctx context.Context, f *util.Factory, out io.Writer, optio
 			}
 		}
 
-		allResources, err := resourceops.ListResources(cloud, cluster, options.Region)
-		if err != nil {
-			return err
+		klog.Info("Looking for cloud resources to delete")
+		// Listing resources involves many cloud API calls; not all cloud SDKs retry transient errors
+		// (e.g. GCE 5xx), and a single failed call would otherwise abort the deletion. Retry a few
+		// times before giving up.
+		var allResources map[string]*resources.Resource
+		for attempt := 1; ; attempt++ {
+			allResources, err = resourceops.ListResources(cloud, cluster)
+			if err == nil {
+				break
+			}
+			if attempt >= 4 {
+				return err
+			}
+			klog.Warningf("error listing cloud resources, will retry: %v", err)
+			time.Sleep(options.interval)
 		}
 
 		clusterResources := make(map[string]*resources.Resource)
@@ -170,7 +197,7 @@ func RunDeleteCluster(ctx context.Context, f *util.Factory, out io.Writer, optio
 
 			fmt.Fprintf(out, "\n")
 
-			err = resourceops.DeleteResources(cloud, clusterResources)
+			err = resourceops.DeleteResources(cloud, clusterResources, options.count, options.interval, options.wait)
 			if err != nil {
 				return err
 			}
@@ -186,7 +213,7 @@ func RunDeleteCluster(ctx context.Context, f *util.Factory, out io.Writer, optio
 			}
 			return nil
 		}
-		clientset, err := f.Clientset()
+		clientset, err := f.KopsClient()
 		if err != nil {
 			return err
 		}

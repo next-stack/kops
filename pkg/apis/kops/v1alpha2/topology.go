@@ -22,10 +22,12 @@ const (
 )
 
 type TopologySpec struct {
-	// The environment to launch the Kubernetes masters in public|private
+	// Masters is not used.
+	// +k8s:conversion-gen=false
 	Masters string `json:"masters,omitempty"`
 
-	// The environment to launch the Kubernetes nodes in public|private
+	// Nodes is not used.
+	// +k8s:conversion-gen=false
 	Nodes string `json:"nodes,omitempty"`
 
 	// Bastion provide an external facing point of entry into a network
@@ -35,8 +37,11 @@ type TopologySpec struct {
 	// as the "jump server".
 	Bastion *BastionSpec `json:"bastion,omitempty"`
 
+	DNS DNSType `json:"-"`
+
 	// DNS configures options relating to DNS, in particular whether we use a public or a private hosted zone
-	DNS *DNSSpec `json:"dns,omitempty"`
+	// +k8s:conversion-gen=false
+	LegacyDNS *DNSSpec `json:"dns,omitempty"`
 }
 
 type DNSSpec struct {

@@ -20,18 +20,18 @@ import (
 	"fmt"
 	"path/filepath"
 	"strconv"
-	"strings"
 
+	"k8s.io/klog/v2"
 	"k8s.io/kops/pkg/apis/kops"
 	"k8s.io/kops/pkg/configbuilder"
 	"k8s.io/kops/pkg/flagbuilder"
 	"k8s.io/kops/pkg/k8scodecs"
 	"k8s.io/kops/pkg/kubemanifest"
 	"k8s.io/kops/pkg/rbac"
+	"k8s.io/kops/pkg/wellknownpaths"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/nodeup/nodetasks"
-	"k8s.io/kops/util/pkg/architectures"
-	"k8s.io/kops/util/pkg/proxy"
+	"k8s.io/kops/util/pkg/env"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -58,17 +58,22 @@ type KubeSchedulerBuilder struct {
 	*NodeupModelContext
 }
 
-var _ fi.ModelBuilder = &KubeSchedulerBuilder{}
+var _ fi.NodeupModelBuilder = &KubeSchedulerBuilder{}
 
-const defaultKubeConfig = "/var/lib/kube-scheduler/kubeconfig"
+func (b *KubeSchedulerBuilder) runsScheduler() bool {
+	if b.IsMaster || b.BootConfig.InstanceGroupRole.HasScheduler() {
+		return true
+	}
+	return false
+}
 
 // Build is responsible for building the manifest for the kube-scheduler
-func (b *KubeSchedulerBuilder) Build(c *fi.ModelBuilderContext) error {
-	if !b.IsMaster {
+func (b *KubeSchedulerBuilder) Build(c *fi.NodeupModelBuilderContext) error {
+	if !b.runsScheduler() {
 		return nil
 	}
 
-	kubeScheduler := *b.Cluster.Spec.KubeScheduler
+	kubeScheduler := b.NodeupConfig.ControlPlaneConfig.KubeScheduler
 
 	if err := b.writeServerCertificate(c, &kubeScheduler); err != nil {
 		return err
@@ -96,30 +101,31 @@ func (b *KubeSchedulerBuilder) Build(c *fi.ModelBuilderContext) error {
 		kubeconfig := b.BuildIssuedKubeconfig("kube-scheduler", nodetasks.PKIXName{CommonName: rbac.KubeScheduler}, c)
 
 		c.AddTask(&nodetasks.File{
-			Path:     "/var/lib/kube-scheduler/kubeconfig",
+			Path:     wellknownpaths.KubeSchedulerKubeConfig,
 			Contents: kubeconfig,
 			Type:     nodetasks.FileType_File,
 			Mode:     s("0400"),
 		})
 	}
-	{
-		var config *SchedulerConfig
-		if b.IsKubernetesGTE("1.22") {
-			config = NewSchedulerConfig("kubescheduler.config.k8s.io/v1beta2")
-		} else if b.IsKubernetesGTE("1.19") {
-			config = NewSchedulerConfig("kubescheduler.config.k8s.io/v1beta1")
-		} else {
-			config = NewSchedulerConfig("kubescheduler.config.k8s.io/v1alpha2")
-		}
 
-		manifest, err := configbuilder.BuildConfigYaml(&kubeScheduler, config)
+	// Load the kube-scheduler config object if one has been provided.
+	kubeSchedulerConfigAsset := b.findFileAsset(wellknownpaths.KubeSchedulerConfig)
+
+	if kubeSchedulerConfigAsset != nil {
+		klog.Infof("using kubescheduler configuration from file assets")
+		// FileAssets are written automatically, we don't need to write it.
+	} else {
+		// We didn't get a kubescheduler configuration; warn as we're aiming to move this to generation in the kops CLI
+		klog.Warningf("using embedded kubescheduler configuration")
+		config := NewSchedulerConfig("kubescheduler.config.k8s.io/v1")
+
+		kubeSchedulerConfig, err := configbuilder.BuildConfigYaml(&kubeScheduler, config)
 		if err != nil {
 			return err
 		}
-
 		c.AddTask(&nodetasks.File{
-			Path:     "/var/lib/kube-scheduler/config.yaml",
-			Contents: fi.NewBytesResource(manifest),
+			Path:     wellknownpaths.KubeSchedulerConfig,
+			Contents: fi.NewBytesResource(kubeSchedulerConfig),
 			Type:     nodetasks.FileType_File,
 			Mode:     s("0400"),
 		})
@@ -144,16 +150,16 @@ func NewSchedulerConfig(apiVersion string) *SchedulerConfig {
 	schedConfig.APIVersion = apiVersion
 	schedConfig.Kind = "KubeSchedulerConfiguration"
 	schedConfig.ClientConnection = ClientConnectionConfig{}
-	schedConfig.ClientConnection.Kubeconfig = defaultKubeConfig
+	schedConfig.ClientConnection.Kubeconfig = wellknownpaths.KubeSchedulerKubeConfig
 	return schedConfig
 }
 
-func (b *KubeSchedulerBuilder) writeServerCertificate(c *fi.ModelBuilderContext, kubeScheduler *kops.KubeSchedulerConfig) error {
+func (b *KubeSchedulerBuilder) writeServerCertificate(c *fi.NodeupModelBuilderContext, kubeScheduler *kops.KubeSchedulerConfig) error {
 	pathSrvScheduler := filepath.Join(b.PathSrvKubernetes(), "kube-scheduler")
 
 	if kubeScheduler.TLSCertFile == nil {
 		alternateNames := []string{
-			"kube-scheduler.kube-system.svc." + b.Cluster.Spec.ClusterDNSDomain,
+			"kube-scheduler.kube-system.svc." + b.NodeupConfig.APIServerConfig.ClusterDNSDomain,
 		}
 
 		issueCert := &nodetasks.IssueCert{
@@ -171,7 +177,7 @@ func (b *KubeSchedulerBuilder) writeServerCertificate(c *fi.ModelBuilderContext,
 			return err
 		}
 
-		kubeScheduler.TLSCertFile = fi.String(filepath.Join(pathSrvScheduler, "server.crt"))
+		kubeScheduler.TLSCertFile = new(filepath.Join(pathSrvScheduler, "server.crt"))
 		kubeScheduler.TLSPrivateKeyFile = filepath.Join(pathSrvScheduler, "server.key")
 	}
 
@@ -189,13 +195,12 @@ func (b *KubeSchedulerBuilder) buildPod(kubeScheduler *kops.KubeSchedulerConfig)
 
 	flags = append(flags, "--config="+"/var/lib/kube-scheduler/config.yaml")
 
+	// Make sure the scheduler always looks up its authentication configuration from the API server.
+	flags = append(flags, "--authentication-tolerate-lookup-failure=false")
+	flags = append(flags, "--authentication-skip-lookup=false")
 	// Add kubeconfig flags
 	for _, flag := range []string{"authentication-", "authorization-"} {
-		flags = append(flags, "--"+flag+"kubeconfig="+defaultKubeConfig)
-	}
-
-	if kubeScheduler.UsePolicyConfigMap != nil {
-		flags = append(flags, "--policy-configmap=scheduler-policy", "--policy-configmap-namespace=kube-system")
+		flags = append(flags, "--"+flag+"kubeconfig="+wellknownpaths.KubeSchedulerKubeConfig)
 	}
 
 	pod := &v1.Pod{
@@ -215,57 +220,65 @@ func (b *KubeSchedulerBuilder) buildPod(kubeScheduler *kops.KubeSchedulerConfig)
 		},
 	}
 
-	image := kubeScheduler.Image
-	if b.Architecture != architectures.ArchitectureAmd64 {
-		image = strings.Replace(image, "-amd64", "-"+string(b.Architecture), 1)
+	resourceRequests := v1.ResourceList{}
+	resourceLimits := v1.ResourceList{}
+
+	cpuRequest := resource.MustParse("100m")
+	if kubeScheduler.CPURequest != nil {
+		cpuRequest = *kubeScheduler.CPURequest
+	}
+	resourceRequests["cpu"] = cpuRequest
+
+	if kubeScheduler.CPULimit != nil {
+		resourceLimits["cpu"] = *kubeScheduler.CPULimit
 	}
 
-	healthAction := &v1.HTTPGetAction{
-		Host: "127.0.0.1",
-		Path: "/healthz",
-		Port: intstr.FromInt(10251),
+	if kubeScheduler.MemoryRequest != nil {
+		resourceRequests["memory"] = *kubeScheduler.MemoryRequest
 	}
-	if b.IsKubernetesGTE("1.23") {
-		healthAction.Port = intstr.FromInt(10259)
-		healthAction.Scheme = v1.URISchemeHTTPS
+
+	if kubeScheduler.MemoryLimit != nil {
+		resourceLimits["memory"] = *kubeScheduler.MemoryLimit
+	}
+
+	image := b.RemapImage(kubeScheduler.Image)
+
+	healthAction := &v1.HTTPGetAction{
+		Host:   "127.0.0.1",
+		Path:   "/healthz",
+		Port:   intstr.FromInt(10259),
+		Scheme: v1.URISchemeHTTPS,
 	}
 
 	container := &v1.Container{
 		Name:  "kube-scheduler",
 		Image: image,
-		Env:   proxy.GetProxyEnvVars(b.Cluster.Spec.EgressProxy),
+		Env:   env.GetProxyEnvVars(b.NodeupConfig.Networking.EgressProxy),
 		LivenessProbe: &v1.Probe{
-			Handler:             v1.Handler{HTTPGet: healthAction},
+			ProbeHandler:        v1.ProbeHandler{HTTPGet: healthAction},
 			InitialDelaySeconds: 15,
 			TimeoutSeconds:      15,
 		},
 		Resources: v1.ResourceRequirements{
-			Requests: v1.ResourceList{
-				v1.ResourceCPU: resource.MustParse("100m"),
-			},
+			Requests: resourceRequests,
+			Limits:   resourceLimits,
 		},
 	}
-	addHostPathMapping(pod, container, "varlibkubescheduler", "/var/lib/kube-scheduler")
-	addHostPathMapping(pod, container, "srvscheduler", pathSrvScheduler)
+	kubemanifest.AddHostPathMapping(pod, container, "varlibkubescheduler", "/var/lib/kube-scheduler")
+	kubemanifest.AddHostPathMapping(pod, container, "srvscheduler", pathSrvScheduler)
 
 	// Log both to docker and to the logfile
-	addHostPathMapping(pod, container, "logfile", "/var/log/kube-scheduler.log").ReadOnly = false
+	kubemanifest.AddHostPathMapping(pod, container, "logfile", "/var/log/kube-scheduler.log", kubemanifest.WithReadWrite())
 	// We use lighter containers that don't include shells
 	// But they have richer logging support via klog
-	if b.IsKubernetesGTE("1.23") {
+	{
 		container.Command = []string{"/go-runner"}
 		container.Args = []string{
 			"--log-file=/var/log/kube-scheduler.log",
+			"--also-stdout",
 			"/usr/local/bin/kube-scheduler",
 		}
 		container.Args = append(container.Args, sortedStrings(flags)...)
-	} else {
-		container.Command = []string{"/usr/local/bin/kube-scheduler"}
-		container.Args = append(
-			sortedStrings(flags),
-			"--logtostderr=false", //https://github.com/kubernetes/klog/issues/60
-			"--alsologtostderr",
-			"--log-file=/var/log/kube-scheduler.log")
 	}
 
 	if kubeScheduler.MaxPersistentVolumes != nil {
@@ -280,6 +293,8 @@ func (b *KubeSchedulerBuilder) buildPod(kubeScheduler *kops.KubeSchedulerConfig)
 
 	kubemanifest.MarkPodAsCritical(pod)
 	kubemanifest.MarkPodAsClusterCritical(pod)
+
+	kubemanifest.AddHostPathSELinuxContext(pod, b.NodeupConfig)
 
 	return pod, nil
 }

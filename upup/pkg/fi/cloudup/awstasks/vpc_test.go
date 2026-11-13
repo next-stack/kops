@@ -17,30 +17,34 @@ limitations under the License.
 package awstasks
 
 import (
+	"context"
 	"reflect"
 	"testing"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"k8s.io/kops/cloudmock/aws/mockec2"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
 )
 
 func TestVPCCreate(t *testing.T) {
+	ctx := context.TODO()
+
 	cloud := awsup.BuildMockAWSCloud("us-east-1", "abc")
 	c := &mockec2.MockEC2{}
 	cloud.MockEC2 = c
 
 	// We define a function so we can rebuild the tasks, because we modify in-place when running
-	buildTasks := func() map[string]fi.Task {
+	buildTasks := func() map[string]fi.CloudupTask {
 		vpc1 := &VPC{
 			Name:      s("vpc1"),
 			Lifecycle: fi.LifecycleSync,
 			CIDR:      s("172.21.0.0/16"),
 			Tags:      map[string]string{"Name": "vpc1"},
 		}
-		return map[string]fi.Task{
+		return map[string]fi.CloudupTask{
 			"vpc1": vpc1,
 		}
 	}
@@ -49,21 +53,9 @@ func TestVPCCreate(t *testing.T) {
 		allTasks := buildTasks()
 		vpc1 := allTasks["vpc1"].(*VPC)
 
-		target := &awsup.AWSAPITarget{
-			Cloud: cloud,
-		}
+		runTasks(t, cloud, allTasks)
 
-		context, err := fi.NewContext(target, nil, cloud, nil, nil, nil, true, allTasks)
-		if err != nil {
-			t.Fatalf("error building context: %v", err)
-		}
-		defer context.Close()
-
-		if err := context.RunTasks(testRunTasksOptions); err != nil {
-			t.Fatalf("unexpected error during Run: %v", err)
-		}
-
-		if fi.StringValue(vpc1.ID) == "" {
+		if fi.ValueOf(vpc1.ID) == "" {
 			t.Fatalf("ID not set after create")
 		}
 
@@ -71,9 +63,9 @@ func TestVPCCreate(t *testing.T) {
 			t.Fatalf("Expected exactly one Vpc; found %v", c.Vpcs)
 		}
 
-		expected := &ec2.Vpc{
+		expected := &ec2types.Vpc{
 			CidrBlock: s("172.21.0.0/16"),
-			IsDefault: fi.Bool(false),
+			IsDefault: new(false),
 			VpcId:     vpc1.ID,
 			Tags: buildTags(map[string]string{
 				"Name": "vpc1",
@@ -91,14 +83,14 @@ func TestVPCCreate(t *testing.T) {
 	{
 		allTasks := buildTasks()
 
-		checkNoChanges(t, cloud, allTasks)
+		checkNoChanges(t, ctx, cloud, allTasks)
 	}
 }
 
-func buildTags(tags map[string]string) []*ec2.Tag {
-	var t []*ec2.Tag
+func buildTags(tags map[string]string) []ec2types.Tag {
+	var t []ec2types.Tag
 	for k, v := range tags {
-		t = append(t, &ec2.Tag{
+		t = append(t, ec2types.Tag{
 			Key:   aws.String(k),
 			Value: aws.String(v),
 		})
@@ -132,14 +124,15 @@ func Test4758(t *testing.T) {
 }
 
 func TestSharedVPCAdditionalCIDR(t *testing.T) {
+	ctx := context.Background()
 	cloud := awsup.BuildMockAWSCloud("us-east-1", "abc")
 	c := &mockec2.MockEC2{}
 	c.CreateVpcWithId(&ec2.CreateVpcInput{
 		CidrBlock: s("172.21.0.0/16"),
-		TagSpecifications: []*ec2.TagSpecification{
+		TagSpecifications: []ec2types.TagSpecification{
 			{
-				ResourceType: s(ec2.ResourceTypeVpc),
-				Tags: []*ec2.Tag{
+				ResourceType: ec2types.ResourceTypeVpc,
+				Tags: []ec2types.Tag{
 					{
 						Key:   s("Name"),
 						Value: s("vpc-1"),
@@ -148,7 +141,7 @@ func TestSharedVPCAdditionalCIDR(t *testing.T) {
 			},
 		},
 	}, "vpc-1")
-	c.AssociateVpcCidrBlock(&ec2.AssociateVpcCidrBlockInput{
+	c.AssociateVpcCidrBlock(ctx, &ec2.AssociateVpcCidrBlockInput{
 		VpcId:     s("vpc-1"),
 		CidrBlock: s("172.22.0.0/16"),
 	})
@@ -156,15 +149,15 @@ func TestSharedVPCAdditionalCIDR(t *testing.T) {
 	cloud.MockEC2 = c
 
 	// We define a function so we can rebuild the tasks, because we modify in-place when running
-	buildTasks := func() map[string]fi.Task {
+	buildTasks := func() map[string]fi.CloudupTask {
 		vpc1 := &VPC{
 			Name:      s("vpc-1"),
 			Lifecycle: fi.LifecycleSync,
 			CIDR:      s("172.21.0.0/16"),
 			Tags:      map[string]string{"Name": "vpc-1"},
-			Shared:    fi.Bool(true),
+			Shared:    new(true),
 		}
-		return map[string]fi.Task{
+		return map[string]fi.CloudupTask{
 			"vpc-1": vpc1,
 		}
 	}
@@ -173,21 +166,9 @@ func TestSharedVPCAdditionalCIDR(t *testing.T) {
 		allTasks := buildTasks()
 		vpc1 := allTasks["vpc-1"].(*VPC)
 
-		target := &awsup.AWSAPITarget{
-			Cloud: cloud,
-		}
+		runTasks(t, cloud, allTasks)
 
-		context, err := fi.NewContext(target, nil, cloud, nil, nil, nil, true, allTasks)
-		if err != nil {
-			t.Fatalf("error building context: %v", err)
-		}
-		defer context.Close()
-
-		if err := context.RunTasks(testRunTasksOptions); err != nil {
-			t.Fatalf("unexpected error during Run: %v", err)
-		}
-
-		if fi.StringValue(vpc1.ID) == "" {
+		if fi.ValueOf(vpc1.ID) == "" {
 			t.Fatalf("ID not set")
 		}
 
@@ -195,19 +176,19 @@ func TestSharedVPCAdditionalCIDR(t *testing.T) {
 			t.Fatalf("Expected exactly one Vpc; found %v", c.Vpcs)
 		}
 
-		expected := &ec2.Vpc{
+		expected := &ec2types.Vpc{
 			CidrBlock: s("172.21.0.0/16"),
-			IsDefault: fi.Bool(false),
+			IsDefault: new(false),
 			VpcId:     vpc1.ID,
 			Tags: buildTags(map[string]string{
 				"Name": "vpc-1",
 			}),
-			CidrBlockAssociationSet: []*ec2.VpcCidrBlockAssociation{
+			CidrBlockAssociationSet: []ec2types.VpcCidrBlockAssociation{
 				{
 					AssociationId: s("vpc-1-0"),
 					CidrBlock:     s("172.22.0.0/16"),
-					CidrBlockState: &ec2.VpcCidrBlockState{
-						State: s(ec2.VpcCidrBlockStateCodeAssociated),
+					CidrBlockState: &ec2types.VpcCidrBlockState{
+						State: ec2types.VpcCidrBlockStateCodeAssociated,
 					},
 				},
 			},
@@ -220,5 +201,4 @@ func TestSharedVPCAdditionalCIDR(t *testing.T) {
 			t.Fatalf("Unexpected VPC: expected=%v actual=%v", expected, actual)
 		}
 	}
-
 }

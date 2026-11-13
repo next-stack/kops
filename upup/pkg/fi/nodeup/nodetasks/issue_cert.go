@@ -18,6 +18,7 @@ package nodetasks
 
 import (
 	"bytes"
+	"context"
 	"crypto/x509/pkix"
 	"fmt"
 	"hash/fnv"
@@ -34,7 +35,7 @@ import (
 
 // PKIXName is a simplified form of pkix.Name, for better golden test output
 type PKIXName struct {
-	fi.NotADependency
+	fi.NodeupNotADependency
 	CommonName   string
 	Organization []string `json:",omitempty"`
 }
@@ -58,13 +59,15 @@ type IssueCert struct {
 	// IncludeRootCertificate will force the certificate data to include the full chain, not just the leaf
 	IncludeRootCertificate bool `json:"includeRootCertificate,omitempty"`
 
-	cert *fi.TaskDependentResource
-	key  *fi.TaskDependentResource
-	ca   *fi.TaskDependentResource
+	cert *fi.NodeupTaskDependentResource
+	key  *fi.NodeupTaskDependentResource
+	ca   *fi.NodeupTaskDependentResource
 }
 
-var _ fi.Task = &IssueCert{}
-var _ fi.HasName = &IssueCert{}
+var (
+	_ fi.NodeupTask = &IssueCert{}
+	_ fi.HasName    = &IssueCert{}
+)
 
 func (i *IssueCert) GetName() *string {
 	return &i.Name
@@ -75,31 +78,28 @@ func (i *IssueCert) String() string {
 	return fmt.Sprintf("IssueCert: %s", i.Name)
 }
 
-func (i *IssueCert) GetResources() (certResource, keyResource, caResource *fi.TaskDependentResource) {
+func (i *IssueCert) GetResources() (certResource, keyResource, caResource *fi.NodeupTaskDependentResource) {
 	if i.cert == nil {
-		i.cert = &fi.TaskDependentResource{Task: i}
-		i.key = &fi.TaskDependentResource{Task: i}
-		i.ca = &fi.TaskDependentResource{Task: i}
+		i.cert = &fi.NodeupTaskDependentResource{Task: i}
+		i.key = &fi.NodeupTaskDependentResource{Task: i}
+		i.ca = &fi.NodeupTaskDependentResource{Task: i}
 	}
 	return i.cert, i.key, i.ca
 }
 
-func (i *IssueCert) AddFileTasks(c *fi.ModelBuilderContext, dir string, name string, caName string, owner *string) error {
+func (i *IssueCert) AddFileTasks(c *fi.NodeupModelBuilderContext, dir string, name string, caName string, owner *string) error {
 	certResource, keyResource, caResource := i.GetResources()
-	err := c.EnsureTask(&File{
+	c.EnsureTask(&File{
 		Path: dir,
 		Type: FileType_Directory,
-		Mode: fi.String("0755"),
+		Mode: new("0755"),
 	})
-	if err != nil {
-		return err
-	}
 
 	c.AddTask(&File{
 		Path:     filepath.Join(dir, name+".crt"),
 		Contents: certResource,
 		Type:     FileType_File,
-		Mode:     fi.String("0644"),
+		Mode:     new("0644"),
 		Owner:    owner,
 	})
 
@@ -107,27 +107,26 @@ func (i *IssueCert) AddFileTasks(c *fi.ModelBuilderContext, dir string, name str
 		Path:     filepath.Join(dir, name+".key"),
 		Contents: keyResource,
 		Type:     FileType_File,
-		Mode:     fi.String("0600"),
+		Mode:     new("0600"),
 		Owner:    owner,
 	})
 
 	if caName != "" {
-		err = c.EnsureTask(&File{
+		c.EnsureTask(&File{
 			Path:     filepath.Join(dir, caName+".crt"),
 			Contents: caResource,
 			Type:     FileType_File,
-			Mode:     fi.String("0644"),
+			Mode:     new("0644"),
 			Owner:    owner,
 		})
-		if err != nil {
-			return nil
-		}
 	}
 
 	return nil
 }
 
-func (e *IssueCert) Run(c *fi.Context) error {
+func (e *IssueCert) Run(c *fi.NodeupContext) error {
+	ctx := c.Context()
+
 	// Skew the certificate lifetime by up to 30 days based on information about the generating node.
 	// This is so that different nodes created at the same time have the certificates they generated
 	// expire at different times, but all certificates on a given node expire around the same time.
@@ -153,13 +152,13 @@ func (e *IssueCert) Run(c *fi.Context) error {
 		Validity:       time.Hour * time.Duration(validHours),
 	}
 
-	keystore, err := newStaticKeystore(e.Signer, e.KeypairID, c.Keystore)
+	keystore, err := newStaticKeystore(ctx, e.Signer, e.KeypairID, c.T.Keystore)
 	if err != nil {
 		return err
 	}
 
 	klog.Infof("signing certificate for %q", e.Name)
-	certificate, privateKey, caCertificate, err := pki.IssueCert(req, keystore)
+	certificate, privateKey, caCertificate, err := pki.IssueCert(ctx, req, keystore)
 	if err != nil {
 		return err
 	}
@@ -206,25 +205,29 @@ type staticKeystore struct {
 	key         *pki.PrivateKey
 }
 
-func (s staticKeystore) FindPrimaryKeypair(name string) (*pki.Certificate, *pki.PrivateKey, error) {
+// FindPrimaryKeypair implements pki.Keystore
+func (s staticKeystore) FindPrimaryKeypair(ctx context.Context, name string) (*pki.Certificate, *pki.PrivateKey, error) {
 	if name != s.keyset {
 		return nil, nil, fmt.Errorf("wrong signer: expected %q got %q", s.keyset, name)
 	}
 	return s.certificate, s.key, nil
 }
 
-func newStaticKeystore(signer string, keypairID string, keystore fi.Keystore) (pki.Keystore, error) {
+func newStaticKeystore(ctx context.Context, signer string, keypairID string, keystore fi.KeystoreReader) (pki.Keystore, error) {
 	if signer == "" {
 		return nil, nil
 	}
 
 	if keypairID == "" {
-		return nil, fmt.Errorf("missing keypairID for %s", signer)
+		return nil, fmt.Errorf("missing keypairID for signer %s", signer)
 	}
 
-	keyset, err := keystore.FindKeyset(signer)
+	keyset, err := keystore.FindKeyset(ctx, signer)
 	if err != nil {
 		return nil, fmt.Errorf("reading keyset for %s: %v", signer, err)
+	}
+	if keyset == nil {
+		return nil, fmt.Errorf("keyset %q not found", signer)
 	}
 
 	item := keyset.Items[keypairID]

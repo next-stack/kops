@@ -23,8 +23,8 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	"github.com/gophercloud/gophercloud/openstack/dns/v2/recordsets"
-	zones "github.com/gophercloud/gophercloud/openstack/dns/v2/zones"
+	"github.com/gophercloud/gophercloud/v2/openstack/dns/v2/recordsets"
+	zones "github.com/gophercloud/gophercloud/v2/openstack/dns/v2/zones"
 )
 
 type zoneListResponse struct {
@@ -40,7 +40,6 @@ type recordSetsListResponse struct {
 }
 
 func (m *MockClient) mockZones() {
-
 	handler := func(w http.ResponseWriter, r *http.Request) {
 		m.mutex.Lock()
 		defer m.mutex.Unlock()
@@ -59,16 +58,17 @@ func (m *MockClient) mockZones() {
 		zoneName = r.Form.Get("name")
 		switch r.Method {
 		case http.MethodGet:
-			if zoneID == "" && zoneName == "" {
+			switch {
+			case zoneID == "" && zoneName == "":
 				// /zones
 				m.listZones(w)
-			} else if len(parts) == 3 && parts[2] == "recordsets" {
+			case len(parts) == 3 && parts[2] == "recordsets":
 				// /zones/<zoneid>/recordsets
 				m.listRecordSets(w, zoneID)
-			} else if len(parts) == 4 && parts[2] == "recordsets" {
+			case len(parts) == 4 && parts[2] == "recordsets":
 				// /zones/<zoneid>/recordsets/<recordsetid>
 				m.getRecordSet(w, zoneID, parts[3])
-			} else {
+			default:
 				// /zones?name=<zonename>
 				m.getZone(w, zoneName)
 			}
@@ -85,7 +85,6 @@ func (m *MockClient) mockZones() {
 }
 
 func (m *MockClient) listZones(w http.ResponseWriter) {
-
 	w.WriteHeader(http.StatusOK)
 
 	zones := make([]zones.Zone, 0)

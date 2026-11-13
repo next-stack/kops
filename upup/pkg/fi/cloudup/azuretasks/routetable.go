@@ -19,25 +19,30 @@ package azuretasks
 import (
 	"context"
 
-	"github.com/Azure/azure-sdk-for-go/services/network/mgmt/2020-06-01/network"
-	"github.com/Azure/go-autorest/autorest/to"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
+	network "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork/v7"
 	"k8s.io/klog/v2"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/azure"
 )
 
 // RouteTable is an Azure Route Table.
+// Routes are not managed here; they are maintained by the CNI or Azure networking layer.
 // +kops:fitask
 type RouteTable struct {
 	Name          *string
 	Lifecycle     fi.Lifecycle
+	ID            *string
 	ResourceGroup *ResourceGroup
 	Tags          map[string]*string
 	Shared        *bool
 }
 
-var _ fi.Task = &RouteTable{}
-var _ fi.CompareWithID = &RouteTable{}
+var (
+	_ fi.CloudupTask          = &RouteTable{}
+	_ fi.CompareWithID        = &RouteTable{}
+	_ fi.CloudupTaskNormalize = &RouteTable{}
+)
 
 // CompareWithID returns the Name of the VM Scale Set.
 func (r *RouteTable) CompareWithID() *string {
@@ -45,8 +50,8 @@ func (r *RouteTable) CompareWithID() *string {
 }
 
 // Find discovers the RouteTable in the cloud provider.
-func (r *RouteTable) Find(c *fi.Context) (*RouteTable, error) {
-	cloud := c.Cloud.(azure.AzureCloud)
+func (r *RouteTable) Find(c *fi.CloudupContext) (*RouteTable, error) {
+	cloud := c.T.Cloud.(azure.AzureCloud)
 	l, err := cloud.RouteTable().List(context.TODO(), *r.ResourceGroup.Name)
 	if err != nil {
 		return nil, err
@@ -54,16 +59,25 @@ func (r *RouteTable) Find(c *fi.Context) (*RouteTable, error) {
 	var found *network.RouteTable
 	for _, v := range l {
 		if *v.Name == *r.Name {
-			found = &v
+			found = v
 			break
 		}
 	}
 	if found == nil {
 		return nil, nil
 	}
+	if found.Properties != nil && found.Properties.ProvisioningState != nil && *found.Properties.ProvisioningState == network.ProvisioningStateFailed {
+		klog.Warningf("found route table %q in failed provisioning state", *r.Name)
+		return nil, nil
+	}
+
+	r.ID = found.ID
+
 	return &RouteTable{
 		Name:      r.Name,
 		Lifecycle: r.Lifecycle,
+		ID:        found.ID,
+		Shared:    r.Shared,
 		ResourceGroup: &ResourceGroup{
 			Name: r.ResourceGroup.Name,
 		},
@@ -71,10 +85,14 @@ func (r *RouteTable) Find(c *fi.Context) (*RouteTable, error) {
 	}, nil
 }
 
+func (r *RouteTable) Normalize(c *fi.CloudupContext) error {
+	c.T.Cloud.(azure.AzureCloud).AddClusterTags(r.Tags)
+	return nil
+}
+
 // Run implements fi.Task.Run.
-func (r *RouteTable) Run(c *fi.Context) error {
-	c.Cloud.(azure.AzureCloud).AddClusterTags(r.Tags)
-	return fi.DefaultDeltaRunMethod(r, c)
+func (r *RouteTable) Run(c *fi.CloudupContext) error {
+	return fi.CloudupDefaultDeltaRunMethod(r, c)
 }
 
 // CheckChanges returns an error if a change is not allowed.
@@ -97,18 +115,25 @@ func (*RouteTable) CheckChanges(a, e, changes *RouteTable) error {
 // RenderAzure creates or updates a Route Table.
 func (*RouteTable) RenderAzure(t *azure.AzureAPITarget, a, e, changes *RouteTable) error {
 	if a == nil {
-		klog.Infof("Creating a new Route Table with name: %s", fi.StringValue(e.Name))
+		klog.Infof("Creating a new Route Table with name: %s", fi.ValueOf(e.Name))
 	} else {
-		klog.Infof("Updating a Route Table with name: %s", fi.StringValue(e.Name))
+		klog.Infof("Updating a Route Table with name: %s", fi.ValueOf(e.Name))
 	}
 
 	rt := network.RouteTable{
-		Location: to.StringPtr(t.Cloud.Region()),
+		Location: to.Ptr(t.Cloud.Region()),
 		Tags:     e.Tags,
 	}
-	return t.Cloud.RouteTable().CreateOrUpdate(
+	result, err := t.Cloud.RouteTable().CreateOrUpdate(
 		context.TODO(),
 		*e.ResourceGroup.Name,
 		*e.Name,
 		rt)
+	if err != nil {
+		return err
+	}
+
+	e.ID = result.ID
+
+	return nil
 }

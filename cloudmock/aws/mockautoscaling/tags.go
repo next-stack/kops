@@ -17,13 +17,17 @@ limitations under the License.
 package mockautoscaling
 
 import (
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/request"
-	"github.com/aws/aws-sdk-go/service/autoscaling"
+	"context"
+	"fmt"
+	"slices"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/autoscaling"
+	autoscalingtypes "github.com/aws/aws-sdk-go-v2/service/autoscaling/types"
 	"k8s.io/klog/v2"
 )
 
-func (m *MockAutoscaling) DescribeTags(request *autoscaling.DescribeTagsInput) (*autoscaling.DescribeTagsOutput, error) {
+func (m *MockAutoscaling) DescribeTags(ctx context.Context, request *autoscaling.DescribeTagsInput, optFns ...func(*autoscaling.Options)) (*autoscaling.DescribeTagsOutput, error) {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
@@ -33,10 +37,10 @@ func (m *MockAutoscaling) DescribeTags(request *autoscaling.DescribeTagsInput) (
 			allFiltersMatch := true
 			for _, filter := range request.Filters {
 				match := false
-				switch aws.StringValue(filter.Name) {
+				switch aws.ToString(filter.Name) {
 				case "value":
 					for _, v := range filter.Values {
-						if aws.StringValue(tag.Value) == aws.StringValue(v) {
+						if aws.ToString(tag.Value) == v {
 							match = true
 						}
 					}
@@ -62,29 +66,50 @@ func (m *MockAutoscaling) DescribeTags(request *autoscaling.DescribeTagsInput) (
 	return response, nil
 }
 
-func (m *MockAutoscaling) DescribeTagsWithContext(aws.Context, *autoscaling.DescribeTagsInput, ...request.Option) (*autoscaling.DescribeTagsOutput, error) {
-	klog.Fatalf("Not implemented")
-	return nil, nil
-}
+func (m *MockAutoscaling) CreateOrUpdateTags(ctx context.Context, request *autoscaling.CreateOrUpdateTagsInput, optFns ...func(*autoscaling.Options)) (*autoscaling.CreateOrUpdateTagsOutput, error) {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	klog.V(2).Infof("Mock CreateOrUpdateTags %v", request)
 
-func (m *MockAutoscaling) DescribeTagsRequest(*autoscaling.DescribeTagsInput) (*request.Request, *autoscaling.DescribeTagsOutput) {
-	klog.Fatalf("Not implemented")
-	return nil, nil
-}
-
-func (m *MockAutoscaling) DescribeTagsPages(request *autoscaling.DescribeTagsInput, callback func(*autoscaling.DescribeTagsOutput, bool) bool) error {
-	// For the mock, we just send everything in one page
-	page, err := m.DescribeTags(request)
-	if err != nil {
-		return err
+	for _, tag := range request.Tags {
+		g := m.Groups[aws.ToString(tag.ResourceId)]
+		if g == nil {
+			return nil, fmt.Errorf("AutoScaling Group not found: %q", aws.ToString(tag.ResourceId))
+		}
+		desc := autoscalingtypes.TagDescription{
+			Key:               tag.Key,
+			PropagateAtLaunch: tag.PropagateAtLaunch,
+			ResourceId:        tag.ResourceId,
+			ResourceType:      tag.ResourceType,
+			Value:             tag.Value,
+		}
+		i := slices.IndexFunc(g.Tags, func(t autoscalingtypes.TagDescription) bool {
+			return aws.ToString(t.Key) == aws.ToString(tag.Key)
+		})
+		if i >= 0 {
+			g.Tags[i] = desc
+		} else {
+			g.Tags = append(g.Tags, desc)
+		}
 	}
 
-	callback(page, false)
-
-	return nil
+	return &autoscaling.CreateOrUpdateTagsOutput{}, nil
 }
 
-func (m *MockAutoscaling) DescribeTagsPagesWithContext(aws.Context, *autoscaling.DescribeTagsInput, func(*autoscaling.DescribeTagsOutput, bool) bool, ...request.Option) error {
-	klog.Fatalf("Not implemented")
-	return nil
+func (m *MockAutoscaling) DeleteTags(ctx context.Context, request *autoscaling.DeleteTagsInput, optFns ...func(*autoscaling.Options)) (*autoscaling.DeleteTagsOutput, error) {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	klog.V(2).Infof("Mock DeleteTags %v", request)
+
+	for _, tag := range request.Tags {
+		g := m.Groups[aws.ToString(tag.ResourceId)]
+		if g == nil {
+			return nil, fmt.Errorf("AutoScaling Group not found: %q", aws.ToString(tag.ResourceId))
+		}
+		g.Tags = slices.DeleteFunc(g.Tags, func(t autoscalingtypes.TagDescription) bool {
+			return aws.ToString(t.Key) == aws.ToString(tag.Key)
+		})
+	}
+
+	return &autoscaling.DeleteTagsOutput{}, nil
 }

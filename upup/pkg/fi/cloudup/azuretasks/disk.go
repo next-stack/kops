@@ -19,8 +19,8 @@ package azuretasks
 import (
 	"context"
 
-	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2020-06-01/compute"
-	"github.com/Azure/go-autorest/autorest/to"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
+	compute "github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v7"
 	"k8s.io/klog/v2"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/azure"
@@ -35,10 +35,15 @@ type Disk struct {
 	ResourceGroup *ResourceGroup
 	SizeGB        *int32
 	Tags          map[string]*string
+	VolumeType    *compute.DiskStorageAccountTypes
+	Zones         []*string
 }
 
-var _ fi.Task = &Disk{}
-var _ fi.CompareWithID = &Disk{}
+var (
+	_ fi.CloudupTask          = &Disk{}
+	_ fi.CompareWithID        = &Disk{}
+	_ fi.CloudupTaskNormalize = &Disk{}
+)
 
 // CompareWithID returns the Name of the Disk.
 func (d *Disk) CompareWithID() *string {
@@ -46,8 +51,8 @@ func (d *Disk) CompareWithID() *string {
 }
 
 // Find discovers the Disk in the cloud provider.
-func (d *Disk) Find(c *fi.Context) (*Disk, error) {
-	cloud := c.Cloud.(azure.AzureCloud)
+func (d *Disk) Find(c *fi.CloudupContext) (*Disk, error) {
+	cloud := c.T.Cloud.(azure.AzureCloud)
 	l, err := cloud.Disk().List(context.TODO(), *d.ResourceGroup.Name)
 	if err != nil {
 		return nil, err
@@ -55,29 +60,46 @@ func (d *Disk) Find(c *fi.Context) (*Disk, error) {
 	var found *compute.Disk
 	for _, v := range l {
 		if *v.Name == *d.Name {
-			found = &v
+			found = v
 			break
 		}
 	}
 	if found == nil {
 		return nil, nil
 	}
+	if found.Properties != nil && fi.ValueOf(found.Properties.ProvisioningState) == "Failed" {
+		klog.Warningf("found disk %q in failed provisioning state", *d.Name)
+		return nil, nil
+	}
 
-	return &Disk{
+	disk := &Disk{
 		Name:      d.Name,
 		Lifecycle: d.Lifecycle,
 		ResourceGroup: &ResourceGroup{
 			Name: d.ResourceGroup.Name,
 		},
-		SizeGB: found.DiskSizeGB,
+		SizeGB: found.Properties.DiskSizeGB,
 		Tags:   found.Tags,
-	}, nil
+		Zones:  found.Zones,
+	}
+	if found.SKU != nil && found.SKU.Name != nil {
+		disk.VolumeType = found.SKU.Name
+	}
+	if found.Properties != nil {
+		disk.SizeGB = found.Properties.DiskSizeGB
+	}
+
+	return disk, nil
+}
+
+func (d *Disk) Normalize(c *fi.CloudupContext) error {
+	c.T.Cloud.(azure.AzureCloud).AddClusterTags(d.Tags)
+	return nil
 }
 
 // Run implements fi.Task.Run.
-func (d *Disk) Run(c *fi.Context) error {
-	c.Cloud.(azure.AzureCloud).AddClusterTags(d.Tags)
-	return fi.DefaultDeltaRunMethod(d, c)
+func (d *Disk) Run(c *fi.CloudupContext) error {
+	return fi.CloudupDefaultDeltaRunMethod(d, c)
 }
 
 // CheckChanges returns an error if a change is not allowed.
@@ -100,26 +122,32 @@ func (*Disk) CheckChanges(a, e, changes *Disk) error {
 // RenderAzure creates or updates a Disk.
 func (*Disk) RenderAzure(t *azure.AzureAPITarget, a, e, changes *Disk) error {
 	if a == nil {
-		klog.Infof("Creating a new Disk with name: %s", fi.StringValue(e.Name))
+		klog.Infof("Creating a new Disk with name: %s", fi.ValueOf(e.Name))
 	} else {
-		klog.Infof("Updating a Disk with name: %s", fi.StringValue(e.Name))
+		klog.Infof("Updating a Disk with name: %s", fi.ValueOf(e.Name))
 	}
 	name := *e.Name
 
 	disk := compute.Disk{
-		Location: to.StringPtr(t.Cloud.Region()),
-		DiskProperties: &compute.DiskProperties{
+		Location: to.Ptr(t.Cloud.Region()),
+		Properties: &compute.DiskProperties{
 			CreationData: &compute.CreationData{
-				CreateOption: compute.Empty,
+				CreateOption: to.Ptr(compute.DiskCreateOptionEmpty),
 			},
 			DiskSizeGB: e.SizeGB,
 		},
-		Tags: e.Tags,
+		SKU: &compute.DiskSKU{
+			Name: e.VolumeType,
+		},
+		Tags:  e.Tags,
+		Zones: e.Zones,
 	}
 
-	return t.Cloud.Disk().CreateOrUpdate(
+	_, err := t.Cloud.Disk().CreateOrUpdate(
 		context.TODO(),
 		*e.ResourceGroup.Name,
 		name,
 		disk)
+
+	return err
 }

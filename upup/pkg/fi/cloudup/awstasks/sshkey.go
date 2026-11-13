@@ -17,18 +17,18 @@ limitations under the License.
 package awstasks
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
-	"github.com/aws/aws-sdk-go/aws/awserr"
-	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"k8s.io/klog/v2"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraformWriter"
 
 	"k8s.io/kops/pkg/pki"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
-	"k8s.io/kops/upup/pkg/fi/cloudup/cloudformation"
 	"k8s.io/kops/upup/pkg/fi/cloudup/terraform"
 )
 
@@ -46,34 +46,33 @@ type SSHKey struct {
 	Tags map[string]string
 }
 
-var _ fi.CompareWithID = &SSHKey{}
+var _ fi.CompareWithID = (*SSHKey)(nil)
+var _ fi.CloudupTaskNormalize = (*SSHKey)(nil)
 
 func (e *SSHKey) CompareWithID() *string {
 	return e.Name
 }
 
-func (e *SSHKey) Find(c *fi.Context) (*SSHKey, error) {
-	cloud := c.Cloud.(awsup.AWSCloud)
+func (e *SSHKey) Find(c *fi.CloudupContext) (*SSHKey, error) {
+	cloud := awsup.GetCloud(c)
 
-	return e.find(cloud)
+	return e.find(c.Context(), cloud)
 }
 
-func (e *SSHKey) find(cloud awsup.AWSCloud) (*SSHKey, error) {
+func (e *SSHKey) find(ctx context.Context, cloud awsup.AWSCloud) (*SSHKey, error) {
 	request := &ec2.DescribeKeyPairsInput{
-		KeyNames: []*string{e.Name},
+		KeyNames: []string{fi.ValueOf(e.Name)},
 	}
 
-	response, err := cloud.EC2().DescribeKeyPairs(request)
-	if awsErr, ok := err.(awserr.Error); ok {
-		if awsErr.Code() == "InvalidKeyPair.NotFound" {
-			return nil, nil
-		}
-	}
-	if err != nil {
+	response, err := cloud.EC2().DescribeKeyPairs(ctx, request)
+	if err != nil && awsup.AWSErrorCode(err) != "InvalidKeyPair.NotFound" {
 		return nil, fmt.Errorf("error listing SSHKeys: %v", err)
 	}
 
 	if response == nil || len(response.KeyPairs) == 0 {
+		if e.IsExistingKey() && *e.Name != "" {
+			return nil, fmt.Errorf("unable to find specified SSH key %q", *e.Name)
+		}
 		return nil, nil
 	}
 
@@ -91,21 +90,33 @@ func (e *SSHKey) find(cloud awsup.AWSCloud) (*SSHKey, error) {
 	}
 
 	// Avoid spurious changes
-	if fi.StringValue(actual.KeyFingerprint) == fi.StringValue(e.KeyFingerprint) {
+	if k.KeyType == ec2types.KeyTypeEd25519 {
+		// Trim the trailing "=" and prefix with "SHA256:" to match the output of "ssh-keygen -lf"
+		fingerprint := fi.ValueOf(k.KeyFingerprint)
+		fingerprint = strings.TrimRight(fingerprint, "=")
+		fingerprint = fmt.Sprintf("SHA256:%s", fingerprint)
+		actual.KeyFingerprint = new(fingerprint)
+	}
+	if fi.ValueOf(actual.KeyFingerprint) == fi.ValueOf(e.KeyFingerprint) {
 		klog.V(2).Infof("SSH key fingerprints match; assuming public keys match")
 		actual.PublicKey = e.PublicKey
 	} else {
-		klog.V(2).Infof("Computed SSH key fingerprint mismatch: %q %q", fi.StringValue(e.KeyFingerprint), fi.StringValue(actual.KeyFingerprint))
+		klog.V(2).Infof("Computed SSH key fingerprint mismatch: %q %q", fi.ValueOf(e.KeyFingerprint), fi.ValueOf(actual.KeyFingerprint))
 	}
 	actual.Lifecycle = e.Lifecycle
 	if actual.Shared {
 		// Don't report tag changes on shared keys
 		actual.Tags = e.Tags
 	}
+
+	e.ID = actual.ID
+	if e.IsExistingKey() && *e.Name != "" {
+		e.KeyFingerprint = actual.KeyFingerprint
+	}
 	return actual, nil
 }
 
-func (e *SSHKey) Run(c *fi.Context) error {
+func (e *SSHKey) Normalize(c *fi.CloudupContext) error {
 	if e.KeyFingerprint == nil && e.PublicKey != nil {
 		publicKey, err := fi.ResourceAsString(e.PublicKey)
 		if err != nil {
@@ -119,20 +130,12 @@ func (e *SSHKey) Run(c *fi.Context) error {
 		klog.V(2).Infof("Computed SSH key fingerprint as %q", keyFingerprint)
 		e.KeyFingerprint = &keyFingerprint
 	}
-	a, err := e.Find(c)
-	if err != nil {
-		return err
-	}
-	if e.IsExistingKey() && *e.Name != "" {
-		if a == nil {
-			return fmt.Errorf("unable to find specified SSH key %q", *e.Name)
-		}
-		e.KeyFingerprint = a.KeyFingerprint
-	}
-	if a != nil {
-		e.ID = a.ID
-	}
-	return fi.DefaultDeltaRunMethod(e, c)
+
+	return nil
+}
+
+func (e *SSHKey) Run(c *fi.CloudupContext) error {
+	return fi.CloudupDefaultDeltaRunMethod(e, c)
 }
 
 func (s *SSHKey) CheckChanges(a, e, changes *SSHKey) error {
@@ -145,11 +148,12 @@ func (s *SSHKey) CheckChanges(a, e, changes *SSHKey) error {
 }
 
 func (e *SSHKey) createKeypair(cloud awsup.AWSCloud) error {
+	ctx := context.TODO()
 	klog.V(2).Infof("Creating SSHKey with Name:%q", *e.Name)
 
 	request := &ec2.ImportKeyPairInput{
 		KeyName:           e.Name,
-		TagSpecifications: awsup.EC2TagSpecification(ec2.ResourceTypeKeyPair, e.Tags),
+		TagSpecifications: awsup.EC2TagSpecification(ec2types.ResourceTypeKeyPair, e.Tags),
 	}
 
 	if e.PublicKey != nil {
@@ -160,7 +164,7 @@ func (e *SSHKey) createKeypair(cloud awsup.AWSCloud) error {
 		request.PublicKeyMaterial = d
 	}
 
-	response, err := cloud.EC2().ImportKeyPair(request)
+	response, err := cloud.EC2().ImportKeyPair(ctx, request)
 	if err != nil {
 		return fmt.Errorf("error creating SSHKey: %v", err)
 	}
@@ -183,9 +187,9 @@ func (_ *SSHKey) RenderAWS(t *awsup.AWSAPITarget, a, e, changes *SSHKey) error {
 }
 
 type terraformSSHKey struct {
-	Name      *string                  `json:"key_name" cty:"key_name"`
-	PublicKey *terraformWriter.Literal `json:"public_key" cty:"public_key"`
-	Tags      map[string]string        `json:"tags" cty:"tags"`
+	Name      *string                  `cty:"key_name"`
+	PublicKey *terraformWriter.Literal `cty:"public_key"`
+	Tags      map[string]string        `cty:"tags"`
 }
 
 func (_ *SSHKey) RenderTerraform(t *terraform.TerraformTarget, a, e, changes *SSHKey) error {
@@ -193,7 +197,7 @@ func (_ *SSHKey) RenderTerraform(t *terraform.TerraformTarget, a, e, changes *SS
 	if e.IsExistingKey() {
 		return nil
 	}
-	tfName := strings.Replace(*e.Name, ":", "", -1)
+	tfName := strings.ReplaceAll(*e.Name, ":", "")
 	publicKey, err := t.AddFileResource("aws_key_pair", tfName, "public_key", e.PublicKey, false)
 	if err != nil {
 		return fmt.Errorf("error rendering PublicKey: %v", err)
@@ -221,32 +225,8 @@ func (e *SSHKey) TerraformLink() *terraformWriter.Literal {
 	if e.IsExistingKey() {
 		return terraformWriter.LiteralFromStringValue(*e.Name)
 	}
-	tfName := strings.Replace(*e.Name, ":", "", -1)
+	tfName := strings.ReplaceAll(*e.Name, ":", "")
 	return terraformWriter.LiteralProperty("aws_key_pair", tfName, "id")
-}
-
-func (_ *SSHKey) RenderCloudformation(t *cloudformation.CloudformationTarget, a, e, changes *SSHKey) error {
-	if e.NoSSHKey() {
-		return nil
-	}
-
-	cloud := t.Cloud.(awsup.AWSCloud)
-
-	klog.Warningf("Cloudformation does not manage SSH keys; pre-creating SSH key")
-
-	keypair, err := e.find(cloud)
-	if err != nil {
-		return err
-	}
-
-	if keypair == nil {
-		err := e.createKeypair(cloud)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
 }
 
 func (e *SSHKey) NoSSHKey() bool {

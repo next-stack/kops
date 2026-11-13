@@ -19,53 +19,40 @@ package configserver
 import (
 	"fmt"
 
-	"k8s.io/kops/pkg/apis/nodeup"
 	"k8s.io/kops/upup/pkg/fi"
-	"k8s.io/kops/util/pkg/vfs"
 )
 
-//configserverSecretStore is a SecretStore backed by the config server.
+// configserverSecretStore is a SecretStore backed by the config server.
 type configserverSecretStore struct {
-	nodeConfig *nodeup.NodeConfig
+	nodeSecrets map[string][]byte
 }
 
-func NewSecretStore(nodeConfig *nodeup.NodeConfig) fi.SecretStore {
+func NewSecretStore(nodeSecrets map[string][]byte) fi.SecretStoreReader {
 	return &configserverSecretStore{
-		nodeConfig: nodeConfig,
+		nodeSecrets: nodeSecrets,
 	}
 }
 
-// Secret implements fi.SecretStore
+// Secret implements fi.SecretStoreReader
 func (s *configserverSecretStore) Secret(id string) (*fi.Secret, error) {
-	return nil, fmt.Errorf("Secret not supported by configserverSecretStore")
+	secret, err := s.FindSecret(id)
+	if err != nil {
+		return nil, err
+	}
+	if secret == nil {
+		return nil, fmt.Errorf("secret %q not found", id)
+	}
+	return secret, nil
 }
 
-// DeleteSecret implements fi.SecretStore
-func (s *configserverSecretStore) DeleteSecret(id string) error {
-	return fmt.Errorf("DeleteSecret not supported by configserverSecretStore")
-}
-
-// FindSecret implements fi.SecretStore
+// FindSecret implements fi.SecretStoreReader
 func (s *configserverSecretStore) FindSecret(id string) (*fi.Secret, error) {
-	return nil, fmt.Errorf("FindSecret not supported by configserverSecretStore")
-}
-
-// GetOrCreateSecret implements fi.SecretStore
-func (s *configserverSecretStore) GetOrCreateSecret(id string, secret *fi.Secret) (current *fi.Secret, created bool, err error) {
-	return nil, false, fmt.Errorf("GetOrCreateSecret not supported by configserverSecretStore")
-}
-
-// ReplaceSecret implements fi.SecretStore
-func (s *configserverSecretStore) ReplaceSecret(id string, secret *fi.Secret) (current *fi.Secret, err error) {
-	return nil, fmt.Errorf("ReplaceSecret not supported by configserverSecretStore")
-}
-
-// ListSecrets implements fi.SecretStore
-func (s *configserverSecretStore) ListSecrets() ([]string, error) {
-	return nil, fmt.Errorf("ListSecrets not supported by configserverSecretStore")
-}
-
-// MirrorTo implements fi.SecretStore
-func (s *configserverSecretStore) MirrorTo(basedir vfs.Path) error {
-	return fmt.Errorf("MirrorTo not supported by configserverSecretStore")
+	secretBytes, ok := s.nodeSecrets[id]
+	if !ok {
+		return nil, nil
+	}
+	secret := &fi.Secret{
+		Data: secretBytes,
+	}
+	return secret, nil
 }

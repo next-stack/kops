@@ -27,7 +27,7 @@ import (
 
 // TargetGroup
 
-var _ fi.HasLifecycle = &TargetGroup{}
+var _ fi.HasLifecycle = (*TargetGroup)(nil)
 
 // GetLifecycle returns the Lifecycle of the object, implementing fi.HasLifecycle
 func (o *TargetGroup) GetLifecycle() fi.Lifecycle {
@@ -39,7 +39,7 @@ func (o *TargetGroup) SetLifecycle(lifecycle fi.Lifecycle) {
 	o.Lifecycle = lifecycle
 }
 
-var _ fi.HasName = &TargetGroup{}
+var _ fi.HasName = (*TargetGroup)(nil)
 
 // GetName returns the Name of the object, implementing fi.HasName
 func (o *TargetGroup) GetName() *string {
@@ -48,5 +48,5 @@ func (o *TargetGroup) GetName() *string {
 
 // String is the stringer function for the task, producing readable output using fi.TaskAsString
 func (o *TargetGroup) String() string {
-	return fi.TaskAsString(o)
+	return fi.CloudupTaskAsString(o)
 }

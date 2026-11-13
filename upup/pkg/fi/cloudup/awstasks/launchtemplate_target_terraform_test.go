@@ -19,6 +19,8 @@ package awstasks
 import (
 	"testing"
 
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+
 	"k8s.io/kops/upup/pkg/fi"
 )
 
@@ -26,31 +28,33 @@ func TestLaunchTemplateTerraformRender(t *testing.T) {
 	cases := []*renderTest{
 		{
 			Resource: &LaunchTemplate{
-				Name:              fi.String("test"),
-				AssociatePublicIP: fi.Bool(true),
+				Name:              new("test"),
+				AssociatePublicIP: new(true),
 				IAMInstanceProfile: &IAMInstanceProfile{
-					Name: fi.String("nodes"),
+					Name: new("nodes"),
 				},
-				ID:                           fi.String("test-11"),
-				InstanceMonitoring:           fi.Bool(true),
-				InstanceType:                 fi.String("t2.medium"),
-				SpotPrice:                    fi.String("0.1"),
-				SpotDurationInMinutes:        fi.Int64(60),
-				InstanceInterruptionBehavior: fi.String("hibernate"),
-				RootVolumeOptimization:       fi.Bool(true),
-				RootVolumeIops:               fi.Int64(100),
-				RootVolumeSize:               fi.Int64(64),
+				ID:                           new("test-11"),
+				InstanceMonitoring:           new(true),
+				InstanceType:                 new(ec2types.InstanceTypeT2Medium),
+				SpotPrice:                    new("0.1"),
+				SpotDurationInMinutes:        new(int32(60)),
+				InstanceInterruptionBehavior: new(ec2types.InstanceInterruptionBehaviorHibernate),
+				IPv6AddressCount:             new(int32(1)),
+				PrimaryIPv6:                  new(true),
+				RootVolumeOptimization:       new(true),
+				RootVolumeIops:               new(int32(100)),
+				RootVolumeSize:               new(int32(64)),
 				SSHKey: &SSHKey{
-					Name:      fi.String("newkey"),
+					Name:      new("newkey"),
 					PublicKey: fi.NewStringResource("newkey"),
 				},
 				SecurityGroups: []*SecurityGroup{
-					{Name: fi.String("nodes-1"), ID: fi.String("1111")},
-					{Name: fi.String("nodes-2"), ID: fi.String("2222")},
+					{Name: new("nodes-1"), ID: new("1111")},
+					{Name: new("nodes-2"), ID: new("2222")},
 				},
-				Tenancy:                 fi.String("dedicated"),
-				HTTPTokens:              fi.String("optional"),
-				HTTPPutResponseHopLimit: fi.Int64(1),
+				Tenancy:                 new(ec2types.TenancyDedicated),
+				HTTPTokens:              new(ec2types.LaunchTemplateHttpTokensStateOptional),
+				HTTPPutResponseHopLimit: new(int32(1)),
 			},
 			Expected: `provider "aws" {
   region = "eu-west-2"
@@ -86,6 +90,8 @@ resource "aws_launch_template" "test" {
   network_interfaces {
     associate_public_ip_address = true
     delete_on_termination       = true
+    ipv6_address_count          = 1
+    primary_ipv6                = true
     security_groups             = [aws_security_group.nodes-1.id, aws_security_group.nodes-2.id]
   }
   placement {
@@ -97,9 +103,8 @@ terraform {
   required_version = ">= 0.15.0"
   required_providers {
     aws = {
-      "configuration_aliases" = [aws.files]
-      "source"                = "hashicorp/aws"
-      "version"               = ">= 3.59.0"
+      "source"  = "hashicorp/aws"
+      "version" = ">= 6.57.1"
     }
   }
 }
@@ -107,36 +112,36 @@ terraform {
 		},
 		{
 			Resource: &LaunchTemplate{
-				Name:              fi.String("test"),
-				AssociatePublicIP: fi.Bool(true),
+				Name:              new("test"),
+				AssociatePublicIP: new(true),
 				IAMInstanceProfile: &IAMInstanceProfile{
-					Name: fi.String("nodes"),
+					Name: new("nodes"),
 				},
 				BlockDeviceMappings: []*BlockDeviceMapping{
 					{
-						DeviceName:             fi.String("/dev/xvdd"),
-						EbsVolumeType:          fi.String("gp2"),
-						EbsVolumeSize:          fi.Int64(100),
-						EbsDeleteOnTermination: fi.Bool(true),
-						EbsEncrypted:           fi.Bool(true),
+						DeviceName:             new("/dev/xvdd"),
+						EbsVolumeType:          ec2types.VolumeTypeGp2,
+						EbsVolumeSize:          new(int32(100)),
+						EbsDeleteOnTermination: new(true),
+						EbsEncrypted:           new(true),
 					},
 				},
-				ID:                     fi.String("test-11"),
-				InstanceMonitoring:     fi.Bool(true),
-				InstanceType:           fi.String("t2.medium"),
-				RootVolumeOptimization: fi.Bool(true),
-				RootVolumeIops:         fi.Int64(100),
-				RootVolumeSize:         fi.Int64(64),
+				ID:                     new("test-11"),
+				InstanceMonitoring:     new(true),
+				InstanceType:           new(ec2types.InstanceTypeT2Medium),
+				RootVolumeOptimization: new(true),
+				RootVolumeIops:         new(int32(100)),
+				RootVolumeSize:         new(int32(64)),
 				SSHKey: &SSHKey{
-					Name: fi.String("mykey"),
+					Name: new("mykey"),
 				},
 				SecurityGroups: []*SecurityGroup{
-					{Name: fi.String("nodes-1"), ID: fi.String("1111")},
-					{Name: fi.String("nodes-2"), ID: fi.String("2222")},
+					{Name: new("nodes-1"), ID: new("1111")},
+					{Name: new("nodes-2"), ID: new("2222")},
 				},
-				Tenancy:                 fi.String("dedicated"),
-				HTTPTokens:              fi.String("required"),
-				HTTPPutResponseHopLimit: fi.Int64(5),
+				Tenancy:                 new(ec2types.TenancyDedicated),
+				HTTPTokens:              new(ec2types.LaunchTemplateHttpTokensStateRequired),
+				HTTPPutResponseHopLimit: new(int32(5)),
 			},
 			Expected: `provider "aws" {
   region = "eu-west-2"
@@ -184,9 +189,8 @@ terraform {
   required_version = ">= 0.15.0"
   required_providers {
     aws = {
-      "configuration_aliases" = [aws.files]
-      "source"                = "hashicorp/aws"
-      "version"               = ">= 3.59.0"
+      "source"  = "hashicorp/aws"
+      "version" = ">= 6.57.1"
     }
   }
 }

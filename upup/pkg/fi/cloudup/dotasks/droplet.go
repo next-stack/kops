@@ -19,13 +19,14 @@ package dotasks
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/digitalocean/godo"
 
-	"k8s.io/klog/v2"
 	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/do"
-	_ "k8s.io/kops/upup/pkg/fi/cloudup/terraform"
+	"k8s.io/kops/upup/pkg/fi/cloudup/terraform"
+	"k8s.io/kops/upup/pkg/fi/cloudup/terraformWriter"
 )
 
 // Droplet represents a group of droplets. In the future it
@@ -35,25 +36,29 @@ type Droplet struct {
 	Name      *string
 	Lifecycle fi.Lifecycle
 
-	Region   *string
-	Size     *string
-	Image    *string
-	SSHKey   *string
-	VPC      *string
-	Tags     []string
-	Count    int
-	UserData fi.Resource
+	Region      *string
+	Size        *string
+	Image       *string
+	SSHKey      *SSHKey
+	VPCUUID     *string
+	NetworkCIDR *string
+	VPCName     *string
+	Tags        []string
+	Count       int
+	UserData    fi.Resource
 }
 
-var _ fi.Task = &Droplet{}
-var _ fi.CompareWithID = &Droplet{}
+var (
+	_ fi.CloudupTask   = &Droplet{}
+	_ fi.CompareWithID = &Droplet{}
+)
 
 func (d *Droplet) CompareWithID() *string {
 	return d.Name
 }
 
-func (d *Droplet) Find(c *fi.Context) (*Droplet, error) {
-	cloud := c.Cloud.(do.DOCloud)
+func (d *Droplet) Find(c *fi.CloudupContext) (*Droplet, error) {
+	cloud := c.T.Cloud.(do.DOCloud)
 
 	droplets, err := listDroplets(cloud)
 	if err != nil {
@@ -64,7 +69,7 @@ func (d *Droplet) Find(c *fi.Context) (*Droplet, error) {
 	count := 0
 	var foundDroplet godo.Droplet
 	for _, droplet := range droplets {
-		if droplet.Name == fi.StringValue(d.Name) {
+		if droplet.Name == fi.ValueOf(d.Name) {
 			found = true
 			count++
 			foundDroplet = droplet
@@ -76,15 +81,15 @@ func (d *Droplet) Find(c *fi.Context) (*Droplet, error) {
 	}
 
 	return &Droplet{
-		Name:      fi.String(foundDroplet.Name),
+		Name:      new(foundDroplet.Name),
 		Count:     count,
-		Region:    fi.String(foundDroplet.Region.Slug),
-		Size:      fi.String(foundDroplet.Size.Slug),
-		Image:     fi.String(foundDroplet.Image.Slug),
+		Region:    new(foundDroplet.Region.Slug),
+		Size:      new(foundDroplet.Size.Slug),
+		Image:     d.Image, //Image should not change so we keep it as-is
 		Tags:      foundDroplet.Tags,
 		SSHKey:    d.SSHKey,   // TODO: get from droplet or ignore change
 		UserData:  d.UserData, // TODO: get from droplet or ignore change
-		VPC:       fi.String(foundDroplet.VPCUUID),
+		VPCUUID:   new(foundDroplet.VPCUUID),
 		Lifecycle: d.Lifecycle,
 	}, nil
 }
@@ -116,11 +121,13 @@ func listDroplets(cloud do.DOCloud) ([]godo.Droplet, error) {
 	return allDroplets, nil
 }
 
-func (d *Droplet) Run(c *fi.Context) error {
-	return fi.DefaultDeltaRunMethod(d, c)
+func (d *Droplet) Run(c *fi.CloudupContext) error {
+	return fi.CloudupDefaultDeltaRunMethod(d, c)
 }
 
 func (_ *Droplet) RenderDO(t *do.DOAPITarget, a, e, changes *Droplet) error {
+	ctx := context.TODO()
+
 	userData, err := fi.ResourceAsString(e.UserData)
 	if err != nil {
 		return err
@@ -145,25 +152,42 @@ func (_ *Droplet) RenderDO(t *do.DOAPITarget, a, e, changes *Droplet) error {
 		newDropletCount = expectedCount - actualCount
 	}
 
-	for i := 0; i < newDropletCount; i++ {
-		_, _, err = t.Cloud.DropletsService().Create(context.TODO(), &godo.DropletCreateRequest{
-			Name:     fi.StringValue(e.Name),
-			Region:   fi.StringValue(e.Region),
-			Size:     fi.StringValue(e.Size),
-			Image:    godo.DropletCreateImage{Slug: fi.StringValue(e.Image)},
-			Tags:     e.Tags,
-			VPCUUID:  fi.StringValue(e.VPC),
-			UserData: userData,
-			SSHKeys:  []godo.DropletCreateSSHKey{{Fingerprint: fi.StringValue(e.SSHKey)}},
-		})
-
+	// associate vpcuuid to the droplet if set.
+	vpcUUID := ""
+	if fi.ValueOf(e.NetworkCIDR) != "" {
+		s, err := t.Cloud.GetVPCUUID(fi.ValueOf(e.NetworkCIDR), fi.ValueOf(e.VPCName))
 		if err != nil {
-			klog.Errorf("Error creating droplet with Name=%s", fi.StringValue(e.Name))
-			return err
+			return fmt.Errorf("fetching vpcUUID from network cidr=%s: %w", fi.ValueOf(e.NetworkCIDR), err)
+		}
+		vpcUUID = s
+	} else if fi.ValueOf(e.VPCUUID) != "" {
+		vpcUUID = fi.ValueOf(e.VPCUUID)
+	}
+
+	for i := 0; i < newDropletCount; i++ {
+		req := &godo.DropletCreateRequest{
+			Name:     fi.ValueOf(e.Name),
+			Region:   fi.ValueOf(e.Region),
+			Size:     fi.ValueOf(e.Size),
+			Image:    godo.DropletCreateImage{Slug: fi.ValueOf(e.Image)},
+			Tags:     e.Tags,
+			VPCUUID:  vpcUUID,
+			UserData: userData,
+		}
+
+		if e.SSHKey != nil {
+			req.SSHKeys = append(req.SSHKeys, godo.DropletCreateSSHKey{
+				ID: *e.SSHKey.ID,
+			})
+		}
+
+		_, _, err := t.Cloud.DropletsService().Create(ctx, req)
+		if err != nil {
+			return fmt.Errorf("error creating droplet with name %q: %w", fi.ValueOf(e.Name), err)
 		}
 	}
 
-	return err
+	return nil
 }
 
 func (_ *Droplet) CheckChanges(a, e, changes *Droplet) error {
@@ -195,4 +219,45 @@ func (_ *Droplet) CheckChanges(a, e, changes *Droplet) error {
 		}
 	}
 	return nil
+}
+
+type terraformDropletOptions struct {
+	Image    *string                  `cty:"image"`
+	Size     *string                  `cty:"size"`
+	Region   *string                  `cty:"region"`
+	Name     *string                  `cty:"name"`
+	Tags     []string                 `cty:"tags"`
+	SSHKey   []string                 `cty:"ssh_keys"`
+	UserData *terraformWriter.Literal `cty:"user_data"`
+	VPCUUID  *string                  `cty:"vpc_uuid"`
+}
+
+func (_ *Droplet) RenderTerraform(t *terraform.TerraformTarget, a, e, changes *Droplet) error {
+	tf := &terraformDropletOptions{
+		Image:   e.Image,
+		Size:    e.Size,
+		Region:  e.Region,
+		Name:    e.Name,
+		Tags:    e.Tags,
+		VPCUUID: e.VPCUUID,
+	}
+
+	if e.SSHKey != nil {
+		tf.SSHKey = []string{fi.ValueOf(e.SSHKey.KeyFingerprint)}
+	}
+
+	if e.UserData != nil {
+		d, err := fi.ResourceAsBytes(e.UserData)
+		if err != nil {
+			return fmt.Errorf("Error retrieving droplet from resource bytes: %w", err)
+		}
+		if d != nil {
+			tf.UserData, err = t.AddFileBytes("digitalocean_droplet", fi.ValueOf(e.Name), "user_data", d, false)
+			if err != nil {
+				return fmt.Errorf("Error adding user data bytes to terraform resource: %w", err)
+			}
+		}
+	}
+
+	return t.RenderResource("digitalocean_droplet", *e.Name, tf)
 }

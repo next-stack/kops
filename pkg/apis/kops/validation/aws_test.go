@@ -17,20 +17,33 @@ limitations under the License.
 package validation
 
 import (
+	"errors"
 	"testing"
+	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/kops/cloudmock/aws/mockec2"
 
-	"k8s.io/kops/upup/pkg/fi"
 	"k8s.io/kops/upup/pkg/fi/cloudup/awsup"
 
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/kops/pkg/apis/kops"
 )
 
-func TestAWSValidateExternalCloudConfig(t *testing.T) {
+type emptyInstanceTypeRejectingCloud struct {
+	awsup.AWSCloud
+}
+
+func (c *emptyInstanceTypeRejectingCloud) DescribeInstanceType(instanceType string) (*ec2types.InstanceTypeInfo, error) {
+	if instanceType == "" {
+		return nil, errors.New("instance type is empty")
+	}
+	return c.AWSCloud.DescribeInstanceType(instanceType)
+}
+
+func TestAWSValidateEBSCSIDriver(t *testing.T) {
 	grid := []struct {
 		Input          kops.ClusterSpec
 		ExpectedErrors []string
@@ -38,20 +51,24 @@ func TestAWSValidateExternalCloudConfig(t *testing.T) {
 		{
 			Input: kops.ClusterSpec{
 				ExternalCloudControllerManager: &kops.CloudControllerManagerConfig{},
-				CloudConfig: &kops.CloudConfiguration{
-					AWSEBSCSIDriver: &kops.AWSEBSCSIDriver{
-						Enabled: fi.Bool(false),
+				CloudProvider: kops.CloudProviderSpec{
+					AWS: &kops.AWSSpec{
+						EBSCSIDriver: &kops.EBSCSIDriverSpec{
+							Enabled: new(false),
+						},
 					},
 				},
 			},
-			ExpectedErrors: []string{"Forbidden::spec.externalCloudControllerManager"},
+			ExpectedErrors: []string{"Forbidden::spec.cloudProvider.aws.ebsCSIDriver.enabled"},
 		},
 		{
 			Input: kops.ClusterSpec{
 				ExternalCloudControllerManager: &kops.CloudControllerManagerConfig{},
-				CloudConfig: &kops.CloudConfiguration{
-					AWSEBSCSIDriver: &kops.AWSEBSCSIDriver{
-						Enabled: fi.Bool(true),
+				CloudProvider: kops.CloudProviderSpec{
+					AWS: &kops.AWSSpec{
+						EBSCSIDriver: &kops.EBSCSIDriverSpec{
+							Enabled: new(true),
+						},
 					},
 				},
 			},
@@ -59,6 +76,9 @@ func TestAWSValidateExternalCloudConfig(t *testing.T) {
 		{
 			Input: kops.ClusterSpec{
 				ExternalCloudControllerManager: &kops.CloudControllerManagerConfig{},
+				CloudProvider: kops.CloudProviderSpec{
+					AWS: &kops.AWSSpec{},
+				},
 				KubeControllerManager: &kops.KubeControllerManagerConfig{
 					ExternalCloudVolumePlugin: "aws",
 				},
@@ -66,11 +86,11 @@ func TestAWSValidateExternalCloudConfig(t *testing.T) {
 		},
 	}
 	for _, g := range grid {
-		g.Input.KubernetesVersion = "1.21.0"
+		g.Input.KubernetesVersion = "1.35.0"
 		cluster := &kops.Cluster{
 			Spec: g.Input,
 		}
-		errs := awsValidateExternalCloudControllerManager(cluster)
+		errs := awsValidateEBSCSIDriver(cluster)
 
 		testErrors(t, g.Input, errs, g.ExpectedErrors)
 	}
@@ -150,7 +170,7 @@ func TestValidateInstanceGroupSpec(t *testing.T) {
 		},
 		{
 			Input: kops.InstanceGroupSpec{
-				SpotDurationInMinutes: fi.Int64(55),
+				SpotDurationInMinutes: new(int64(55)),
 			},
 			ExpectedErrors: []string{
 				"Unsupported value::test-nodes.spec.spotDurationInMinutes",
@@ -158,7 +178,7 @@ func TestValidateInstanceGroupSpec(t *testing.T) {
 		},
 		{
 			Input: kops.InstanceGroupSpec{
-				SpotDurationInMinutes: fi.Int64(380),
+				SpotDurationInMinutes: new(int64(380)),
 			},
 			ExpectedErrors: []string{
 				"Unsupported value::test-nodes.spec.spotDurationInMinutes",
@@ -166,7 +186,7 @@ func TestValidateInstanceGroupSpec(t *testing.T) {
 		},
 		{
 			Input: kops.InstanceGroupSpec{
-				SpotDurationInMinutes: fi.Int64(125),
+				SpotDurationInMinutes: new(int64(125)),
 			},
 			ExpectedErrors: []string{
 				"Unsupported value::test-nodes.spec.spotDurationInMinutes",
@@ -174,13 +194,13 @@ func TestValidateInstanceGroupSpec(t *testing.T) {
 		},
 		{
 			Input: kops.InstanceGroupSpec{
-				SpotDurationInMinutes: fi.Int64(120),
+				SpotDurationInMinutes: new(int64(120)),
 			},
 			ExpectedErrors: []string{},
 		},
 		{
 			Input: kops.InstanceGroupSpec{
-				InstanceInterruptionBehavior: fi.String("invalidValue"),
+				InstanceInterruptionBehavior: new("invalidValue"),
 			},
 			ExpectedErrors: []string{
 				"Unsupported value::test-nodes.spec.instanceInterruptionBehavior",
@@ -188,19 +208,39 @@ func TestValidateInstanceGroupSpec(t *testing.T) {
 		},
 		{
 			Input: kops.InstanceGroupSpec{
-				InstanceInterruptionBehavior: fi.String("terminate"),
+				InstanceInterruptionBehavior: new("terminate"),
 			},
 			ExpectedErrors: []string{},
 		},
 		{
 			Input: kops.InstanceGroupSpec{
-				InstanceInterruptionBehavior: fi.String("hibernate"),
+				InstanceInterruptionBehavior: new("hibernate"),
 			},
 			ExpectedErrors: []string{},
 		},
 		{
 			Input: kops.InstanceGroupSpec{
-				InstanceInterruptionBehavior: fi.String("stop"),
+				InstanceInterruptionBehavior: new("stop"),
+			},
+			ExpectedErrors: []string{},
+		},
+		{
+			Input: kops.InstanceGroupSpec{
+				MaxInstanceLifetime: &metav1.Duration{Duration: time.Duration(100 * float64(time.Second))},
+			},
+			ExpectedErrors: []string{
+				"Invalid value::test-nodes.spec.maxInstanceLifetime",
+			},
+		},
+		{
+			Input: kops.InstanceGroupSpec{
+				MaxInstanceLifetime: &metav1.Duration{Duration: time.Duration(86400 * float64(time.Second))},
+			},
+			ExpectedErrors: []string{},
+		},
+		{
+			Input: kops.InstanceGroupSpec{
+				MaxInstanceLifetime: &metav1.Duration{Duration: time.Duration(0 * float64(time.Second))},
 			},
 			ExpectedErrors: []string{},
 		},
@@ -209,18 +249,18 @@ func TestValidateInstanceGroupSpec(t *testing.T) {
 	mockEC2 := &mockec2.MockEC2{}
 	cloud.MockEC2 = mockEC2
 
-	mockEC2.Images = append(mockEC2.Images, &ec2.Image{
+	mockEC2.Images = append(mockEC2.Images, &ec2types.Image{
 		CreationDate:   aws.String("2016-10-21T20:07:19.000Z"),
 		ImageId:        aws.String("ami-073c8c0760395aab8"),
-		Name:           aws.String("focal"),
+		Name:           aws.String("resolute"),
 		OwnerId:        aws.String(awsup.WellKnownAccountUbuntu),
 		RootDeviceName: aws.String("/dev/xvda"),
-		Architecture:   aws.String("x86_64"),
+		Architecture:   ec2types.ArchitectureValuesX8664,
 	})
 
 	for _, g := range grid {
 		ig := &kops.InstanceGroup{
-			ObjectMeta: v1.ObjectMeta{
+			ObjectMeta: metav1.ObjectMeta{
 				Name: "test-nodes",
 			},
 			Spec: g.Input,
@@ -300,7 +340,7 @@ func TestMixedInstancePolicies(t *testing.T) {
 						"c4.large",
 						"c5.large",
 					},
-					OnDemandAboveBase: fi.Int64(231),
+					OnDemandAboveBase: new(int64(231)),
 				},
 			},
 			ExpectedErrors: []string{"Invalid value::spec.mixedInstancesPolicy.onDemandAboveBase"},
@@ -310,18 +350,18 @@ func TestMixedInstancePolicies(t *testing.T) {
 	mockEC2 := &mockec2.MockEC2{}
 	cloud.MockEC2 = mockEC2
 
-	mockEC2.Images = append(mockEC2.Images, &ec2.Image{
+	mockEC2.Images = append(mockEC2.Images, &ec2types.Image{
 		CreationDate:   aws.String("2016-10-21T20:07:19.000Z"),
 		ImageId:        aws.String("ami-073c8c0760395aab8"),
-		Name:           aws.String("focal"),
+		Name:           aws.String("resolute"),
 		OwnerId:        aws.String(awsup.WellKnownAccountUbuntu),
 		RootDeviceName: aws.String("/dev/xvda"),
-		Architecture:   aws.String("x86_64"),
+		Architecture:   ec2types.ArchitectureValuesX8664,
 	})
 
 	for _, g := range grid {
 		ig := &kops.InstanceGroup{
-			ObjectMeta: v1.ObjectMeta{
+			ObjectMeta: metav1.ObjectMeta{
 				Name: "test-nodes",
 			},
 			Spec: g.Input,
@@ -330,7 +370,89 @@ func TestMixedInstancePolicies(t *testing.T) {
 
 		testErrors(t, g.Input, errs, g.ExpectedErrors)
 	}
+}
 
+func TestKarpenterMixedInstancesPolicyValidation(t *testing.T) {
+	baseCloud := awsup.BuildMockAWSCloud("us-east-1", "abc")
+	mockEC2 := &mockec2.MockEC2{}
+	baseCloud.MockEC2 = mockEC2
+	mockEC2.Images = append(mockEC2.Images, &ec2types.Image{
+		ImageId:      aws.String("ami-073c8c0760395aab8"),
+		Architecture: ec2types.ArchitectureValuesX8664,
+	})
+	cloud := &emptyInstanceTypeRejectingCloud{AWSCloud: baseCloud}
+
+	grid := []struct {
+		desc        string
+		machineType string
+		spec        *kops.MixedInstancesPolicySpec
+		expected    []string
+	}{
+		{
+			desc: "instance requirements",
+			spec: &kops.MixedInstancesPolicySpec{
+				InstanceRequirements: &kops.InstanceRequirementsSpec{},
+			},
+		},
+		{
+			desc: "capacity types",
+			spec: &kops.MixedInstancesPolicySpec{
+				OnDemandAboveBase: new(int64(50)),
+			},
+		},
+		{
+			desc: "instance list",
+			spec: &kops.MixedInstancesPolicySpec{
+				Instances: []string{"m5.large"},
+			},
+		},
+		{
+			desc:        "heterogeneous instance list with machine type",
+			machineType: "g4dn.xlarge",
+			spec: &kops.MixedInstancesPolicySpec{
+				Instances:            []string{"m5.large"},
+				InstanceRequirements: &kops.InstanceRequirementsSpec{},
+			},
+		},
+		{
+			desc: "instance requirements do not suppress instance validation",
+			spec: &kops.MixedInstancesPolicySpec{
+				Instances:            []string{"t2.invalidType"},
+				InstanceRequirements: &kops.InstanceRequirementsSpec{},
+			},
+			expected: []string{"Invalid value::spec.mixedInstancesPolicy.instances[0]"},
+		},
+		{
+			desc:        "comma-separated machine types",
+			machineType: "m5.large,m5.xlarge",
+			spec: &kops.MixedInstancesPolicySpec{
+				InstanceRequirements: &kops.InstanceRequirementsSpec{},
+			},
+		},
+		{
+			desc: "heterogeneous instance list without machine type",
+			spec: &kops.MixedInstancesPolicySpec{
+				Instances:            []string{"g4dn.xlarge", "m5.large"},
+				InstanceRequirements: &kops.InstanceRequirementsSpec{},
+			},
+		},
+	}
+
+	for _, g := range grid {
+		t.Run(g.desc, func(t *testing.T) {
+			ig := &kops.InstanceGroup{
+				Spec: kops.InstanceGroupSpec{
+					Manager:              kops.InstanceManagerKarpenter,
+					Image:                "ami-073c8c0760395aab8",
+					MachineType:          g.machineType,
+					MixedInstancesPolicy: g.spec,
+				},
+			}
+
+			errs := awsValidateInstanceGroup(ig, cloud)
+			testErrors(t, g.desc, errs, g.expected)
+		})
+	}
 }
 
 func TestInstanceMetadataOptions(t *testing.T) {
@@ -339,13 +461,13 @@ func TestInstanceMetadataOptions(t *testing.T) {
 	mockEC2 := &mockec2.MockEC2{}
 	cloud.MockEC2 = mockEC2
 
-	mockEC2.Images = append(mockEC2.Images, &ec2.Image{
+	mockEC2.Images = append(mockEC2.Images, &ec2types.Image{
 		CreationDate:   aws.String("2016-10-21T20:07:19.000Z"),
 		ImageId:        aws.String("ami-073c8c0760395aab8"),
-		Name:           aws.String("focal"),
+		Name:           aws.String("resolute"),
 		OwnerId:        aws.String(awsup.WellKnownAccountUbuntu),
 		RootDeviceName: aws.String("/dev/xvda"),
-		Architecture:   aws.String("x86_64"),
+		Architecture:   ec2types.ArchitectureValuesX8664,
 	})
 
 	tests := []struct {
@@ -354,14 +476,14 @@ func TestInstanceMetadataOptions(t *testing.T) {
 	}{
 		{
 			ig: &kops.InstanceGroup{
-				ObjectMeta: v1.ObjectMeta{
+				ObjectMeta: metav1.ObjectMeta{
 					Name: "some-ig",
 				},
 				Spec: kops.InstanceGroupSpec{
 					Role: "Node",
 					InstanceMetadata: &kops.InstanceMetadataOptions{
-						HTTPPutResponseHopLimit: fi.Int64(1),
-						HTTPTokens:              fi.String("abc"),
+						HTTPPutResponseHopLimit: new(int64(1)),
+						HTTPTokens:              new("abc"),
 					},
 					MachineType: "t3.medium",
 				},
@@ -370,14 +492,14 @@ func TestInstanceMetadataOptions(t *testing.T) {
 		},
 		{
 			ig: &kops.InstanceGroup{
-				ObjectMeta: v1.ObjectMeta{
+				ObjectMeta: metav1.ObjectMeta{
 					Name: "some-ig",
 				},
 				Spec: kops.InstanceGroupSpec{
 					Role: "Node",
 					InstanceMetadata: &kops.InstanceMetadataOptions{
-						HTTPPutResponseHopLimit: fi.Int64(-1),
-						HTTPTokens:              fi.String("required"),
+						HTTPPutResponseHopLimit: new(int64(-1)),
+						HTTPTokens:              new("required"),
 					},
 					MachineType: "t3.medium",
 				},
@@ -387,7 +509,7 @@ func TestInstanceMetadataOptions(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		errs := ValidateInstanceGroup(test.ig, cloud)
+		errs := ValidateInstanceGroup(test.ig, cloud, true)
 		testErrors(t, test.ig.ObjectMeta.Name, errs, test.expected)
 	}
 }
@@ -421,7 +543,7 @@ func TestLoadBalancerSubnets(t *testing.T) {
 			lbSubnets: []kops.LoadBalancerSubnetSpec{
 				{
 					Name:               "a",
-					PrivateIPv4Address: fi.String("10.0.0.10"),
+					PrivateIPv4Address: new("10.0.0.10"),
 					AllocationID:       nil,
 				},
 				{
@@ -458,7 +580,7 @@ func TestLoadBalancerSubnets(t *testing.T) {
 			lbSubnets: []kops.LoadBalancerSubnetSpec{
 				{
 					Name:               "a",
-					PrivateIPv4Address: fi.String(""),
+					PrivateIPv4Address: new(""),
 					AllocationID:       nil,
 				},
 			},
@@ -470,7 +592,7 @@ func TestLoadBalancerSubnets(t *testing.T) {
 				{
 					Name:               "a",
 					PrivateIPv4Address: nil,
-					AllocationID:       fi.String(""),
+					AllocationID:       new(""),
 				},
 			},
 			expected: []string{"Required value::spec.api.loadBalancer.subnets[0].allocationID"},
@@ -480,7 +602,7 @@ func TestLoadBalancerSubnets(t *testing.T) {
 			lbSubnets: []kops.LoadBalancerSubnetSpec{
 				{
 					Name:               "a",
-					PrivateIPv4Address: fi.String("invalidip"),
+					PrivateIPv4Address: new("invalidip"),
 					AllocationID:       nil,
 				},
 			},
@@ -491,56 +613,56 @@ func TestLoadBalancerSubnets(t *testing.T) {
 			lbSubnets: []kops.LoadBalancerSubnetSpec{
 				{
 					Name:               "a",
-					PrivateIPv4Address: fi.String("11.0.0.10"),
+					PrivateIPv4Address: new("11.0.0.10"),
 					AllocationID:       nil,
 				},
 			},
 			expected: []string{"Invalid value::spec.api.loadBalancer.subnets[0].privateIPv4Address"},
 		},
 		{ // invalid class - with privateIPv4Address, no allocationID
-			class:          fi.String(string(kops.LoadBalancerClassClassic)),
+			class:          new(string(kops.LoadBalancerClassClassic)),
 			clusterSubnets: []string{"a", "b", "c"},
 			lbSubnets: []kops.LoadBalancerSubnetSpec{
 				{
 					Name:               "a",
-					PrivateIPv4Address: fi.String("10.0.0.10"),
+					PrivateIPv4Address: new("10.0.0.10"),
 					AllocationID:       nil,
 				},
 			},
 			expected: []string{"Forbidden::spec.api.loadBalancer.subnets[0].privateIPv4Address"},
 		},
 		{ // invalid class - no privateIPv4Address, with allocationID
-			class:          fi.String(string(kops.LoadBalancerClassClassic)),
+			class:          new(string(kops.LoadBalancerClassClassic)),
 			clusterSubnets: []string{"a", "b", "c"},
 			lbSubnets: []kops.LoadBalancerSubnetSpec{
 				{
 					Name:               "a",
 					PrivateIPv4Address: nil,
-					AllocationID:       fi.String("eipalloc-222ghi789"),
+					AllocationID:       new("eipalloc-222ghi789"),
 				},
 			},
 			expected: []string{"Forbidden::spec.api.loadBalancer.subnets[0].allocationID"},
 		},
 		{ // invalid type external for private IP
-			lbType:         fi.String(string(kops.LoadBalancerTypePublic)),
+			lbType:         new(string(kops.LoadBalancerTypePublic)),
 			clusterSubnets: []string{"a", "b", "c"},
 			lbSubnets: []kops.LoadBalancerSubnetSpec{
 				{
 					Name:               "a",
-					PrivateIPv4Address: fi.String("10.0.0.10"),
+					PrivateIPv4Address: new("10.0.0.10"),
 					AllocationID:       nil,
 				},
 			},
 			expected: []string{"Forbidden::spec.api.loadBalancer.subnets[0].privateIPv4Address"},
 		},
 		{ // invalid type Internal for public IP
-			lbType:         fi.String(string(kops.LoadBalancerTypeInternal)),
+			lbType:         new(string(kops.LoadBalancerTypeInternal)),
 			clusterSubnets: []string{"a", "b", "c"},
 			lbSubnets: []kops.LoadBalancerSubnetSpec{
 				{
 					Name:               "a",
 					PrivateIPv4Address: nil,
-					AllocationID:       fi.String("eipalloc-222ghi789"),
+					AllocationID:       new("eipalloc-222ghi789"),
 				},
 			},
 			expected: []string{"Forbidden::spec.api.loadBalancer.subnets[0].allocationID"},
@@ -550,11 +672,14 @@ func TestLoadBalancerSubnets(t *testing.T) {
 	for _, test := range tests {
 		cluster := kops.Cluster{
 			Spec: kops.ClusterSpec{
-				API: &kops.AccessSpec{
+				API: kops.APISpec{
 					LoadBalancer: &kops.LoadBalancerAccessSpec{
 						Class: kops.LoadBalancerClassNetwork,
 						Type:  kops.LoadBalancerTypeInternal,
 					},
+				},
+				CloudProvider: kops.CloudProviderSpec{
+					AWS: &kops.AWSSpec{},
 				},
 			},
 		}
@@ -565,13 +690,496 @@ func TestLoadBalancerSubnets(t *testing.T) {
 			cluster.Spec.API.LoadBalancer.Type = kops.LoadBalancerType(*test.lbType)
 		}
 		for _, s := range test.clusterSubnets {
-			cluster.Spec.Subnets = append(cluster.Spec.Subnets, kops.ClusterSubnetSpec{
+			cluster.Spec.Networking.Subnets = append(cluster.Spec.Networking.Subnets, kops.ClusterSubnetSpec{
 				Name: s,
 				CIDR: cidr,
 			})
 		}
 		cluster.Spec.API.LoadBalancer.Subnets = test.lbSubnets
-		errs := awsValidateCluster(&cluster)
+		errs := awsValidateCluster(&cluster, true)
 		testErrors(t, test, errs, test.expected)
+	}
+}
+
+func TestAPILoadBalancerClass(t *testing.T) {
+	tests := []struct {
+		class    kops.LoadBalancerClass
+		expected []string
+	}{
+		{ // Network is supported
+			class: kops.LoadBalancerClassNetwork,
+		},
+		{ // Classic was removed in kOps 1.37
+			class:    kops.LoadBalancerClassClassic,
+			expected: []string{"Forbidden::spec.api.loadBalancer.class"},
+		},
+		{ // unknown class
+			class:    kops.LoadBalancerClass("Foo"),
+			expected: []string{"Unsupported value::spec.api.loadBalancer.class"},
+		},
+	}
+
+	for _, test := range tests {
+		cluster := kops.Cluster{
+			Spec: kops.ClusterSpec{
+				API: kops.APISpec{
+					LoadBalancer: &kops.LoadBalancerAccessSpec{
+						Class: test.class,
+						Type:  kops.LoadBalancerTypePublic,
+					},
+				},
+				CloudProvider: kops.CloudProviderSpec{
+					AWS: &kops.AWSSpec{},
+				},
+			},
+		}
+		errs := awsValidateCluster(&cluster, true)
+		testErrors(t, test, errs, test.expected)
+	}
+}
+
+func TestAWSAuthentication(t *testing.T) {
+	tests := []struct {
+		backendMode      string
+		identityMappings []kops.AWSAuthenticationIdentityMappingSpec
+		expected         []string
+	}{
+		{ // valid
+			backendMode: "CRD",
+			identityMappings: []kops.AWSAuthenticationIdentityMappingSpec{
+				{
+					ARN:      "arn:aws:iam::123456789012:role/KopsExampleRole",
+					Username: "foo",
+				},
+				{
+					ARN:      "arn:aws:iam::123456789012:user/KopsExampleUser",
+					Username: "foo",
+				},
+			},
+		},
+		{ // valid, multiple backendModes
+			backendMode: "CRD,MountedFile",
+			identityMappings: []kops.AWSAuthenticationIdentityMappingSpec{
+				{
+					ARN:      "arn:aws:iam::123456789012:role/KopsExampleRole",
+					Username: "foo",
+				},
+				{
+					ARN:      "arn:aws:iam::123456789012:user/KopsExampleUser",
+					Username: "foo",
+				},
+			},
+		},
+		{ // forbidden backendMode
+			backendMode: "MountedFile",
+			identityMappings: []kops.AWSAuthenticationIdentityMappingSpec{
+				{
+					ARN:      "arn:aws:iam::123456789012:role/KopsExampleRole",
+					Username: "foo",
+				},
+			},
+			expected: []string{"Forbidden::spec.authentication.aws.backendMode"},
+		},
+		{ // invalid identity ARN
+			backendMode: "CRD",
+			identityMappings: []kops.AWSAuthenticationIdentityMappingSpec{
+				{
+					ARN:      "arn:aws:iam::123456789012:policy/KopsExampleRole",
+					Username: "foo",
+				},
+			},
+			expected: []string{"Invalid value::spec.authentication.aws.identityMappings[0].arn"},
+		},
+	}
+
+	for _, test := range tests {
+		cluster := kops.Cluster{
+			Spec: kops.ClusterSpec{
+				Authentication: &kops.AuthenticationSpec{
+					AWS: &kops.AWSAuthenticationSpec{
+						BackendMode:      test.backendMode,
+						IdentityMappings: test.identityMappings,
+					},
+				},
+				CloudProvider: kops.CloudProviderSpec{
+					AWS: &kops.AWSSpec{},
+				},
+			},
+		}
+		errs := awsValidateCluster(&cluster, true)
+		testErrors(t, test, errs, test.expected)
+	}
+}
+
+func TestAWSAdditionalRoutes(t *testing.T) {
+	tests := []struct {
+		name                   string
+		clusterCIDR            string
+		additionalClusterCIDRs []string
+		providerId             string
+		subnetType             kops.SubnetType
+		route                  []kops.RouteSpec
+		expected               []string
+	}{
+		{
+			name:        "valid pcx",
+			clusterCIDR: "100.64.0.0/10",
+			subnetType:  kops.SubnetTypePrivate,
+			route: []kops.RouteSpec{
+				{
+					CIDR:   "10.0.0.0/8",
+					Target: "pcx-abcdef",
+				},
+			},
+		},
+		{
+			name:        "valid instance",
+			clusterCIDR: "100.64.0.0/10",
+			subnetType:  kops.SubnetTypePrivate,
+			route: []kops.RouteSpec{
+				{
+					CIDR:   "10.0.0.0/8",
+					Target: "i-abcdef",
+				},
+			},
+		},
+		{
+			name:        "valid nat",
+			clusterCIDR: "100.64.0.0/10",
+			subnetType:  kops.SubnetTypePrivate,
+			route: []kops.RouteSpec{
+				{
+					CIDR:   "10.0.0.0/8",
+					Target: "nat-abcdef",
+				},
+			},
+		},
+		{
+			name:        "valid transit gateway",
+			clusterCIDR: "100.64.0.0/10",
+			subnetType:  kops.SubnetTypePrivate,
+			route: []kops.RouteSpec{
+				{
+					CIDR:   "10.0.0.0/8",
+					Target: "tgw-abcdef",
+				},
+			},
+		},
+		{
+			name:        "valid internet gateway",
+			clusterCIDR: "100.64.0.0/10",
+			subnetType:  kops.SubnetTypePrivate,
+			route: []kops.RouteSpec{
+				{
+					CIDR:   "10.0.0.0/8",
+					Target: "igw-abcdef",
+				},
+			},
+		},
+		{
+			name:        "valid egress only internet gateway",
+			clusterCIDR: "100.64.0.0/10",
+			subnetType:  kops.SubnetTypePrivate,
+			route: []kops.RouteSpec{
+				{
+					CIDR:   "10.0.0.0/8",
+					Target: "eigw-abcdef",
+				},
+			},
+		},
+		{
+			name:        "bad cluster cidr",
+			clusterCIDR: "not cidr",
+			subnetType:  kops.SubnetTypePrivate,
+			route: []kops.RouteSpec{
+				{
+					CIDR:   "10.0.0.0/8",
+					Target: "pcx-abcdef",
+				},
+			},
+			expected: []string{"Invalid value::spec.networking.networkCIDR"},
+		},
+		{
+			name:        "bad cidr",
+			clusterCIDR: "100.64.0.0/10",
+			subnetType:  kops.SubnetTypePrivate,
+			route: []kops.RouteSpec{
+				{
+					CIDR:   "bad cidr",
+					Target: "pcx-abcdef",
+				},
+			},
+			expected: []string{"Invalid value::spec.networking.subnets[0].additionalRoutes[0].cidr"},
+		},
+		{
+			name:        "bad target",
+			clusterCIDR: "100.64.0.0/10",
+			subnetType:  kops.SubnetTypePrivate,
+			route: []kops.RouteSpec{
+				{
+					CIDR:   "10.0.0.0/8",
+					Target: "unknown-abcdef",
+				},
+			},
+			expected: []string{"Invalid value::spec.networking.subnets[0].additionalRoutes[0].target"},
+		},
+		{
+			name:        "target more specific",
+			clusterCIDR: "100.64.0.0/10",
+			subnetType:  kops.SubnetTypePrivate,
+			route: []kops.RouteSpec{
+				{
+					CIDR:   "100.64.1.0/24",
+					Target: "pcx-abcdef",
+				},
+			},
+			expected: []string{"Forbidden::spec.networking.subnets[0].additionalRoutes[0].target"},
+		},
+		{
+			name:                   "target more specific additionalCIDR",
+			clusterCIDR:            "100.64.0.0/16",
+			additionalClusterCIDRs: []string{"100.66.0.0/16", "100.67.0.0/16"},
+			subnetType:             kops.SubnetTypePrivate,
+			route: []kops.RouteSpec{
+				{
+					CIDR:   "100.66.2.0/24",
+					Target: "pcx-abcdef",
+				},
+			},
+			expected: []string{"Forbidden::spec.networking.subnets[0].additionalRoutes[0].target"},
+		},
+		{
+			name:        "duplicates cidr",
+			clusterCIDR: "100.64.0.0/10",
+			subnetType:  kops.SubnetTypePrivate,
+			route: []kops.RouteSpec{
+				{
+					CIDR:   "10.0.0.0/8",
+					Target: "pcx-abcdef",
+				},
+				{
+					CIDR:   "10.0.0.0/8",
+					Target: "tgw-abcdef",
+				},
+			},
+			expected: []string{"Duplicate value::spec.networking.subnets[0].additionalRoutes[1].cidr"},
+		},
+		{
+			name:        "shared subnet",
+			clusterCIDR: "100.64.0.0/10",
+			subnetType:  kops.SubnetTypePrivate,
+			providerId:  "123456",
+			route: []kops.RouteSpec{
+				{
+					CIDR:   "10.0.0.0/8",
+					Target: "pcx-abcdef",
+				},
+			},
+			expected: []string{"Forbidden::spec.networking.subnets[0].additionalRoutes"},
+		},
+		{
+			name:        "not a private subnet",
+			clusterCIDR: "100.64.0.0/10",
+			subnetType:  kops.SubnetTypePublic,
+			route: []kops.RouteSpec{
+				{
+					CIDR:   "10.0.0.0/8",
+					Target: "pcx-abcdef",
+				},
+			},
+			expected: []string{"Forbidden::spec.networking.subnets[0].additionalRoutes"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cluster := kops.Cluster{
+				Spec: kops.ClusterSpec{
+					CloudProvider: kops.CloudProviderSpec{
+						AWS: &kops.AWSSpec{},
+					},
+					Networking: kops.NetworkingSpec{
+						NetworkCIDR:            test.clusterCIDR,
+						AdditionalNetworkCIDRs: test.additionalClusterCIDRs,
+						Subnets: []kops.ClusterSubnetSpec{
+							{
+								Name:             "us-east-1a",
+								ID:               test.providerId,
+								Type:             test.subnetType,
+								AdditionalRoutes: test.route,
+							},
+						},
+					},
+				},
+			}
+			errs := validateNetworking(&cluster, &cluster.Spec.Networking, field.NewPath("spec", "networking"), false, &cloudProviderConstraints{})
+			testErrors(t, test, errs, test.expected)
+		})
+	}
+}
+
+func TestAWSValidateS3FileRepository(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		region         string
+		fileRepository string
+		expectedErrors []string
+	}{
+		{
+			name:           "commercial partition",
+			region:         "us-east-1",
+			fileRepository: "s3://example-k8s-assets/kops",
+		},
+		{
+			name:           "GovCloud partition",
+			region:         "us-gov-west-1",
+			fileRepository: "s3://example-k8s-assets/kops",
+		},
+		{
+			name:           "China partition",
+			region:         "cn-north-1",
+			fileRepository: "s3://example-k8s-assets/kops",
+			expectedErrors: []string{"Forbidden::spec.assets.fileRepository"},
+		},
+		{
+			name:           "ISO partition",
+			region:         "us-iso-east-1",
+			fileRepository: "s3://example-k8s-assets/kops",
+			expectedErrors: []string{"Forbidden::spec.assets.fileRepository"},
+		},
+		{
+			name:           "HTTPS repository in ISO partition",
+			region:         "us-iso-east-1",
+			fileRepository: "https://example.com/kops",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fileRepository := tc.fileRepository
+			cluster := &kops.Cluster{
+				Spec: kops.ClusterSpec{
+					CloudProvider: kops.CloudProviderSpec{AWS: &kops.AWSSpec{}},
+					Assets:        &kops.AssetsSpec{FileRepository: &fileRepository},
+					Networking: kops.NetworkingSpec{
+						Subnets: []kops.ClusterSubnetSpec{{Name: "subnet", Zone: tc.region + "a"}},
+					},
+				},
+			}
+
+			errs := awsValidateCluster(cluster, false)
+			testErrors(t, tc.name, errs, tc.expectedErrors)
+		})
+	}
+}
+
+func TestAWSValidateNLBSecurityGroupMode(t *testing.T) {
+	grid := []struct {
+		Input          kops.ClusterSpec
+		ExpectedErrors []string
+	}{
+		{
+			Input: kops.ClusterSpec{
+				CloudProvider: kops.CloudProviderSpec{
+					AWS: &kops.AWSSpec{
+						NLBSecurityGroupMode: new("Managed"),
+					},
+				},
+			},
+		},
+		{
+			Input: kops.ClusterSpec{
+				CloudProvider: kops.CloudProviderSpec{
+					AWS: &kops.AWSSpec{
+						NLBSecurityGroupMode: new(""),
+					},
+				},
+			},
+			ExpectedErrors: []string{"Unsupported value::spec.cloudProvider.aws.nlbSecurityGroupMode"},
+		},
+		{
+			Input: kops.ClusterSpec{
+				CloudProvider: kops.CloudProviderSpec{
+					AWS: &kops.AWSSpec{},
+				},
+			},
+		},
+		{
+			Input: kops.ClusterSpec{
+				CloudProvider: kops.CloudProviderSpec{
+					AWS: &kops.AWSSpec{
+						NLBSecurityGroupMode: new("Invalid"),
+					},
+				},
+			},
+			ExpectedErrors: []string{"Unsupported value::spec.cloudProvider.aws.nlbSecurityGroupMode"},
+		},
+		{
+			Input: kops.ClusterSpec{
+				CloudProvider: kops.CloudProviderSpec{
+					AWS: &kops.AWSSpec{
+						NLBSecurityGroupMode: new("managed"),
+					},
+				},
+			},
+			ExpectedErrors: []string{"Unsupported value::spec.cloudProvider.aws.nlbSecurityGroupMode"},
+		},
+	}
+	for _, g := range grid {
+		cluster := &kops.Cluster{Spec: g.Input}
+		errs := awsValidateNLBSecurityGroupMode(cluster)
+		testErrors(t, g.Input, errs, g.ExpectedErrors)
+	}
+}
+
+func TestAWSValidateUseIPBasedNodeNames(t *testing.T) {
+	grid := []struct {
+		Input          kops.ClusterSpec
+		ExpectedErrors []string
+	}{
+		{
+			Input: kops.ClusterSpec{
+				CloudProvider: kops.CloudProviderSpec{
+					AWS: &kops.AWSSpec{},
+				},
+			},
+		},
+		{
+			Input: kops.ClusterSpec{
+				CloudProvider: kops.CloudProviderSpec{
+					AWS: &kops.AWSSpec{
+						UseIPBasedNodeNames: new(true),
+					},
+				},
+			},
+		},
+		{
+			Input: kops.ClusterSpec{
+				CloudProvider: kops.CloudProviderSpec{
+					AWS: &kops.AWSSpec{
+						UseIPBasedNodeNames: new(true),
+					},
+				},
+				Networking: kops.NetworkingSpec{
+					NonMasqueradeCIDR: "::/0",
+				},
+			},
+			ExpectedErrors: []string{"Forbidden::spec.cloudProvider.aws.useIPBasedNodeNames"},
+		},
+		{
+			Input: kops.ClusterSpec{
+				CloudProvider: kops.CloudProviderSpec{
+					AWS: &kops.AWSSpec{
+						UseIPBasedNodeNames: new(false),
+					},
+				},
+				Networking: kops.NetworkingSpec{
+					NonMasqueradeCIDR: "::/0",
+				},
+			},
+		},
+	}
+	for _, g := range grid {
+		cluster := &kops.Cluster{Spec: g.Input}
+		errs := awsValidateUseIPBasedNodeNames(cluster)
+		testErrors(t, g.Input, errs, g.ExpectedErrors)
 	}
 }

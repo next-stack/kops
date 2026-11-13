@@ -22,7 +22,7 @@ import (
 	"fmt"
 	"io"
 
-	"k8s.io/kops/pkg/assets"
+	"k8s.io/kops/pkg/assets/assetcopy"
 	"k8s.io/kops/pkg/commands/commandutils"
 	"k8s.io/kops/pkg/pretty"
 	"k8s.io/kubectl/pkg/util/i18n"
@@ -91,7 +91,7 @@ func NewCmdGetAssets(f *util.Factory, out io.Writer, getOptions *GetOptions) *co
 		Args:              rootCommand.clusterNameArgs(&options.ClusterName),
 		ValidArgsFunction: commandutils.CompleteClusterName(f, true, false),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return RunGetAssets(context.TODO(), f, out, &options)
+			return RunGetAssets(cmd.Context(), f, out, &options)
 		},
 	}
 
@@ -102,9 +102,11 @@ func NewCmdGetAssets(f *util.Factory, out io.Writer, getOptions *GetOptions) *co
 
 func RunGetAssets(ctx context.Context, f *util.Factory, out io.Writer, options *GetAssetsOptions) error {
 	updateClusterResults, err := RunUpdateCluster(ctx, f, out, &UpdateClusterOptions{
-		Target:      cloudup.TargetDryRun,
-		GetAssets:   true,
-		ClusterName: options.ClusterName,
+		CoreUpdateClusterOptions: CoreUpdateClusterOptions{
+			Target:      cloudup.TargetDryRun,
+			GetAssets:   true,
+			ClusterName: options.ClusterName,
+		},
 	})
 	if err != nil {
 		return err
@@ -132,7 +134,7 @@ func RunGetAssets(ctx context.Context, f *util.Factory, out io.Writer, options *
 		file := File{
 			Canonical: fileAsset.CanonicalURL.String(),
 			Download:  fileAsset.DownloadURL.String(),
-			SHA:       fileAsset.SHAValue,
+			SHA:       fileAsset.SHAValue.Hex(),
 		}
 		if !seen[file.Canonical] {
 			result.Files = append(result.Files, &file)
@@ -141,7 +143,7 @@ func RunGetAssets(ctx context.Context, f *util.Factory, out io.Writer, options *
 	}
 
 	if options.Copy {
-		err := assets.Copy(updateClusterResults.ImageAssets, updateClusterResults.FileAssets, updateClusterResults.Cluster)
+		err := assetcopy.Copy(updateClusterResults.ImageAssets, updateClusterResults.FileAssets, f.VFSContext(), updateClusterResults.Cluster)
 		if err != nil {
 			return err
 		}

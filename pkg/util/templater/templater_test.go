@@ -17,7 +17,6 @@ limitations under the License.
 package templater
 
 import (
-	"io/ioutil"
 	"os"
 	"testing"
 
@@ -98,12 +97,12 @@ func TestRenderChannelFunctions(t *testing.T) {
 		{
 			Context:  map[string]interface{}{},
 			Template: `{{ ChannelRecommendedImage "aws" "1.19.2" "amd64" }}`,
-			Expected: "099720109477/ubuntu/images/hvm-ssd/ubuntu-focal-20.04-amd64-server-20210315",
+			Expected: "099720109477/ubuntu/images/hvm-ssd-gp3/ubuntu-resolute-26.04-amd64-server-20210315",
 		},
 		{
 			Context:  map[string]interface{}{},
-			Template: `{{ ChannelRecommendedImage "aws" "1.19.2" "arm64" }}`,
-			Expected: "099720109477/ubuntu/images/hvm-ssd/ubuntu-focal-20.04-arm64-server-20210315",
+			Template: `{{ ChannelRecommendedImage "aws" "1.20.2" "arm64" }}`,
+			Expected: "099720109477/ubuntu/images/hvm-ssd-gp3/ubuntu-resolute-26.04-arm64-server-20210315",
 		},
 	}
 	makeRenderTests(t, cases)
@@ -189,7 +188,7 @@ func TestAllowForMissingVars(t *testing.T) {
 
 func TestRenderIntegration(t *testing.T) {
 	var cases []renderTest
-	content, err := ioutil.ReadFile("integration_tests.yml")
+	content, err := os.ReadFile("integration_tests.yml")
 	if err != nil {
 		t.Fatalf("unable to load the integration tests, error: %s", err)
 	}
@@ -210,7 +209,6 @@ type renderTest struct {
 }
 
 func makeRenderTests(t *testing.T, tests []renderTest) {
-
 	sourcePath := "../../../tests/integration/channel/simple/channel.yaml"
 	s, _ := os.Getwd()
 

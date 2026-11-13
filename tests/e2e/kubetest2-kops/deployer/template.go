@@ -17,13 +17,14 @@ limitations under the License.
 package deployer
 
 import (
+	"fmt"
 	"os"
 	"path"
 	"strings"
 
-	"gopkg.in/yaml.v2"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/kubetest2/pkg/exec"
+	"sigs.k8s.io/yaml"
 )
 
 // renderTemplate will render the manifest template with the provided values,
@@ -39,7 +40,7 @@ func (d *deployer) renderTemplate(values map[string]interface{}) error {
 		return err
 	}
 	valuesPath := path.Join(dir, "values.yaml")
-	err = os.WriteFile(valuesPath, valuesBytes, 0644)
+	err = os.WriteFile(valuesPath, valuesBytes, 0o600)
 	if err != nil {
 		return err
 	}
@@ -70,15 +71,21 @@ func (d *deployer) renderTemplate(values map[string]interface{}) error {
 func (d *deployer) templateValues(zones []string, publicIP string) (map[string]interface{}, error) {
 	publicKey, err := os.ReadFile(d.SSHPublicKeyPath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error reading public key file: %q", err)
 	}
-	return map[string]interface{}{
+	values := map[string]interface{}{
 		"cloudProvider":     d.CloudProvider,
 		"clusterName":       d.ClusterName,
 		"kubernetesVersion": d.KubernetesVersion,
 		"publicIP":          publicIP,
 		"stateStore":        d.stateStore(),
+		"discoveryStore":    d.discoveryStore(),
 		"zones":             zones,
+		"region":            d.region,
 		"sshPublicKey":      string(publicKey),
-	}, nil
+	}
+	if d.GCPProject != "" {
+		values["project"] = d.GCPProject
+	}
+	return values, nil
 }
